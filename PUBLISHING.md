@@ -111,7 +111,7 @@ npm run typecheck && npm test && npm run docker:build
 
 ```bash
 npm run build
-npx privos-app bundle-ui --check
+npx -p @privos_ai/app-server privos-app bundle-ui --check
 ```
 
 `--check` runs the same build-and-budget validation the build node's `ui-build`
@@ -237,7 +237,7 @@ Failure states and who clears them:
 | State | Meaning | Cleared by |
 |---|---|---|
 | `PREFLIGHT_FAILED` | manifest, Dockerfile, or policy problem | publisher fixes and resubmits |
-| `PREFLIGHT_BLOCKED_INFRA` | build node unreachable / transfer failed | admin retries, no new upload |
+| `PREFLIGHT_BLOCKED_INFRA` | infrastructure only: build node unreachable / transfer failed | admin retries, no new upload |
 | `CHANGES_REQUESTED` | reviewer asked for changes | publisher resubmits — no new upload needed if the source is unchanged |
 | `IMAGE_SCAN_FAILED` | image built but failed its scan | admin, after the finding is resolved |
 | `REJECTED` | terminal for that version | new version |
@@ -252,13 +252,18 @@ from the **reviewed source**, pushes to the mesh registry
 carries `io.privos.manifestDigest` matching the canonical manifest digest
 exactly. Only then does the listing move to `PUBLISHED`.
 
-The build node only builds for creators on its
-`MARKETPLACE_BUILD_PUBLISHER_ALLOWLIST`; an empty allowlist blocks everyone.
+Marketplace publishing is open to enabled creators only. For anyone else the
+Portal refuses the source upload with `403 PUBLISHER_NOT_ENABLED` before it
+stores anything, so no version is created; `privos-app publish` (SDK 0.12.3 or
+later) prints the message and exits 2. The app can still run in your own
+workspace as a Standalone Relay app.
 
 ### Listing content gates
 
-The build blocks at `APPROVED_BUILD_PENDING` with `listing_content_incomplete`
-unless the listing already has all of:
+A first version is refused at version creation with
+`409 LISTING_CONTENT_INCOMPLETE`, and the build blocks at
+`APPROVED_BUILD_PENDING` with `listing_content_incomplete`, unless the listing
+already has all of:
 
 - `primaryCategoryId`
 - ≥ 3 `features`, ≥ 2 `useCases`
