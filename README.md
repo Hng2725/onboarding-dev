@@ -82,7 +82,7 @@ Hub over the Relay WebSocket instead of App Cluster mounting a socket. Direct HT
 trust source in this mode and always returns 403 (`DISPATCH_ASSERTION_INVALID`); every MCP
 dispatch rides the Relay connection with a mandatory Hub-signed assertion.
 
-### Pair, twice
+### Pair
 
 ```bash
 npm run pair     # or: pnpm pair
@@ -93,19 +93,22 @@ so the URL never lands in your shell history. It then announces `privos-app.json
 socket, which means no admin ever handles the manifest file: the app states what it wants, and an
 admin decides what it gets.
 
-Run it **twice**, because the two runs mean different things:
+One run does the whole flow (`pairAndAwaitApproval`, see `scripts/pair.ts`):
 
-1. The first run REGISTERS the app. The Hub stores the announced contract, grants nothing, and
-   reports `awaitingApproval`. No identity file is written and the app does not start — dispatch
-   trust belongs to the generation an approved permission ceiling creates, and there is nothing
-   to run until then. Approve the declared permissions in Hub Admin > Apps.
-2. Run it again with a fresh pairing URL from that app's own settings. The Hub re-hands the same
-   credentials plus its dispatch trust, the identity file is written, and **the app starts
-   automatically** — `pair` continues into `start:standalone` through whichever package manager
-   you invoked it with, so there is no second command to remember.
+1. It REGISTERS the app. The Hub stores the announced contract and grants nothing. The command
+   prints the Hub fingerprint (below) and keeps waiting.
+2. An admin approves the declared permissions in Hub Admin > Apps. The command polls with the same
+   pairing URL, so there is no second URL and no second run. (By default it gives up after 30
+   minutes.)
+3. On approval the Hub hands back its dispatch trust, the identity file is written, and **the app
+   starts automatically** — `pair` continues into `start` with `NODE_ENV=production` (what
+   `start:standalone` runs) through whichever package manager you invoked it with, so there is no
+   second command to remember.
 
 The identity file lands at `./privos-standalone-identity.json` (override with
-`PRIVOS_STANDALONE_IDENTITY_FILE`) at mode `0600`, and the Hub's fingerprint is printed:
+`PRIVOS_STANDALONE_IDENTITY_FILE`) at mode `0600`. While approval is pending, a separate owner-only
+`./privos-standalone-identity.pending.json` holds the registration and carries no dispatch trust.
+The Hub's fingerprint is printed at registration and again when the identity file is written:
 
 ```
 PrivOS Hub fingerprint: SHA256:<43-char base64url> — verify this out-of-band before trusting dispatch from this Hub.
@@ -115,8 +118,8 @@ PrivOS Hub fingerprint: SHA256:<43-char base64url> — verify this out-of-band b
 pairing URL (a phone call, a separately-verified chat, the operator's own documentation). The
 fingerprint is the same SSH-host-key-style trust-on-first-use model as `ssh` printing a host key:
 a compromised pairing URL could otherwise hand you a Hub that signs dispatch you'd wrongly trust.
-Because the second `pair` run starts the app for itself, verify the fingerprint the moment it is
-printed and stop the process if it does not match.
+Because `pair` starts the app for itself once approved, compare the fingerprint the moment it is
+printed, before the admin approves, and stop the process if it does not match.
 
 ### Identity file handling
 
@@ -133,7 +136,7 @@ mode — treat it like an SSH private key:
 
 ### Run
 
-The second `pair` run already started the app. Every later start — after a reboot, a redeploy, or
+The `pair` run already started the app. Every later start — after a reboot, a redeploy, or
 any ordinary restart — uses the identity file that pairing wrote, and needs no pairing URL:
 
 ```bash
