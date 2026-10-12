@@ -15,6 +15,11 @@ in one commit.
   longer required in the tool schemas. In `npm run dev` (unverified relay pairing) these three tools are
   refused for the same reason.
 
+### Changed
+
+- The manifest the app serves now carries the `ui` declaration (`ui.distDir`) that `privos-app.json` has had since
+  2.17.15, so the served manifest and the published one have the same canonical hash.
+
 ## [2.17.17] - 2026-09-15
 
 ### Changed

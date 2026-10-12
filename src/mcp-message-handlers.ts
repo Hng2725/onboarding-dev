@@ -23,7 +23,7 @@ import _pkg from '../privos-app.json';
 import { getAppIconDataUri } from './app-icon';
 import { createLicenseGuard } from './license';
 import { checkAgentBotCredential } from './agent-bot-credential-check';
-import { APP_OBJECT_STORE_TOOL, APP_DB_STORE_TOOL, APP_PLATFORM_TOOL_DEFINITIONS } from './app-platform-demo-tool-defs';
+import { APP_OBJECT_STORE_TOOL, APP_DB_STORE_TOOL } from './app-platform-demo-tool-defs';
 import { handleAppObjectStoreTool } from './app-objects-demo-tool';
 import { handleAppDbStoreTool } from './app-db-demo-tool';
 import { requireVerifiedActor } from './caller-room';
@@ -51,14 +51,6 @@ const UI_RESOURCE_URI = `ui://${pkg.name}/form.html`;
 const UI_APP_SLUG = new URL(UI_RESOURCE_URI).host;
 /** Sits beside {@link UI_RESOURCE_URI}, not under the `assets/` prefix — matches the SDK's own convention. */
 const ASSETS_MANIFEST_URI = `${UI_RESOURCE_URI.slice(0, UI_RESOURCE_URI.lastIndexOf('/') + 1)}assets-manifest.json`;
-
-/**
- * Embed origins this app declares, read straight from the published manifest so the runtime
- * advertisement and the marketplace listing can never disagree about what was requested.
- */
-const UI_DECLARED_CSP: Record<string, string[]> | undefined = (pkg.tools as any[] | undefined)?.find(
-	(tool) => tool?.ui?.resourceUri === UI_RESOURCE_URI,
-)?.ui?.csp;
 
 const appIcon = getAppIconDataUri();
 
