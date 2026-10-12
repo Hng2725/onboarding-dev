@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import type { VerifiedActor } from '@privos_ai/app-server';
 import { handleMcpMessage } from '../src/mcp-message-handlers';
+
+function callerIn(roomId: string): VerifiedActor {
+  return { userId: 'user-1', username: 'alice', roomId, claims: Object.freeze({}), provenance: 'user-token' };
+}
 
 describe('JSON-RPC handlers', () => {
   afterEach(() => {
@@ -19,33 +24,32 @@ describe('JSON-RPC handlers', () => {
   });
 
   it('validates hr_app_object_store arguments before ever calling the Hub', async () => {
-    const missingRoom = await handleMcpMessage('tools/call', 6, {
-      name: 'hr_app_object_store',
-      arguments: { action: 'put', roomId: '', dataBase64: 'aGk=', mediaType: 'text/plain' },
-    }).catch((err: Error) => err);
-    expect(missingRoom).toBeInstanceOf(Error);
-    expect((missingRoom as Error).message).toContain('roomId is required');
+    const missingData = await handleMcpMessage(
+      'tools/call',
+      6,
+      { name: 'hr_app_object_store', arguments: { action: 'put', mediaType: 'text/plain' } },
+      callerIn('room-1'),
+    ).catch((err: Error) => err);
+    expect(missingData).toBeInstanceOf(Error);
+    expect((missingData as Error).message).toContain('dataBase64 is required');
 
-    const missingDigest = await handleMcpMessage('tools/call', 7, {
-      name: 'hr_app_object_store',
-      arguments: { action: 'get', roomId: 'room-1' },
-    }).catch((err: Error) => err);
+    const missingDigest = await handleMcpMessage(
+      'tools/call',
+      7,
+      { name: 'hr_app_object_store', arguments: { action: 'get', roomId: 'room-1' } },
+      callerIn('room-1'),
+    ).catch((err: Error) => err);
     expect(missingDigest).toBeInstanceOf(Error);
     expect((missingDigest as Error).message).toContain('digest is required');
   });
 
   it('validates hr_app_db_store arguments before ever calling the Hub', async () => {
-    const missingRoom = await handleMcpMessage('tools/call', 8, {
-      name: 'hr_app_db_store',
-      arguments: { action: 'query', roomId: '' },
-    }).catch((err: Error) => err);
-    expect(missingRoom).toBeInstanceOf(Error);
-    expect((missingRoom as Error).message).toContain('roomId is required');
-
-    const missingLabel = await handleMcpMessage('tools/call', 9, {
-      name: 'hr_app_db_store',
-      arguments: { action: 'create', roomId: 'room-1' },
-    }).catch((err: Error) => err);
+    const missingLabel = await handleMcpMessage(
+      'tools/call',
+      9,
+      { name: 'hr_app_db_store', arguments: { action: 'create', roomId: 'room-1' } },
+      callerIn('room-1'),
+    ).catch((err: Error) => err);
     expect(missingLabel).toBeInstanceOf(Error);
     expect((missingLabel as Error).message).toContain('label is required');
   });
@@ -94,7 +98,7 @@ describe('JSON-RPC handlers', () => {
     process.env.PRIVOS_APP_LICENSE = '{"tier":"pro","state":"active"}';
     const result = await handleMcpMessage('tools/call', 3, {
       name: 'hr_bulk_export', arguments: { records: [{ id: 1 }] },
-    });
+    }, callerIn('room-1'));
     delete process.env.PRIVOS_APP_LICENSE;
     expect(JSON.parse(result.content[0].text).exported).toBe(1);
   });
