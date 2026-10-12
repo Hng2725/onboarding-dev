@@ -4,6 +4,22 @@ This project follows [Semantic Versioning](https://semver.org/). Each marketplac
 must equal `privos-app.json.version` and `package.json.version`; change both release notes and metadata
 in one commit.
 
+## [2.17.18] - 2026-10-13
+
+### Security
+
+- `hr_app_db_store`, `hr_app_object_store` and `hr_bulk_export` now refuse a call that carries no verified
+  caller identity. The two bot-credential tools take the room from the verified caller; a `roomId`
+  argument is optional and is rejected when it names any other room, so a caller in one room can no longer
+  read or write another room's app data through the app's own bot credential. The `roomId` input is no
+  longer required in the tool schemas. In `npm run dev` (unverified relay pairing) these three tools are
+  refused for the same reason.
+
+### Changed
+
+- The manifest the app serves now carries the `ui` declaration (`ui.distDir`) that `privos-app.json` has had since
+  2.17.15, so the served manifest and the published one have the same canonical hash.
+
 ## [2.17.17] - 2026-09-15
 
 ### Changed

@@ -8,7 +8,10 @@
  * tiny record. Runs with this app's own installation-bot credential via
  * `POST /api/v1/mcp-apps.tool-call` — see `app-platform-tool-call.ts`.
  */
+import type { VerifiedActor } from '@privos_ai/app-server';
+
 import { callAppPlatformTool } from './app-platform-tool-call';
+import { resolveCallerRoom } from './caller-room';
 
 const DEMO_COLLECTION = 'hr_demo_notes';
 const DEMO_SCHEMA_FIELDS = [
@@ -18,14 +21,17 @@ const DEMO_SCHEMA_FIELDS = [
 
 export interface AppDbStoreArgs {
 	action: 'registerCollection' | 'create' | 'query' | 'getSchema';
-	roomId: string;
+	/** Optional: when present it must equal the verified caller's room. */
+	roomId?: string;
 	label?: string;
 	note?: string;
 }
 
-export async function handleAppDbStoreTool(args: AppDbStoreArgs): Promise<Record<string, unknown>> {
-	const roomId = args.roomId?.trim();
-	if (!roomId) throw new Error('roomId is required');
+export async function handleAppDbStoreTool(
+	args: AppDbStoreArgs,
+	actor: VerifiedActor | undefined,
+): Promise<Record<string, unknown>> {
+	const roomId = resolveCallerRoom(actor, args.roomId);
 
 	if (args.action === 'registerCollection') {
 		try {

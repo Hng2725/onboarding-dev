@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "kind": "mcp-app",
   "name": "ai.privos.mcp-app-demo",
-  "version": "2.17.17",
+  "version": "2.17.18",
   "title": "PrivOS Demo MCP App",
   "description": "Reference PrivOS MCP app demonstrating HR workflows, scoped workspace APIs, AI and sandbox controls, and license-aware features.",
   "icon": "/public/icon.svg",
@@ -309,7 +309,8 @@
             ]
           },
           "roomId": {
-            "type": "string"
+            "type": "string",
+            "description": "Optional; must equal the room this call is made from (defaults to it)."
           },
           "dataBase64": {
             "type": "string"
@@ -322,8 +323,7 @@
           }
         },
         "required": [
-          "action",
-          "roomId"
+          "action"
         ]
       }
     },
@@ -344,7 +344,8 @@
             ]
           },
           "roomId": {
-            "type": "string"
+            "type": "string",
+            "description": "Optional; must equal the room this call is made from (defaults to it)."
           },
           "label": {
             "type": "string"
@@ -354,8 +355,7 @@
           }
         },
         "required": [
-          "action",
-          "roomId"
+          "action"
         ]
       }
     }
