@@ -26,6 +26,7 @@ import { checkAgentBotCredential } from './agent-bot-credential-check';
 import { APP_OBJECT_STORE_TOOL, APP_DB_STORE_TOOL, APP_PLATFORM_TOOL_DEFINITIONS } from './app-platform-demo-tool-defs';
 import { handleAppObjectStoreTool } from './app-objects-demo-tool';
 import { handleAppDbStoreTool } from './app-db-demo-tool';
+import { requireVerifiedActor } from './caller-room';
 const pkg = _pkg as Record<string, any>;
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const TOOL_NAME = 'hr_management_dashboard';
@@ -152,6 +153,7 @@ export async function handleMcpMessage(
 
 		case 'tools/call':
 			if (params?.name === BULK_EXPORT_TOOL) {
+				requireVerifiedActor(actor);
 				const records = Array.isArray(params?.arguments?.records) ? params.arguments.records : [];
 				const guard = createLicenseGuard();
 				guard.assert('bulk-export');
@@ -165,10 +167,10 @@ export async function handleMcpMessage(
 				return { content: [{ type: 'text', text: JSON.stringify(await checkAgentBotCredential()) }] };
 			}
 			if (params?.name === APP_OBJECT_STORE_TOOL) {
-				return { content: [{ type: 'text', text: JSON.stringify(await handleAppObjectStoreTool(params?.arguments || {})) }] };
+				return { content: [{ type: 'text', text: JSON.stringify(await handleAppObjectStoreTool(params?.arguments || {}, actor)) }] };
 			}
 			if (params?.name === APP_DB_STORE_TOOL) {
-				return { content: [{ type: 'text', text: JSON.stringify(await handleAppDbStoreTool(params?.arguments || {})) }] };
+				return { content: [{ type: 'text', text: JSON.stringify(await handleAppDbStoreTool(params?.arguments || {}, actor)) }] };
 			}
 			if (params?.name !== TOOL_NAME) {
 				throw new Error(`Unknown tool: ${params?.name || '<missing>'}`);

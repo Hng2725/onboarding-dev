@@ -22,12 +22,12 @@ export const APP_PLATFORM_TOOL_DEFINITIONS = [
 			type: 'object',
 			properties: {
 				action: { type: 'string', enum: ['put', 'head', 'get'] },
-				roomId: { type: 'string' },
+				roomId: { type: 'string', description: "Optional; must equal the room this call is made from (defaults to it)." },
 				dataBase64: { type: 'string' },
 				mediaType: { type: 'string' },
 				digest: { type: 'string' },
 			},
-			required: ['action', 'roomId'],
+			required: ['action'],
 		},
 	},
 	{
@@ -41,11 +41,11 @@ export const APP_PLATFORM_TOOL_DEFINITIONS = [
 			type: 'object',
 			properties: {
 				action: { type: 'string', enum: ['registerCollection', 'create', 'query', 'getSchema'] },
-				roomId: { type: 'string' },
+				roomId: { type: 'string', description: "Optional; must equal the room this call is made from (defaults to it)." },
 				label: { type: 'string' },
 				note: { type: 'string' },
 			},
-			required: ['action', 'roomId'],
+			required: ['action'],
 		},
 	},
 ] as const;

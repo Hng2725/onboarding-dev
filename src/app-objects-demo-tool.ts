@@ -16,11 +16,15 @@
  */
 import crypto from 'node:crypto';
 
+import type { VerifiedActor } from '@privos_ai/app-server';
+
 import { callAppPlatformTool } from './app-platform-tool-call';
+import { resolveCallerRoom } from './caller-room';
 
 export interface AppObjectStoreArgs {
 	action: 'put' | 'head' | 'get';
-	roomId: string;
+	/** Optional: when present it must equal the verified caller's room. */
+	roomId?: string;
 	dataBase64?: string;
 	mediaType?: string;
 	digest?: string;
@@ -38,9 +42,11 @@ function sha256Digest(bytes: Buffer): string {
 	return `sha256:${crypto.createHash('sha256').update(bytes).digest('hex')}`;
 }
 
-export async function handleAppObjectStoreTool(args: AppObjectStoreArgs): Promise<Record<string, unknown>> {
-	const roomId = args.roomId?.trim();
-	if (!roomId) throw new Error('roomId is required');
+export async function handleAppObjectStoreTool(
+	args: AppObjectStoreArgs,
+	actor: VerifiedActor | undefined,
+): Promise<Record<string, unknown>> {
+	const roomId = resolveCallerRoom(actor, args.roomId);
 
 	if (args.action === 'put') {
 		const dataBase64 = args.dataBase64;

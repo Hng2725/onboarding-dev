@@ -43,12 +43,17 @@ import { handleMcpMessage } from './mcp-message-handlers';
  * relaxed compatibility pairing intentionally configures no dispatch trust at
  * all, so the SDK's auto-wiring condition is not met there and `context.actor`
  * stays `undefined` — the same unverified-in-development posture as before.
- * `context.actor` is forwarded as-is; `handleMcpMessage` fails closed on
- * `undefined` and never reads any other, unverified field.
+ * The actor is forwarded only when `identityState` is `verified`; otherwise
+ * `undefined` is passed. `handleMcpMessage` itself refuses `undefined` for the
+ * tools that act with this app's bot credential (`hr_app_db_store`,
+ * `hr_app_object_store`) and for `hr_bulk_export`, and those tools take their
+ * room from the actor, never from arguments. `hr_whoami` and the credential
+ * check still answer without an actor. No unverified field is ever read.
  */
 export async function relayMcpHandler(request: ApplicationMcpRequest, context: ToolCallContext): Promise<unknown> {
 	const id = typeof request.id === 'number' ? request.id : 0;
-	return handleMcpMessage(request.method, id, request.params, context.actor);
+	const actor = context.identityState === 'verified' ? context.actor : undefined;
+	return handleMcpMessage(request.method, id, request.params, actor);
 }
 
 function relayLogger(prefix: string): (event: string, fields: Record<string, unknown>) => void {
