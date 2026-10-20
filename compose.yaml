@@ -1,0 +1,39 @@
+name: onboarding-dev
+
+x-standalone-common: &standalone-common
+  environment:
+    PRIVOS_STANDALONE_IDENTITY_FILE: /home/node/privos-standalone-identity.json
+  volumes:
+    - privos-identity:/home/node
+  ports:
+    - "3000:3000"
+  init: true
+
+services:
+  pair:
+    <<: *standalone-common
+    profiles: [pair]
+    build:
+      context: .
+      target: build
+    command: [npm, run, pair]
+    user: node
+    stdin_open: true
+    tty: true
+
+  app:
+    <<: *standalone-common
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+volumes:
+  privos-identity:

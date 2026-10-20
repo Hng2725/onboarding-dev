@@ -15,16 +15,6 @@ const UI_RESOURCE_URI = uiTool!.ui!.resourceUri!;
 const ASSETS_MANIFEST_URI = `${UI_RESOURCE_URI.slice(0, UI_RESOURCE_URI.lastIndexOf('/') + 1)}assets-manifest.json`;
 const ASSET_URI_PREFIX = `${UI_RESOURCE_URI.slice(0, UI_RESOURCE_URI.lastIndexOf('/') + 1)}assets/`;
 
-// `verify:fast-pr` runs `test` before `build`, so these assertions on the production shell/asset
-// contract cannot assume `dist/ui` already exists — build it here first, the same way
-// packaging.spec.ts self-invokes its own script instead of assuming prior pipeline steps ran.
-beforeAll(() => {
-  const result = spawnSync(path.resolve('node_modules/.bin/vite'), ['build'], { encoding: 'utf8' });
-  if (result.status !== 0) {
-    throw new Error(`vite build failed ahead of the UI shell tests:\n${result.stdout}\n${result.stderr}`);
-  }
-});
-
 describe('UI resource identity (appSlug = app.appId, never a different host)', () => {
   it('keeps the ui:// host equal to the registered app id — a mismatch 404s every asset', () => {
     expect(new URL(UI_RESOURCE_URI).host).toBe(appManifest.name);
@@ -32,6 +22,17 @@ describe('UI resource identity (appSlug = app.appId, never a different host)', (
 });
 
 describe('built UI shell and split assets', () => {
+  // `verify:fast-pr` runs `test` before `build`, so assertions on the production shell/asset
+  // contract cannot assume `dist/ui` already exists. Keep this setup scoped here so the pure
+  // manifest identity contract can still run when the platform cannot spawn the Vite binary.
+  beforeAll(() => {
+    const viteBin = path.resolve('node_modules/vite/bin/vite.js');
+    const result = spawnSync(process.execPath, [viteBin, 'build'], { encoding: 'utf8' });
+    if (result.status !== 0) {
+      throw new Error(`vite build failed ahead of the UI shell tests:\n${result.stdout}\n${result.stderr}`);
+    }
+  });
+
   it('serves a shell with the relay meta tag, the boot watchdog, and only relative asset tags', async () => {
     const result = await handleMcpMessage('resources/read', 1, { uri: UI_RESOURCE_URI });
     const html = result.contents[0].text as string;
