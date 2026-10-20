@@ -9,3 +9,6 @@
 /dist-source export-ignore
 /pnpm-lock.yaml export-ignore
 /.privos export-ignore
+
+# Shell scripts must remain executable by Bash after Windows checkouts.
+*.sh text eol=lf
