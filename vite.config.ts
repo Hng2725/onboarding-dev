@@ -13,14 +13,14 @@ export default defineConfig({
     emptyOutDir: true,
     manifest: true,
     sourcemap: false,
-    // Every referenced asset becomes a real hashed `assets/` file, never an inlined base64
-    // data URI — split-asset serving needs a filename to address over `ui://…/assets/<file>`.
-    assetsInlineLimit: 0,
+    // The MCP UI is delivered as one self-contained HTML response. Force a
+    // single JavaScript entry and inline imported binary assets so a rebuild
+    // never depends on generation-cached filenames in Hub.
+    assetsInlineLimit: Number.MAX_SAFE_INTEGER,
+    cssCodeSplit: false,
     rollupOptions: {
       output: {
-        manualChunks: {
-          vendor: ['react', 'react-dom', '@privos_ai/app-react'],
-        },
+        inlineDynamicImports: true,
       },
     },
   },

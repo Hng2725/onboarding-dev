@@ -1,16 +1,13 @@
 /**
- * Shared transport for this app's own `mcpapp.db.*` / `mcpapp.objects.*` App
- * Platform demo tools (Step-1 generic platform contract, merged hub
- * `bff01ee8`, live only on tenant.132+).
+ * Shared server-side transport for this app's room-scoped App Platform tools.
  *
  * Both tool families are ONLY reachable through `POST /api/v1/mcp-apps.tool-call`
  * — the mediated `app.callServerTool()` / `app.rest()` host bridges the
  * frontend uses everywhere else in this app always run AS THE CURRENT USER
- * (see `privos-rest.ts`), but this endpoint is always `execution: 'user'` at
+ * but this endpoint is always `execution: 'user'` at
  * the Hub's grant resolver in the sense that it authenticates the CALLER as a
  * Rocket.Chat user — and when that caller authenticates with this app's own
- * agent-bot header credential (`x-user-id` + `x-auth-token`, see
- * `agent-bot-credential-check.ts`), the "user" the Hub resolves grants for IS
+ * agent-bot header credential (`x-user-id` + `x-auth-token`), the "user" the Hub resolves grants for IS
  * the bot's own account, not a human's. This mirrors the reference consumer,
  * legal-agent's `hub-db-object-store.ts`, byte for byte: same endpoint, same
  * body shape (`{ mcpAppId, toolName, arguments, roomId }`), same
@@ -23,16 +20,22 @@ import { resolveOwnMcpAppId } from './resolve-own-mcp-app-id';
 
 const TOOL_CALL_PATH = '/api/v1/mcp-apps.tool-call';
 
+export type AppPlatformToolCaller = (
+	toolName: string,
+	args: Record<string, unknown>,
+	requiredScope: string,
+	roomId: string,
+) => Promise<unknown>;
+
 function asRecord(value: unknown): Record<string, unknown> {
 	return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 /**
- * Call one `mcpapp.db.*` / `mcpapp.objects.*` tool as this app's own
+ * Call one room-scoped App Platform tool as this app's own
  * installation bot. Throws a plain `Error` with a hub-provided or
- * transport-provided message on any failure — callers (the App Objects and
- * App Database demo tool handlers) let it propagate unchanged to the
- * frontend's `tools/call` error path.
+ * transport-provided message on any failure. Onboarding services let it
+ * propagate to the frontend's structured `tools/call` error path.
  */
 export async function callAppPlatformTool(
 	toolName: string,

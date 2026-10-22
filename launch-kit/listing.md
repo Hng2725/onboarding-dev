@@ -1,32 +1,25 @@
-# PrivOS Demo MCP App
+# PrivOS Onboarding
 
-**Tagline:** A complete, copyable PrivOS MCP app—from first workspace call to licensed Pro export.
+**Tagline:** Biến onboarding trong room thành một lộ trình học, làm bài và đánh giá rõ ràng.
 
-**Short description:** Explore HR records, files, AI workflows and sandbox controls in a
-marketplace-ready reference app with minimum justified permissions.
+**Short description:** Gán chương trình onboarding cho thành viên room, bắt buộc đọc tài liệu trước khi làm bài, tự động chấm trắc nghiệm và công bố đánh giá của Admin.
 
 ## Long description
 
-PrivOS Demo MCP App is both a useful HR workspace demo and the canonical reference for building a PrivOS
-MCP app. Browse and edit structured HR records, work with room files, run AI chat and poem workflows,
-inspect verified identity, synchronize skills and wake the workspace sandbox.
+PrivOS Onboarding giúp room owner, moderator và workspace admin xây dựng chương trình hội nhập ngay trong PrivOS. Admin có thể dùng template PrivOS bất biến, clone để tùy biến hoặc tạo template riêng với file/link, module, trắc nghiệm và tự luận.
 
-The app demonstrates the production contracts publishers need: hub-mediated workspace access,
-explicit scope consent, direct container transport, a relay development loop, hardened deployment,
-and license-aware features. Free supports up to 50 records. Pro raises the limit to 5,000 and unlocks
-bulk export. If Pro lapses, the app safely returns to Free behavior without deleting existing data.
+Chỉ thành viên được gán thủ công mới nhận chương trình. Nhân sự phải mở và hoàn thành tài liệu bắt buộc trước khi làm bài. Trắc nghiệm được chấm tự động; tự luận không có điểm và được Admin nhận xét riêng. Mọi bài, kể cả bài hoàn toàn trắc nghiệm, đều cần đánh giá chung với kết luận Đạt, Không đạt hoặc Làm lại.
 
-**Category:** Productivity / Developer tools
+Mỗi learner chỉ xem dữ liệu của chính mình. Dữ liệu, file và audit state được cô lập theo room PrivOS.
 
-**Keywords:** HR, records, MCP, reference app, AI, sandbox, PrivOS
+**Category:** Productivity / Human Resources
+
+**Keywords:** onboarding, training, learning, employee, assessment, PrivOS
 
 ## Reviewer notes
 
-The source is intentionally MIT-licensed and self-contained. `SCOPES.md` contains one justification
-per requested scope and maps each to a concrete UI call site. The Pro `bulk-export` tool and Free/Pro
-record limits are enforced server-side; the UI also hides the unavailable Pro action.
-
-## Scope justification copy
-
-Use the exact table in `../SCOPES.md` for submission. No requested permission is used for analytics,
-advertising, background collection or access outside the active workspace.
+- Admin access: room owner/moderator hoặc workspace admin.
+- Learner access: room leader/member.
+- `notifications:write` là optional và best-effort; lỗi delivery không rollback dữ liệu.
+- Không có analytics, quảng cáo hoặc external processing.
+- Scope/call-site map đầy đủ tại `SCOPES.md`.

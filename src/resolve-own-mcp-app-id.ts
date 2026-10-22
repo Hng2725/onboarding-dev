@@ -11,7 +11,7 @@
  *  - `development`: `MCP_APP_ID`, cached to `.env` by the dev pairing loop
  *    (`relay-transport.ts`) from the SAME pairing response. Absent until a
  *    fresh `npm run pair` / `npm run dev` pairing run after this app added
- *    the App Objects / App Database demo tabs — an existing cached `.env`
+ *    the onboarding App Database gateway — an existing cached `.env`
  *    from before that change has no `MCP_APP_ID` key yet.
  * Returns `undefined` when none is available.
  */

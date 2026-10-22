@@ -1,37 +1,29 @@
 # Privacy Notice
 
-Last updated: 2026-08-02
+Last updated: 2026-10-20
 
-PrivOS Demo MCP App is a stateless reference application operated by PrivOS AI.
-It accesses workspace data only when a user invokes its tools or interface and
-only through the PrivOS scopes approved during installation.
+PrivOS Onboarding xử lý dữ liệu onboarding trong workspace PrivOS mà ứng dụng được cài đặt. Ứng dụng không có quảng cáo, behavioral analytics hoặc SDK theo dõi bên thứ ba.
 
-## Data handled
+## Dữ liệu được xử lý
 
-Depending on the requested workflow, the app can process workspace identity,
-lists, files, AI chat content, and sandbox-control requests. The exact requested
-permissions and their purposes are documented in [SCOPES.md](SCOPES.md).
+Tùy theo vai trò và thao tác, ứng dụng xử lý:
 
-The app has no persistent volume and does not create an independent customer
-database. Records, files, and AI conversations remain in the user's PrivOS
-workspace services. A local browser preference stores only the selected visual
-theme. The app includes no advertising, behavioral analytics, or third-party
-tracking SDK.
+- danh tính, username và role đã được PrivOS xác minh;
+- danh sách thành viên của room để Admin gán onboarding;
+- template, phân loại nhân sự, assignment, hạn và tiến độ đọc;
+- tài liệu hoặc link do Admin đưa vào template;
+- câu trả lời trắc nghiệm/tự luận, điểm trắc nghiệm;
+- nhận xét tự luận, đánh giá chung và kết luận;
+- audit metadata và trạng thái gửi thông báo.
 
-## Retention and sharing
+## Lưu trữ và retention
 
-The app does not retain workspace content after an individual request beyond
-the active process memory needed to return the response. PrivOS platform logs,
-workspace storage, backups, and account records remain governed by the user's
-PrivOS agreement and workspace settings. The app does not sell personal data or
-share workspace content with an independent third party.
+Nội dung nghiệp vụ được lưu trong App Database và File service của room, chịu chính sách retention, backup và quyền truy cập của workspace PrivOS. Process ứng dụng là stateless và không có persistent volume riêng. Trình duyệt có thể lưu theme và recovery draft theo app để khôi phục khi mất kết nối.
 
-## User choices and contact
+Dữ liệu được giữ cho đến khi installation hoặc các record/file tương ứng bị xóa theo chính sách của workspace. Ứng dụng không bán dữ liệu và không gửi nội dung onboarding đến bên thứ ba độc lập.
 
-Workspace administrators control installation, approved scopes, and removal of
-the app. Users should use their PrivOS account controls for access, correction,
-export, or deletion requests. Privacy and security questions can be sent to
-`dev@privos.ai`.
+## Kiểm soát truy cập
 
-Material changes to this notice will be published in this repository and, when
-applicable, submitted as a new Marketplace version for review.
+Backend dùng actor và room đã được PrivOS xác minh. Admin chỉ có quyền trong room phù hợp. Learner chỉ đọc assignment, attempt, feedback và evaluation của chính mình. Answer key và trường vận hành nội bộ không được đưa vào Learner DTO.
+
+Workspace admin kiểm soát cài đặt, scope và gỡ ứng dụng. Yêu cầu truy cập, sửa, export hoặc xóa dữ liệu cần thực hiện qua quản trị workspace PrivOS. Câu hỏi bảo mật hoặc riêng tư gửi tới `dev@privos.ai`.

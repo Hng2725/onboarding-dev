@@ -1,195 +1,142 @@
-import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
-import { PrivosAppProvider, usePrivosContext } from '@privos_ai/app-react';
-import { ThemeProvider, ThemeToggle } from './theme-provider';
-import HRManagementDashboard from './contact-collector-form';
-import FileUploadPanel from './file-upload-panel';
-import AiPoemPanel from './ai-poem-panel';
-import SkillsPanel from './skills-panel';
-import SandboxConnectPanel from './sandbox-connect-panel';
-import WhoamiPanel from './whoami-panel';
-import InfoPanel from './info-panel';
-import LicensePanel from './license-panel';
-import AppOwnedChatPanel from './app-owned-chat-panel';
-import AgentBotPanel from './agent-bot-panel';
-import AssigneeDemoPanel from './assignee-demo-panel';
-import CustomPermissionsPanel from './custom-permissions-panel';
-import AttemptLifecyclePanel from './attempt-lifecycle-panel';
-import AttemptEvidencePanel from './attempt-evidence-panel';
-import AppObjectsPanel from './app-objects-panel';
-import AppDbPanel from './app-db-panel';
-import NotificationPanel from './notification-panel';
-import { LazyBoundary } from './lazy-boundary';
-import ThemeInheritancePanel from './theme-inheritance-panel';
+import {
+  ArrowRightOutlined,
+  AuditOutlined,
+  CheckCircleFilled,
+  ClockCircleOutlined,
+  FileDoneOutlined,
+  SafetyCertificateOutlined,
+  TeamOutlined,
+} from '@ant-design/icons';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { PrivosAppProvider, usePrivosApp, usePrivosContext } from '@privos_ai/app-react';
 
-// Heavy panels split into their own chunks — loaded only when their tab is
-// opened, so a cold app open never pays for AI chat/history rendering,
-// workspace-factory upload plumbing, embed iframes, or the storage demo.
-const AiChatPanel = lazy(() => import('./panels/ai-chat-panel'));
-const AiHistoryPanel = lazy(() => import('./panels/ai-history-panel'));
-const AgentSetUploadPanel = lazy(() => import('./panels/agent-set-upload-panel'));
-const BotWorkloadPanel = lazy(() => import('./panels/bot-workload-panel'));
-const EmbedsPanel = lazy(() => import('./panels/embeds-panel'));
-const StoragePanel = lazy(() => import('./panels/storage-panel'));
+import { ThemeProvider } from './theme-provider';
+import { OnboardingApi, type AdminBootstrapSummary, type BootstrapResult } from './onboarding/api';
+import { AppShell } from './onboarding/AppShell';
+import { AdminDashboard } from './onboarding/admin-dashboard';
+import { EmptyState, ErrorState, LoadingState } from './onboarding/components';
+import { EmployeesPage } from './onboarding/employees';
+import { LearnerDashboard } from './onboarding/learner-dashboard';
+import { LearningWorkspace } from './onboarding/learning-workspace';
+import { defaultRouteForAccess, routesForAccess, type OnboardingRoute } from './onboarding/navigation';
+import { ResultsPage } from './onboarding/results';
+import { EssayFeedbackPage, EvaluationsPage } from './onboarding/reviews';
+import { TemplatesPage } from './onboarding/templates';
 
-declare global {
-  interface Window {
-    /** Set once React has committed the first render — the shell watchdog's success signal. */
-    __privosUiBooted?: boolean;
-  }
+function StatCard({ icon, label, value, tone }: { icon: React.ReactNode; label: string; value: number; tone: string }) {
+  return (
+    <article className="stat-card">
+      <div className={`stat-icon stat-${tone}`}>{icon}</div>
+      <div><span>{label}</span><strong>{value}</strong></div>
+    </article>
+  );
 }
 
-type Tab =
-  | 'identity'
-  | 'info'
-  | 'records'
-  | 'license'
-  | 'files'
-  | 'chat'
-  | 'poem'
-  | 'history'
-  | 'skills'
-  | 'sandbox'
-  | 'agentSets'
-  | 'agent'
-  | 'embeds'
-  | 'workload'
-  | 'assignees'
-  | 'customPermissions'
-  | 'attemptLifecycle'
-  | 'attemptEvidence'
-  | 'appObjects'
-  | 'appDb'
-  | 'storage'
-  | 'notification'
-  | 'themeInheritance';
-
-const TABS: { id: Tab; label: string; scope?: string; degradedBehavior?: string }[] = [
-  { id: 'identity', label: 'Identity' },
-  { id: 'info', label: 'Info', scope: 'basic:information', degradedBehavior: 'Installation context is unavailable.' },
-  { id: 'records', label: 'Records', scope: 'lists:read', degradedBehavior: 'HR records cannot be displayed.' },
-  { id: 'license', label: 'License' },
-  { id: 'files', label: 'Files', scope: 'files:read', degradedBehavior: 'Document previews and the room file list are hidden.' },
-  { id: 'chat', label: 'AI Chat', scope: 'sandbox:ai-chat:write', degradedBehavior: 'AI chat creation is disabled.' },
-  { id: 'poem', label: 'AI Poem', scope: 'sandbox:ai-chat:write', degradedBehavior: 'AI poem generation is disabled.' },
-  { id: 'history', label: 'AI History', scope: 'sandbox:ai-chat', degradedBehavior: 'Existing AI chat sessions are not displayed.' },
-  { id: 'skills', label: 'Skills', scope: 'sandbox:skills:use', degradedBehavior: 'Sandbox skill controls are hidden.' },
-  { id: 'sandbox', label: 'Sandbox', scope: 'sandbox:botkey:push', degradedBehavior: 'Sandbox connection controls are unavailable.' },
-  { id: 'agentSets', label: 'Agent sets', scope: 'sandbox:agent-sets:upload', degradedBehavior: 'Uploading agent sets into the workspace factory is disabled.' },
-  { id: 'agent', label: 'Agent bot' },
-  // No scope: embedding is governed by the admin's per-app origin allowlist, not a grant.
-  { id: 'embeds', label: 'Embeds' },
-  // No single scope: the panel itself shows granted/not-granted per lifecycle scope.
-  { id: 'workload', label: 'Bot workload' },
-  { id: 'assignees', label: 'Isolated ASSIGNEE', scope: 'lists:write', degradedBehavior: 'This demo needs write access to create the isolated list and item.' },
-  { id: 'customPermissions', label: 'Custom permissions', scope: 'custom-permissions:read', degradedBehavior: "The Custom permissions tab cannot display the room's permission catalog or membership." },
-  // Step-1 generic platform contract (merged hub bff01ee8, live only on tenant.132+). Both run as
-  // the current user under the already-approved sandbox:generate scope — no new permission.
-  { id: 'attemptLifecycle', label: 'Attempt lifecycle', scope: 'sandbox:generate', degradedBehavior: 'This tab cannot dispatch, observe, or cancel a Sandbox attempt.' },
-  { id: 'attemptEvidence', label: 'Attempt evidence', scope: 'sandbox:generate', degradedBehavior: "This tab cannot read a Sandbox attempt's LLM/gateway evidence." },
-  // Both run through this app's own installation-bot credential, not the current user's session —
-  // see app-objects-panel.tsx / app-db-panel.tsx.
-  { id: 'appObjects', label: 'App Objects (CAS)', scope: 'db:write', degradedBehavior: 'This tab cannot store or read App Objects (CAS) content.' },
-  { id: 'appDb', label: 'App Database', scope: 'db:schema:write', degradedBehavior: 'This tab cannot register or use its demo App Database collection.' },
-  // No scope: host storage is a browser-local, per-app namespace mediated by the host.
-  { id: 'storage', label: 'Storage' },
-  { id: 'notification', label: 'Notification', scope: 'notifications:write', degradedBehavior: 'This app cannot send notifications to room members.' },
-  // No scope: theme tokens ride the same non-secret HOST_CONTEXT_CHANGED push as `theme`/roomId.
-  { id: 'themeInheritance', label: 'Theme inheritance' },
-];
-
-function FeatureUnavailable({ text }: { text: string }) {
+function AdminFoundation({ summary, route }: { summary: AdminBootstrapSummary; route: OnboardingRoute }) {
+  if (route !== 'admin-overview') {
+    const copy: Record<string, [string, string]> = {
+      employees: ['Quản lý nhân sự', 'Gán onboarding thủ công, phân loại nhân sự và theo dõi tiến độ trong room.'],
+      templates: ['Thư viện template', 'Dùng template PrivOS có sẵn hoặc xây nội dung riêng từ tài liệu của room.'],
+      'essay-feedback': ['Nhận xét tự luận', 'Đọc câu trả lời và phản hồi riêng cho từng câu tự luận đã nộp.'],
+      evaluations: ['Đánh giá chung', 'Tổng hợp kết quả và công bố kết luận Đạt, Không đạt hoặc Làm lại.'],
+    };
+    const [title, description] = copy[route] ?? ['Onboarding', 'Không gian làm việc onboarding.'];
+    return <EmptyState title={title} description={description} icon={<SafetyCertificateOutlined />} />;
+  }
   return (
-    <div className="container">
-      <h1>Optional feature unavailable</h1>
-      <div className="error-message">{text} An administrator can enable the optional permission in app settings.</div>
+    <div className="page-stack">
+      <section className="welcome-card">
+        <div>
+          <span className="welcome-kicker"><CheckCircleFilled /> Hệ thống đã sẵn sàng</span>
+          <h2>Xây hành trình hội nhập rõ ràng cho từng nhân sự.</h2>
+          <p>Quản lý tài liệu, bài tập và đánh giá trong một luồng thống nhất, được cô lập theo room PrivOS.</p>
+        </div>
+        <div className="welcome-orb"><SafetyCertificateOutlined /></div>
+      </section>
+      <section className="stats-grid" aria-label="Tổng quan onboarding">
+        <StatCard icon={<TeamOutlined />} label="Lượt onboarding" value={summary.assignmentCount} tone="blue" />
+        <StatCard icon={<FileDoneOutlined />} label="Template" value={summary.templateCount} tone="violet" />
+        <StatCard icon={<ClockCircleOutlined />} label="Chờ nhận xét" value={summary.pendingEssayCount} tone="amber" />
+        <StatCard icon={<AuditOutlined />} label="Chờ đánh giá" value={summary.pendingEvaluationCount} tone="green" />
+      </section>
+      <section className="content-card quick-start">
+        <div><span className="section-kicker">BẮT ĐẦU NHANH</span><h2>Thiết lập lượt onboarding tiếp theo</h2><p>Chọn thành viên trong room, loại nhân sự và phiên bản template phù hợp.</p></div>
+        <button className="button button-primary" type="button">Đi tới Nhân sự <ArrowRightOutlined /></button>
+      </section>
     </div>
   );
 }
 
-/** Suspense + error boundary shared by every lazily loaded panel. */
-function LazyPanel({ children }: { children: ReactNode }) {
-  return (
-    <LazyBoundary>
-      <Suspense fallback={<div className="container"><p className="loading-text">Loading…</p></div>}>
-        {children}
-      </Suspense>
-    </LazyBoundary>
-  );
+function MountedRoute({ id, activeRoute, children }: { id: OnboardingRoute; activeRoute: OnboardingRoute; children: ReactNode }) {
+  const active = id === activeRoute;
+  return <section className="route-panel" data-onboarding-route={id} hidden={!active} aria-hidden={active ? undefined : true}>{children}</section>;
 }
 
-function ThemedApp() {
-  const { theme, effectiveScopes } = usePrivosContext();
-  const [tab, setTab] = useState<Tab>('identity');
-  const activeDefinition = TABS.find(({ id }) => id === tab)!;
-  const capabilityResolved = Array.isArray(effectiveScopes);
-  const activeGranted = !activeDefinition.scope || effectiveScopes?.includes(activeDefinition.scope) === true;
+export function AdminWorkspace({ api, summary, route, onNavigate }: { api: OnboardingApi; summary: AdminBootstrapSummary; route: OnboardingRoute; onNavigate: (route: OnboardingRoute) => void }) {
+  return <>
+    <MountedRoute id="admin-overview" activeRoute={route}><AdminDashboard api={api} onOpenEmployees={() => onNavigate('employees')} /></MountedRoute>
+    <MountedRoute id="employees" activeRoute={route}><EmployeesPage api={api} /></MountedRoute>
+    <MountedRoute id="templates" activeRoute={route}><TemplatesPage api={api} onUseTemplate={() => onNavigate('employees')} /></MountedRoute>
+    <MountedRoute id="essay-feedback" activeRoute={route}><EssayFeedbackPage api={api} /></MountedRoute>
+    <MountedRoute id="evaluations" activeRoute={route}><EvaluationsPage api={api} /></MountedRoute>
+    {!['admin-overview', 'employees', 'templates', 'essay-feedback', 'evaluations'].includes(route) && (
+      <AdminFoundation summary={summary} route={route} />
+    )}
+  </>;
+}
+
+export function LearnerWorkspace({ api, route, onNavigate }: { api: OnboardingApi; route: OnboardingRoute; onNavigate: (route: OnboardingRoute) => void }) {
+  const [selectedAssignmentId, setSelectedAssignmentId] = useState<string | null>(null);
+  const openLearning = (assignmentId: string) => {
+    setSelectedAssignmentId(assignmentId);
+    onNavigate('my-learning');
+  };
+  return <>
+    <MountedRoute id="my-overview" activeRoute={route}><LearnerDashboard api={api} onContinue={openLearning} onOpenResults={() => onNavigate('results')} /></MountedRoute>
+    <MountedRoute id="my-learning" activeRoute={route}><LearningWorkspace api={api} assignmentId={selectedAssignmentId} onBack={() => onNavigate('my-overview')} onSubmitted={() => onNavigate('results')} /></MountedRoute>
+    <MountedRoute id="results" activeRoute={route}><ResultsPage api={api} onRetry={openLearning} /></MountedRoute>
+  </>;
+}
+
+function OnboardingRoot() {
+  const app = usePrivosApp();
+  const context = usePrivosContext();
+  const api = useMemo(() => new OnboardingApi(app), [app]);
+  const [bootstrap, setBootstrap] = useState<BootstrapResult | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  const [route, setRoute] = useState<OnboardingRoute | null>(null);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      const result = await api.bootstrap();
+      setBootstrap(result);
+      setRoute((current) => current && routesForAccess(result.role).some((item) => item.id === current)
+        ? current
+        : defaultRouteForAccess(result.role));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught : new Error('Không thể tải dữ liệu onboarding.'));
+    }
+  }, [api]);
+
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { window.__privosUiBooted = true; }, []);
 
   return (
-    <ThemeProvider hostTheme={theme}>
-      <div className="app-header">
-        <nav className="app-tabs">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              className={`tab-btn${tab === t.id ? ' tab-active' : ''}`}
-              onClick={() => setTab(t.id)}
-              aria-label={t.scope && capabilityResolved && !effectiveScopes.includes(t.scope) ? `${t.label} — optional permission not granted` : t.label}
-              title={t.scope && capabilityResolved && !effectiveScopes.includes(t.scope) ? 'Optional permission not granted' : undefined}
-            >
-              {t.label}{t.scope && capabilityResolved && !effectiveScopes.includes(t.scope) ? ' · Off' : ''}
-            </button>
-          ))}
-        </nav>
-        <ThemeToggle />
-      </div>
-
-      {!capabilityResolved && activeDefinition.scope && <div className="container"><p className="loading-text">Checking granted access…</p></div>}
-      {capabilityResolved && !activeGranted && activeDefinition.scope && (
-        <FeatureUnavailable text={activeDefinition.degradedBehavior || 'This feature is disabled.'} />
+    <ThemeProvider hostTheme={context.theme}>
+      {!bootstrap && !error && <div className="bootstrap-screen"><LoadingState /></div>}
+      {!bootstrap && error && <div className="bootstrap-screen"><ErrorState error={error} onRetry={() => void load()} /></div>}
+      {bootstrap && route && (
+        <AppShell bootstrap={bootstrap} roomName={context.roomName} activeRoute={route} onNavigate={setRoute}>
+          {bootstrap.role === 'admin'
+            ? <AdminWorkspace api={api} summary={bootstrap.summary as AdminBootstrapSummary} route={route} onNavigate={setRoute} />
+            : <LearnerWorkspace api={api} route={route} onNavigate={setRoute} />}
+        </AppShell>
       )}
-      {(!activeDefinition.scope || (capabilityResolved && activeGranted)) && (
-        <>
-          {tab === 'identity' && <WhoamiPanel />}
-          {tab === 'agentSets' && <LazyPanel><AgentSetUploadPanel /></LazyPanel>}
-          {tab === 'info' && <InfoPanel />}
-          {tab === 'records' && <HRManagementDashboard />}
-          {tab === 'license' && <LicensePanel />}
-          {tab === 'files' && <FileUploadPanel />}
-          {tab === 'chat' && <LazyPanel><AiChatPanel /></LazyPanel>}
-          {tab === 'poem' && <AiPoemPanel />}
-          {tab === 'history' && <LazyPanel><AiHistoryPanel /></LazyPanel>}
-          {tab === 'skills' && <SkillsPanel />}
-          {tab === 'sandbox' && <SandboxConnectPanel />}
-          {tab === 'agent' && <AgentBotPanel />}
-          {tab === 'embeds' && <LazyPanel><EmbedsPanel /></LazyPanel>}
-          {tab === 'workload' && <LazyPanel><BotWorkloadPanel /></LazyPanel>}
-          {tab === 'assignees' && <AssigneeDemoPanel />}
-          {tab === 'customPermissions' && <CustomPermissionsPanel />}
-          {tab === 'attemptLifecycle' && <AttemptLifecyclePanel />}
-          {tab === 'attemptEvidence' && <AttemptEvidencePanel />}
-          {tab === 'appObjects' && <AppObjectsPanel />}
-          {tab === 'appDb' && <AppDbPanel />}
-          {tab === 'storage' && <LazyPanel><StoragePanel /></LazyPanel>}
-          {tab === 'notification' && <NotificationPanel />}
-          {tab === 'themeInheritance' && <ThemeInheritancePanel />}
-        </>
-      )}
-
-      {/* Overlays every tab: the hub launcher opens this app's own chat window. */}
-      <AppOwnedChatPanel />
     </ThemeProvider>
   );
 }
 
 export default function App() {
-  useEffect(() => {
-    window.__privosUiBooted = true;
-  }, []);
-
-  return (
-    <PrivosAppProvider>
-      <ThemedApp />
-    </PrivosAppProvider>
-  );
+  return <PrivosAppProvider name="PrivOS Onboarding" version="1"><OnboardingRoot /></PrivosAppProvider>;
 }

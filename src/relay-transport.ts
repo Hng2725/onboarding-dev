@@ -22,7 +22,7 @@ import {
 } from '@privos_ai/app-server';
 
 import { buildRelayAppDescriptor } from './manifest';
-import { handleMcpMessage } from './mcp-message-handlers';
+import { handleMcpMessage, onboardingUiResource } from './mcp-message-handlers';
 
 /**
  * Adapts this app's own `(method, id, params, actor)` handler to the SDK's
@@ -44,11 +44,9 @@ import { handleMcpMessage } from './mcp-message-handlers';
  * all, so the SDK's auto-wiring condition is not met there and `context.actor`
  * stays `undefined` — the same unverified-in-development posture as before.
  * The actor is forwarded only when `identityState` is `verified`; otherwise
- * `undefined` is passed. `handleMcpMessage` itself refuses `undefined` for the
- * tools that act with this app's bot credential (`hr_app_db_store`,
- * `hr_app_object_store`) and for `hr_bulk_export`, and those tools take their
- * room from the actor, never from arguments. `hr_whoami` and the credential
- * check still answer without an actor. No unverified field is ever read.
+ * `undefined` is passed. Every onboarding data tool requires that verified
+ * actor and derives its room exclusively from the signed actor claim. No
+ * unverified request field is ever used as identity or room authority.
  */
 export async function relayMcpHandler(request: ApplicationMcpRequest, context: ToolCallContext): Promise<unknown> {
 	const id = typeof request.id === 'number' ? request.id : 0;
@@ -119,7 +117,7 @@ export async function startDevelopmentRelay(): Promise<RelayHandle> {
 		clientSecret = paired.clientSecret;
 
 		// `mcpAppId` — this app's own installation id — is cached alongside the
-		// relay credentials so the App Objects / App Database demo tabs can
+		// relay credentials so the onboarding App Database gateway can
 		// resolve it in development too (`resolve-own-mcp-app-id.ts`). Absent on
 		// a pairing response that predates that (older Hub); those tabs then
 		// report a clear "re-pair" message instead of guessing.
@@ -137,6 +135,7 @@ export async function startDevelopmentRelay(): Promise<RelayHandle> {
 		clientSecret,
 		descriptor: buildRelayAppDescriptor(),
 		handler: relayMcpHandler,
+		ui: onboardingUiResource,
 		logger: relayLogger('[Relay]'),
 	});
 	await handle.whenConnected();

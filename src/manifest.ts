@@ -6,7 +6,7 @@ import { getAppIconDataUri } from './app-icon';
 export const MARKETPLACE_MANIFEST_FIELDS = [
   'schemaVersion', 'kind', 'name', 'version', 'title', 'description', 'icon',
   'author', 'homepage', 'repository', 'permissions', 'dataPolicy', 'availabilityTier',
-  'capabilities', 'agentBot', 'tools', 'port', 'resources', 'volumes', 'stateless', 'license', 'env',
+  'capabilities', 'agentBot', 'tools', 'port', 'resources', 'volumes', 'stateless', 'env',
   'resourceManifestTemplate', 'ui',
 ] as const;
 

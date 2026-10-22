@@ -185,7 +185,9 @@ export interface LearnerAssignmentDto {
   readonly templateId: string;
   readonly templateVersion: number;
   readonly templateTitle: string;
+  readonly assignedAt: string;
   readonly dueAt?: string;
+  readonly activeAttemptId?: string;
   readonly progressPercent: number;
 }
 

@@ -1,9 +1,9 @@
 {
   "name": "ai.privos.mcp-app-onboarding-dev",
-  "version": "2.17.18",
+  "version": "2.17.19",
   "type": "module",
   "private": false,
-  "description": "Reference PrivOS MCP app demonstrating HR workflows, scoped workspace APIs, AI and sandbox controls, and license-aware features.",
+  "description": "Onboard room members with required learning materials, knowledge checks, essay feedback, and Admin evaluations in PrivOS.",
   "title": "PrivOS Onboarding MCP App (Dev)",
   "icon": "/public/icon.svg",
   "homepage": "https://privos.ai",
@@ -15,17 +15,16 @@
   "license": "MIT",
   "dockerfilePath": "Dockerfile",
   "keywords": [
-    "hr",
-    "management",
+    "onboarding",
+    "learning",
+    "training",
     "mcp",
-    "demo",
     "privos",
-    "relay",
-    "websocket"
+    "employee"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/PrivOS-AI/privos-mcp-app-demo"
+    "url": "https://github.com/Hng2725/onboarding-dev.git"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -46,10 +45,11 @@
     "preflight": "tsx scripts/preflight.ts",
     "package": "bash scripts/package-source.sh",
     "publish:marketplace": "privos-app publish",
-    "docker:build": "bash scripts/build-marketplace-image.sh privos-mcp-app-demo:local",
-    "docker:run": "docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 100 --tmpfs /tmp -e PORT=3000 privos-mcp-app-demo:local"
+    "docker:build": "bash scripts/build-marketplace-image.sh privos-onboarding:local",
+    "docker:run": "docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 100 --tmpfs /tmp -e PORT=3000 privos-onboarding:local"
   },
   "dependencies": {
+    "@ant-design/icons": "^6.3.4",
     "@privos_ai/app-server": "^0.11.1",
     "dotenv": "^17.3.1",
     "tsx": "^4.0.0",

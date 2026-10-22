@@ -1,13 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
-  <rect width="1200" height="630" fill="#001930"/>
-  <circle cx="1040" cy="100" r="260" fill="#3C82E6" opacity=".24"/>
-  <circle cx="1120" cy="590" r="340" fill="#FFC814" opacity=".14"/>
-  <rect x="72" y="72" width="112" height="112" rx="28" fill="#FFC814"/>
-  <circle cx="128" cy="116" r="20" fill="#001930"/>
-  <path d="M92 164c6-25 18-38 36-38s30 13 36 38" fill="#3C82E6"/>
-  <text x="216" y="142" fill="#FFFAE8" font-family="Arial, sans-serif" font-size="42" font-weight="700">PrivOS reference MCP app</text>
-  <text x="72" y="290" fill="#fff" font-family="Arial, sans-serif" font-size="72" font-weight="700">PrivOS Demo MCP App</text>
-  <text x="72" y="370" fill="#bcd8ff" font-family="Arial, sans-serif" font-size="34">Build. Preflight. License. Publish.</text>
-  <rect x="72" y="452" width="510" height="70" rx="35" fill="#3C82E6"/>
-  <text x="112" y="499" fill="#fff" font-family="Arial, sans-serif" font-size="28" font-weight="700">Marketplace-ready by construction</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-labelledby="title">
+  <title id="title">PrivOS Onboarding</title>
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#171a31"/><stop offset="1" stop-color="#4f52c9"/></linearGradient></defs>
+  <rect width="1200" height="630" fill="url(#g)"/>
+  <circle cx="1050" cy="90" r="260" fill="#fff" opacity=".06"/>
+  <text x="80" y="255" fill="#aeb2ff" font-family="Arial, sans-serif" font-size="32" font-weight="700">PRIVOS</text>
+  <text x="80" y="340" fill="#fff" font-family="Arial, sans-serif" font-size="78" font-weight="700">Onboarding</text>
+  <text x="80" y="405" fill="#d7d9ee" font-family="Arial, sans-serif" font-size="30">Học · Làm bài · Nhận đánh giá</text>
+  <circle cx="970" cy="330" r="86" fill="#fff"/>
+  <path d="M815 525c8-104 70-160 155-160s147 56 155 160" fill="#fff"/>
+  <circle cx="1080" cy="485" r="68" fill="#20a779" stroke="#4f52c9" stroke-width="14"/>
+  <path d="m1050 485 20 20 42-46" fill="none" stroke="#fff" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

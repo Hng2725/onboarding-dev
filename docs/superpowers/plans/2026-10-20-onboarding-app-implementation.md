@@ -516,15 +516,19 @@ git commit -m "feat: expose onboarding MCP tools"
 ### Task 9: UI Foundation, API Client, Navigation, and Motion System
 
 **Files:**
+- Delete: every existing file under `src/ui/` (demo panels, nested panels, styles, assets, and old shell) after recording the required PrivOS host/bridge contracts.
+- Delete or replace: demo-only UI tests, including the current `tests/ui-shell.spec.ts` fixtures/assertions.
+- Create: `src/ui/index.html`
+- Create: `src/ui/main.tsx`
+- Create: `src/ui/App.tsx`
+- Create: `src/ui/theme-provider.tsx`
+- Create: `src/ui/vite-env.d.ts`
 - Create: `src/ui/onboarding/api.ts`
 - Create: `src/ui/onboarding/navigation.ts`
 - Create: `src/ui/onboarding/AppShell.tsx`
 - Create: `src/ui/onboarding/components.tsx`
 - Create: `src/ui/onboarding/styles.css`
 - Create: `tests/onboarding-ui-model.spec.ts`
-- Modify: `src/ui/App.tsx`
-- Modify: `src/ui/main.tsx`
-- Modify: `src/ui/index.html`
 - Modify: `package.json`
 - Modify: `package-lock.json`
 
@@ -560,7 +564,7 @@ Import individual icons only. Use `app.storage` for a namespaced recovery draft 
 
 - [ ] **Step 4: Implement the responsive shell and design tokens**
 
-Replace the demo tab UI with bootstrap-driven role routing. Use opacity/4–8 px transforms at 160–220 ms, cap list staggering at five items, and disable non-essential motion under reduced-motion preference. Update the document title to `PrivOS Onboarding`.
+Remove the existing UI tree rather than reusing or reskinning its demo components, then build a new bootstrap-driven onboarding app with role routing. Reimplement only the required PrivOS host bridge and theme inheritance contracts in new files. Use opacity/4–8 px transforms at 160–220 ms, cap list staggering at five items, and disable non-essential motion under reduced-motion preference. Update the document title to `PrivOS Onboarding`.
 
 - [ ] **Step 5: Run model, type, and production bundle checks**
 
@@ -756,8 +760,8 @@ git commit -m "feat: add onboarding learner experience"
 ### Task 13: Demo Removal, Product Metadata, Documentation, and Full Verification
 
 **Files:**
-- Delete: demo-only `src/ui/*-panel.tsx`, `src/ui/panels/*`, demo backend handlers, demo helpers, and their tests after confirming no onboarding import references them.
-- Delete: `src/ui/contact-form-styles.css` after `main.tsx` uses only onboarding styles.
+- Verify: `src/ui/` contains only the newly built onboarding interface from Tasks 9–12; no legacy UI file or asset may remain.
+- Delete: demo backend handlers, demo helpers, and their tests after confirming no onboarding import references them.
 - Modify: `README.md`
 - Modify: `docs/app-overview.md`
 - Modify: `PUBLISHING.md`

@@ -2,9 +2,9 @@
   "schemaVersion": 3,
   "kind": "mcp-app",
   "name": "ai.privos.mcp-app-onboarding-dev",
-  "version": "2.17.18",
+  "version": "2.17.19",
   "title": "PrivOS Onboarding MCP App (Dev)",
-  "description": "Reference PrivOS MCP app demonstrating HR workflows, scoped workspace APIs, AI and sandbox controls, and license-aware features.",
+  "description": "Onboard room members with required learning materials, knowledge checks, essay feedback, and Admin evaluations in PrivOS.",
   "icon": "/public/icon.svg",
   "author": {
     "name": "PrivOS AI",
@@ -12,218 +12,101 @@
     "website": "https://privos.ai"
   },
   "homepage": "https://privos.ai",
-  "repository": "https://github.com/PrivOS-AI/privos-mcp-app-demo",
+  "repository": "https://github.com/Hng2725/onboarding-dev.git",
   "permissions": [
     {
       "scope": "basic:information",
       "requirement": "required",
       "context": "room",
       "executionContext": "both",
-      "feature": "core.context",
-      "reason": "Identify the approved installation and room so the dashboard can load safely."
+      "feature": "onboarding.context",
+      "reason": "Load the approved PrivOS installation and room context for onboarding."
     },
     {
       "scope": "bot:room:join",
-      "requirement": "optional",
-      "context": "room",
-      "executionContext": "user",
-      "feature": "agent.bot.join",
-      "reason": "Add the installation-owned agent bot to the exact Room approved by the Hub.",
-      "degradedBehavior": "The app cannot add its installation-owned agent bot to this Room."
-    },
-    {
-      "scope": "bot:identity:read",
-      "requirement": "optional",
-      "context": "room",
-      "executionContext": "user",
-      "feature": "agent.bot.identity",
-      "reason": "Read safe identity for the installation bot only when it belongs to the exact approved Room.",
-      "degradedBehavior": "The app cannot display the installation bot identity for this Room."
-    },
-    {
-      "scope": "lists:read",
       "requirement": "required",
       "context": "room",
       "executionContext": "user",
-      "feature": "hr.records.read",
-      "reason": "Read the HR lists selected for this room."
+      "feature": "onboarding.bot.join",
+      "reason": "Join the installation-owned onboarding service bot to the current room before room-scoped database calls."
     },
     {
-      "scope": "lists:query",
-      "requirement": "optional",
+      "scope": "rooms:roles:read",
+      "requirement": "required",
       "context": "room",
       "executionContext": "user",
-      "feature": "hr.records.query",
-      "reason": "Page and search HR records without reading the whole list.",
-      "degradedBehavior": "The records table falls back to the unpaged list route, which returns at most 500 items and says so instead of showing a silent subset."
+      "feature": "onboarding.roles",
+      "reason": "Use Hub-signed room and workspace roles to separate Admin and Learner access."
     },
     {
-      "scope": "lists:write",
-      "requirement": "optional",
+      "scope": "rooms:read",
+      "requirement": "required",
       "context": "room",
       "executionContext": "user",
-      "feature": "hr.records.manage",
-      "reason": "Create and update HR records from the dashboard.",
-      "recommended": true,
-      "degradedBehavior": "The dashboard remains read-only."
+      "feature": "onboarding.members",
+      "reason": "List and validate current-room members before an Admin assigns onboarding."
     },
     {
       "scope": "notifications:write",
       "requirement": "optional",
       "context": "room",
       "executionContext": "user",
-      "feature": "notifications.send",
-      "reason": "Send a bell, native mobile, and Web Push notification to one active member of the exact approved room from the Notification demo tab.",
-      "degradedBehavior": "The Notification tab cannot send notifications."
+      "feature": "onboarding.notifications",
+      "reason": "Notify assigned members, send due reminders, and announce published evaluations.",
+      "degradedBehavior": "Assignments, reminders, and evaluations remain saved, but the app shows that the notification could not be delivered."
     },
     {
       "scope": "files:read",
-      "requirement": "optional",
+      "requirement": "required",
       "context": "room",
       "executionContext": "user",
-      "feature": "hr.files.read",
-      "reason": "List and preview HR documents attached to the room.",
-      "degradedBehavior": "Document previews and the room file list are hidden."
+      "feature": "onboarding.resources.read",
+      "reason": "Open room-scoped onboarding files and learning materials."
     },
     {
       "scope": "files:write",
-      "requirement": "optional",
+      "requirement": "required",
       "context": "room",
       "executionContext": "user",
-      "feature": "hr.files.manage",
-      "reason": "Upload HR documents and generated exports to the room.",
-      "degradedBehavior": "Uploads remain disabled; existing records are unchanged."
-    },
-    {
-      "scope": "sandbox:skills:use",
-      "requirement": "optional",
-      "context": "room",
-      "executionContext": "user",
-      "feature": "sandbox.skills",
-      "reason": "Show and select the skills enabled in the room sandbox.",
-      "degradedBehavior": "Sandbox skill controls are hidden."
-    },
-    {
-      "scope": "sandbox:agent-sets:upload",
-      "requirement": "optional",
-      "context": "workspace",
-      "executionContext": "user",
-      "feature": "sandbox.agent-sets.upload",
-      "reason": "Upload an agent set into the workspace factory on behalf of a workspace administrator.",
-      "degradedBehavior": "The app cannot upload agent sets; existing sets can still be selected for the room."
-    },
-    {
-      "scope": "sandbox:botkey:push",
-      "requirement": "optional",
-      "context": "room",
-      "executionContext": "user",
-      "feature": "sandbox.connect",
-      "reason": "Connect the room sandbox to its installation-specific bot identity.",
-      "degradedBehavior": "The dashboard cannot connect or rotate the sandbox bot identity."
-    },
-    {
-      "scope": "sandbox:wake",
-      "requirement": "optional",
-      "context": "room",
-      "executionContext": "user",
-      "feature": "sandbox.wake",
-      "reason": "Wake the approved room sandbox and display its state.",
-      "degradedBehavior": "Sandbox wake and state controls are unavailable."
-    },
-    {
-      "scope": "sandbox:generate",
-      "requirement": "optional",
-      "context": "room",
-      "executionContext": "user",
-      "feature": "sandbox.workload.generate",
-      "reason": "Start and poll a Sandbox generation as the current user, optionally selecting the installation-owned agent bot as executor, to demonstrate the room's Sandbox workload lifecycle.",
-      "degradedBehavior": "The Bot workload tab cannot start or poll a Sandbox attempt."
-    },
-    {
-      "scope": "sandbox:ai-chat",
-      "requirement": "optional",
-      "context": "room",
-      "executionContext": "user",
-      "feature": "sandbox.chat.read",
-      "reason": "Read AI chat history created in the approved room.",
-      "degradedBehavior": "Existing AI chat sessions are not displayed."
-    },
-    {
-      "scope": "sandbox:ai-chat:write",
-      "requirement": "optional",
-      "context": "room",
-      "executionContext": "user",
-      "feature": "sandbox.chat.manage",
-      "reason": "Start, send, and stop AI chat work in the approved room.",
-      "degradedBehavior": "AI chat remains read-only when read access is granted, or hidden otherwise."
+      "feature": "onboarding.resources.manage",
+      "reason": "Upload Admin-authored onboarding resources to the current room."
     },
     {
       "scope": "db:read",
-      "requirement": "optional",
+      "requirement": "required",
       "context": "room",
       "executionContext": "user",
-      "feature": "platform.db.read",
-      "reason": "Read this app's own room-scoped App Database records and App Objects (CAS) metadata/content in the App Objects and App Database demo tabs, exercised through this app's own installation-bot credential.",
-      "degradedBehavior": "The App Objects and App Database demo tabs cannot read anything back."
+      "feature": "onboarding.data.read",
+      "reason": "Read room-scoped templates, assignments, progress, attempts, feedback, evaluations, and audit records."
     },
     {
       "scope": "db:write",
-      "requirement": "optional",
+      "requirement": "required",
       "context": "room",
       "executionContext": "user",
-      "feature": "platform.db.write",
-      "reason": "Store an immutable content-addressed App Object and create records in this app's own room-scoped App Database collection, in the App Objects and App Database demo tabs.",
-      "degradedBehavior": "The App Objects and App Database demo tabs cannot store or create anything."
+      "feature": "onboarding.data.write",
+      "reason": "Persist room-scoped onboarding state through the server-side policy gateway."
     },
     {
       "scope": "db:schema:read",
-      "requirement": "optional",
+      "requirement": "required",
       "context": "room",
       "executionContext": "user",
-      "feature": "platform.db.schema.read",
-      "reason": "Read the demo App Database collection's registered schema in the App Database demo tab.",
-      "degradedBehavior": "The App Database demo tab cannot display its collection schema."
+      "feature": "onboarding.schema.read",
+      "reason": "Verify the registered onboarding App Database schema for the current room."
     },
     {
       "scope": "db:schema:write",
-      "requirement": "optional",
+      "requirement": "required",
       "context": "room",
       "executionContext": "user",
-      "feature": "platform.db.schema.write",
-      "reason": "Register the demo App Database collection's schema (mcpapp.db.registerCollection) once per room, in the App Database demo tab.",
-      "degradedBehavior": "The App Database demo tab cannot register its demo collection."
-    },
-    {
-      "scope": "custom-permissions:read",
-      "requirement": "optional",
-      "context": "room",
-      "executionContext": "user",
-      "feature": "custom-permissions.read",
-      "reason": "Read the approved room's custom-permission catalog and which members hold each permission, in the Custom permissions demo tab.",
-      "degradedBehavior": "The Custom permissions tab cannot display the room's permission catalog or membership."
-    },
-    {
-      "scope": "custom-permissions:write",
-      "requirement": "optional",
-      "context": "room",
-      "executionContext": "user",
-      "feature": "custom-permissions.write",
-      "reason": "Grant a custom permission's holders read or read+edit access to one isolated-list item (additionalReaders/additionalEditors), and mint/assign a demo permission, from the Custom permissions demo tab. The Hub still requires the acting user to be room owner/admin.",
-      "degradedBehavior": "The Custom permissions tab cannot grant item-level access, nor mint/assign a demo permission."
-    },
-    {
-      "scope": "users:read",
-      "requirement": "optional",
-      "context": "room",
-      "executionContext": "user",
-      "feature": "custom-permissions.assign-by-username",
-      "reason": "Resolve a typed member username to its user id so the Custom permissions demo tab can assign a permission by username instead of a raw user id.",
-      "degradedBehavior": "The Custom permissions tab cannot assign a permission by username; mint and item grant still work."
+      "feature": "onboarding.schema.write",
+      "reason": "Register versioned onboarding collections and indexes for the current room."
     }
   ],
   "dataPolicy": {
-    "version": "2026-08-02",
-    "retention": "App data is retained until the installation or corresponding HR records are deleted.",
+    "version": "2026-10-20",
+    "retention": "Onboarding data is retained in the room-scoped App Database until the installation or corresponding records are deleted.",
     "externalProcessing": false
   },
   "availabilityTier": "single",
@@ -231,132 +114,106 @@
     "verifiedActor": true
   },
   "agentBot": {
-    "name": "PrivOS Demo Assistant",
-    "slug": "privos-demo-assistant"
+    "name": "PrivOS Onboarding Service",
+    "slug": "privos-onboarding-service"
   },
   "tools": [
     {
-      "name": "hr_management_dashboard",
-      "title": "PrivOS Demo MCP App",
-      "description": "Open the interactive HR workflow and PrivOS platform demonstration dashboard.",
+      "name": "onboarding_dashboard",
+      "title": "Mở PrivOS Onboarding",
+      "description": "Mở giao diện onboarding theo đúng vai trò Admin hoặc nhân sự trong room hiện tại.",
       "inputSchema": {
         "type": "object",
-        "properties": {
-          "roomId": {
-            "type": "string"
-          }
-        }
+        "properties": {}
       },
       "ui": {
-        "resourceUri": "ui://ai.privos.mcp-app-onboarding-dev/form.html",
-        "csp": {
-          "frame-src": [
-            "https://www.youtube.com"
-          ]
-        }
+        "resourceUri": "ui://ai.privos.mcp-app-onboarding-dev/form.html"
       }
     },
     {
-      "name": "hr_whoami",
-      "title": "Who am I (verified)",
-      "description": "Return the user identity authenticated by the Hub's body-bound private dispatch assertion.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {}
-      }
-    },
-    {
-      "name": "hr_bulk_export",
-      "title": "Bulk export HR records",
-      "description": "Export records in bulk. Requires the Pro tier.",
+      "name": "onboarding_bootstrap",
+      "title": "Khởi tạo Onboarding",
+      "description": "Xác thực vai trò, room, danh tính, capability và tải tóm tắt phù hợp với người gọi.",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "records": {
-            "type": "array",
-            "items": {
-              "type": "object"
-            }
-          }
+          "action": { "type": "string", "enum": ["load"] }
         },
-        "required": [
-          "records"
-        ]
+        "required": ["action"]
       }
     },
     {
-      "name": "hr_agent_bot_credential_check",
-      "title": "Validate agent bot credential",
-      "description": "Confirm this app's configured agent bot credential authenticates against the Hub.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {}
-      }
-    },
-    {
-      "name": "hr_app_object_store",
-      "title": "App Objects (CAS) demo",
-      "description": "Store/read one immutable, room-private, content-addressed object via mcpapp.objects.put/head/get, authenticated with this app's own installation-bot credential. Live only once this room's Hub is on tenant.132+.",
+      "name": "onboarding_admin_templates",
+      "title": "Quản lý template onboarding",
+      "description": "Admin xem, tạo, cập nhật, nhân bản, xuất bản, lưu trữ hoặc xóa draft template tùy chỉnh.",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "action": {
-            "type": "string",
-            "enum": [
-              "put",
-              "head",
-              "get"
-            ]
-          },
-          "roomId": {
-            "type": "string",
-            "description": "Optional; must equal the room this call is made from (defaults to it)."
-          },
-          "dataBase64": {
-            "type": "string"
-          },
-          "mediaType": {
-            "type": "string"
-          },
-          "digest": {
-            "type": "string"
-          }
+          "action": { "type": "string", "enum": ["list", "get", "create", "update", "clone_system", "publish", "archive", "delete"] },
+          "templateId": { "type": "string" },
+          "version": { "type": "number" },
+          "expectedUpdatedAt": { "type": "string" },
+          "draft": { "type": "object" }
         },
-        "required": [
-          "action"
-        ]
+        "required": ["action"]
       }
     },
     {
-      "name": "hr_app_db_store",
-      "title": "App Database demo",
-      "description": "Register a demo collection, create/query records, and read its schema via mcpapp.db.registerCollection / create / query / getSchema, authenticated with this app's own installation-bot credential. Live only once this room's Hub is on tenant.132+.",
+      "name": "onboarding_admin_assignments",
+      "title": "Quản lý nhân sự onboarding",
+      "description": "Admin xem thành viên room, gán onboarding thủ công, theo dõi tiến độ, nhắc hạn và cấp lượt làm lại.",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "action": {
-            "type": "string",
-            "enum": [
-              "registerCollection",
-              "create",
-              "query",
-              "getSchema"
-            ]
-          },
-          "roomId": {
-            "type": "string",
-            "description": "Optional; must equal the room this call is made from (defaults to it)."
-          },
-          "label": {
-            "type": "string"
-          },
-          "note": {
-            "type": "string"
-          }
+          "action": { "type": "string", "enum": ["list", "get", "list_members", "assign", "grant_retry", "send_due_reminders"] },
+          "assignmentId": { "type": "string" },
+          "memberId": { "type": "string" },
+          "employeeType": { "type": "string", "enum": ["normal", "advanced"] },
+          "templateId": { "type": "string" },
+          "templateVersion": { "type": "number" },
+          "dueAt": { "type": "string" },
+          "at": { "type": "string" }
         },
-        "required": [
-          "action"
-        ]
+        "required": ["action"]
+      }
+    },
+    {
+      "name": "onboarding_learning",
+      "title": "Học và làm bài onboarding",
+      "description": "Nhân sự xem tài liệu, ghi nhận hoàn thành, lưu bài nháp, nộp bài và xem kết quả của chính mình.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "enum": ["list", "get", "open_resource", "complete_resource", "start_attempt", "save_draft", "submit", "get_result", "get_feedback"] },
+          "memberId": { "type": "string" },
+          "assignmentId": { "type": "string" },
+          "resourceId": { "type": "string" },
+          "attemptId": { "type": "string" },
+          "operationId": { "type": "string" },
+          "answers": { "type": "array", "items": { "type": "object" } }
+        },
+        "required": ["action"]
+      }
+    },
+    {
+      "name": "onboarding_reviews",
+      "title": "Nhận xét và đánh giá onboarding",
+      "description": "Admin nhận xét từng câu tự luận và công bố đánh giá chung với kết luận Đạt, Không đạt hoặc Làm lại.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "enum": ["list_essays", "save_essay_feedback", "list_evaluations", "publish_evaluation"] },
+          "attemptId": { "type": "string" },
+          "answerId": { "type": "string" },
+          "comment": { "type": "string" },
+          "operationId": { "type": "string" },
+          "completionLevel": { "type": "string" },
+          "strengths": { "type": "string" },
+          "improvements": { "type": "string" },
+          "publicComment": { "type": "string" },
+          "conclusion": { "type": "string", "enum": ["passed", "failed", "retry"] }
+        },
+        "required": ["action"]
       }
     }
   ],
@@ -368,60 +225,16 @@
   },
   "volumes": [],
   "stateless": true,
-  "license": {
-    "tiers": [
-      {
-        "id": "free",
-        "name": "Free",
-        "features": [],
-        "limits": {
-          "records": 50
-        }
-      },
-      {
-        "id": "pro",
-        "name": "Pro",
-        "features": [
-          "bulk-export"
-        ],
-        "limits": {
-          "records": 5000
-        }
-      }
-    ]
-  },
   "env": [
     {
-      "key": "HRM_COMPANY_NAME",
-      "description": "Company name shown in the HR dashboard header.",
-      "required": true,
-      "secret": false,
-      "example": "Acme GmbH",
-      "default": null
-    },
-    {
-      "key": "HRM_LOCALE",
-      "description": "BCP-47 locale used for date and currency formatting.",
-      "required": false,
-      "secret": false,
-      "example": "de-DE",
-      "default": "en-US"
-    },
-    {
-      "key": "HRM_SMTP_PASSWORD",
-      "description": "Password for the SMTP account payslip mail is sent through.",
-      "required": false,
-      "secret": true
-    },
-    {
       "key": "PRIVOS_AGENT_BOT_CREDENTIAL",
-      "description": "This app's agent bot Hub API credential. Issued and rotated only by a workspace admin from this app's settings page, never by this app.",
+      "description": "Hub credential used only by the app backend for room-scoped App Database and notification calls.",
       "required": false,
       "secret": true
     },
     {
       "key": "PRIVOS_AGENT_BOT_USER_ID",
-      "description": "This app's agent bot Hub user id, paired with PRIVOS_AGENT_BOT_CREDENTIAL for REST auth. Written only by a workspace admin from this app's settings page.",
+      "description": "User id paired with the app service credential for authenticated Hub calls.",
       "required": false,
       "secret": false
     }

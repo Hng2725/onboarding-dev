@@ -24,6 +24,8 @@ type CatalogEntry = {
 
 const CATALOG: Readonly<Record<string, CatalogEntry>> = {
 	'basic:information': { contexts: ['workspace', 'room'], executionContexts: ['user', 'background', 'both'] },
+	'rooms:roles:read': { contexts: ['room'], executionContexts: ['user'] },
+	'rooms:read': { contexts: ['room'], executionContexts: ['user'] },
 	'lists:read': { contexts: ['workspace', 'room'], executionContexts: ['user', 'background', 'both'] },
 	'lists:query': { contexts: ['workspace', 'room'], executionContexts: ['user', 'background', 'both'] },
 	'lists:write': { contexts: ['workspace', 'room'], executionContexts: ['user', 'background', 'both'] },

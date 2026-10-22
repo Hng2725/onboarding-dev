@@ -1,7 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
-  <title id="title">PrivOS Demo MCP App</title>
-  <rect width="512" height="512" rx="112" fill="#001930"/>
-  <circle cx="256" cy="196" r="80" fill="#FFC814"/>
-  <path d="M112 414c18-91 72-137 144-137s126 46 144 137" fill="#3C82E6"/>
-  <path d="M328 112h96v96h-32v-41l-77 77-23-23 77-77h-41z" fill="#FFFAE8"/>
+  <title id="title">PrivOS Onboarding</title>
+  <rect width="512" height="512" rx="112" fill="#4f52c9"/>
+  <circle cx="236" cy="178" r="68" fill="#fff"/>
+  <path d="M116 390c0-77 54-132 120-132s120 55 120 132v18H116z" fill="#fff"/>
+  <circle cx="378" cy="372" r="76" fill="#20a779" stroke="#4f52c9" stroke-width="16"/>
+  <path d="m344 373 23 23 48-52" fill="none" stroke="#fff" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

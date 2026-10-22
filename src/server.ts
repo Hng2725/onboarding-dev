@@ -24,6 +24,7 @@ import express from 'express';
 import { serveApp, RuntimeModeError } from '@privos_ai/app-server';
 
 import { createManifest, buildRelayAppDescriptor } from './manifest';
+import { onboardingUiResource } from './mcp-message-handlers';
 import { relayMcpHandler } from './relay-transport';
 
 /**
@@ -56,6 +57,7 @@ async function start(): Promise<void> {
 
 	const handle = await serveApp({
 		descriptor: buildRelayAppDescriptor(),
+		ui: onboardingUiResource,
 		createHandler: () => relayMcpHandler,
 		port: Number(process.env.PORT || 3000),
 		...(transportOverride ? { transportOverride } : {}),

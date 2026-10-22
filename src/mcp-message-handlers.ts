@@ -1,72 +1,43 @@
 /**
- * MCP JSON-RPC method handlers for the relay demo app.
- * Production: the shell (`builtUi.renderHtml()`) and its hashed `assets/`
- * files are split over separate `resources/read` calls — the Hub fetches
- * assets once per installation generation and re-serves them from its own
- * origin, so the same 250 KB bundle no longer travels the relay on every tab
- * open. In development: reads source and builds on-the-fly via Vite.
+ * MCP JSON-RPC method handlers for the PrivOS Onboarding app.
+ * Production serves one self-contained HTML resource. Keeping JS and CSS in
+ * that response avoids Hub generation caches pinning old content-hashed asset
+ * names after a UI-only rebuild. Development still uses the live Vite server.
  */
 import { createManifest } from './manifest';
 import path from 'path';
 import { fileURLToPath } from 'node:url';
 
 import {
-	getPlatformContext,
-	publicUrlFor,
-	serveBuiltUi,
 	INVALID_PARAMS,
-	type ServeBuiltUi,
+	type UiResourceProvider,
 	type VerifiedActor,
 } from '@privos_ai/app-server';
 
 import _pkg from '../privos-app.json';
 import { getAppIconDataUri } from './app-icon';
-import { createLicenseGuard } from './license';
-import { checkAgentBotCredential } from './agent-bot-credential-check';
-import { APP_OBJECT_STORE_TOOL, APP_DB_STORE_TOOL } from './app-platform-demo-tool-defs';
-import { handleAppObjectStoreTool } from './app-objects-demo-tool';
-import { handleAppDbStoreTool } from './app-db-demo-tool';
-import { requireVerifiedActor } from './caller-room';
+import { serveInlineBuiltUi, type InlineBuiltUi } from './inline-ui';
+import {
+	DATA_TOOL_NAMES,
+	handleOnboardingTool,
+	ONBOARDING_DASHBOARD_TOOL,
+	type OnboardingToolHandler,
+} from './onboarding/tools';
 const pkg = _pkg as Record<string, any>;
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-const TOOL_NAME = 'hr_management_dashboard';
-// Pure data (no UI) tool: returns the SDK-verified caller actor — Managed Direct
-// HTTP names it in the body-bound Hub dispatch assertion; Relay names it via a
-// separately Hub-signed user token verified against the Hub's JWKS. See
-// `handleWhoami` and `handleMcpMessage`'s `actor` parameter doc below.
-const WHOAMI_TOOL = 'hr_whoami';
-const BULK_EXPORT_TOOL = 'hr_bulk_export';
-// Pure data (no UI) tool: proves the configured agent bot credential actually
-// authenticates against the Hub. See agent-bot-credential-check.ts.
-const CREDENTIAL_CHECK_TOOL = 'hr_agent_bot_credential_check';
 /**
- * `ui://<appSlug>/…` — `appSlug` MUST be `app.appId`, i.e. `privos-app.json`'s `name`
- * (`ai.privos.mcp-app-demo`), never a different, human-friendlier host string. The Hub resolves
- * `serveBuiltUi`'s asset/manifest URIs from the registered app id, not from this resource URI —
- * a mismatch here 404s every asset behind a correct-looking "App assets unavailable" watchdog.
+ * Stable logical URI from the reviewed manifest. The document itself is
+ * self-contained, so UI-only rebuilds do not change this address or create
+ * generation-pinned asset URLs.
  */
 const UI_RESOURCE_URI = `ui://${pkg.name}/form.html`;
-/** `appSlug` for `serveBuiltUi` — must equal `app.appId` (`privos-app.json`'s `name`). Derived from
- * {@link UI_RESOURCE_URI}'s host so the two can never drift apart again. */
-const UI_APP_SLUG = new URL(UI_RESOURCE_URI).host;
-/** Sits beside {@link UI_RESOURCE_URI}, not under the `assets/` prefix — matches the SDK's own convention. */
-const ASSETS_MANIFEST_URI = `${UI_RESOURCE_URI.slice(0, UI_RESOURCE_URI.lastIndexOf('/') + 1)}assets-manifest.json`;
 
 const appIcon = getAppIconDataUri();
 
-/**
- * Built once, lazily: constructing before `dist/ui` exists (e.g. `npm test`
- * runs ahead of `npm run build` in `verify:fast-pr`) must not crash every
- * caller that merely imports this module. `serveBuiltUi` throws at
- * construction on a malformed build (non-relative asset tags, unhashed/
- * oversized/`.map` files under `assets/`) — that failure surfaces the first
- * time the UI is actually requested, never earlier.
- */
-let builtUi: ServeBuiltUi | null = null;
-function getBuiltUi(): ServeBuiltUi {
-	if (!builtUi) {
-		builtUi = serveBuiltUi({ distDir: path.join(moduleDir, '../dist/ui'), appSlug: UI_APP_SLUG });
-	}
+/** Construct lazily so importing backend-only handlers does not require a UI build. */
+let builtUi: InlineBuiltUi | null = null;
+function getBuiltUi(): InlineBuiltUi {
+	if (!builtUi) builtUi = serveInlineBuiltUi(path.join(moduleDir, '../dist/ui'));
 	return builtUi;
 }
 
@@ -85,6 +56,18 @@ export function setDevPublicUrl(publicUrl: string): void {
 function currentShellHtml(): string {
 	return devPublicUrl ? getDevUiHtml(devPublicUrl) : getBuiltUi().renderHtml();
 }
+
+/**
+ * The SDK runtime owns `initialize` and intercepts UI `resources/read` calls
+ * before the application handler. Supplying this provider is therefore what
+ * makes the manifest's `ui.resourceUri` discoverable at runtime; keeping the
+ * callbacks lazy also lets tests import the handler before `dist/ui` exists.
+ */
+export const onboardingUiResource: UiResourceProvider = {
+	uri: UI_RESOURCE_URI,
+	mimeType: 'text/html;profile=mcp-app',
+	renderHtml: () => currentShellHtml(),
+};
 
 /**
  * Handle an incoming MCP JSON-RPC request and return the result.
@@ -108,6 +91,7 @@ export async function handleMcpMessage(
 	_id: number,
 	params: any,
 	actor?: VerifiedActor,
+	onboardingHandler: OnboardingToolHandler = handleOnboardingTool,
 ): Promise<any> {
 	switch (method) {
 		case 'initialize':
@@ -144,28 +128,15 @@ export async function handleMcpMessage(
 			return { tools: createManifest().tools.map(({ ui, ...tool }) => (ui ? { ...tool, _meta: { ui } } : tool)) };
 
 		case 'tools/call':
-			if (params?.name === BULK_EXPORT_TOOL) {
-				requireVerifiedActor(actor);
-				const records = Array.isArray(params?.arguments?.records) ? params.arguments.records : [];
-				const guard = createLicenseGuard();
-				guard.assert('bulk-export');
-				guard.assertWithin('records', records.length);
-				return { content: [{ type: 'text', text: JSON.stringify({ exported: records.length, records }) }] };
+			if ((DATA_TOOL_NAMES as readonly string[]).includes(params?.name)) {
+				const result = await onboardingHandler(params.name, params?.arguments ?? {}, actor);
+				return { content: [{ type: 'text', text: JSON.stringify(result) }] };
 			}
-			if (params?.name === WHOAMI_TOOL) {
-				return handleWhoami(actor);
-			}
-			if (params?.name === CREDENTIAL_CHECK_TOOL) {
-				return { content: [{ type: 'text', text: JSON.stringify(await checkAgentBotCredential()) }] };
-			}
-			if (params?.name === APP_OBJECT_STORE_TOOL) {
-				return { content: [{ type: 'text', text: JSON.stringify(await handleAppObjectStoreTool(params?.arguments || {}, actor)) }] };
-			}
-			if (params?.name === APP_DB_STORE_TOOL) {
-				return { content: [{ type: 'text', text: JSON.stringify(await handleAppDbStoreTool(params?.arguments || {}, actor)) }] };
-			}
-			if (params?.name !== TOOL_NAME) {
-				throw new Error(`Unknown tool: ${params?.name || '<missing>'}`);
+			if (params?.name !== ONBOARDING_DASHBOARD_TOOL) {
+				throw Object.assign(new Error(`Unknown tool: ${params?.name || '<missing>'}`), {
+					code: INVALID_PARAMS,
+					data: { code: 'TOOL_NOT_FOUND' },
+				});
 			}
 			return {
 				content: [
@@ -189,15 +160,9 @@ export async function handleMcpMessage(
 }
 
 /**
- * `resources/read` branches on the requested URI: the shell, the assets
- * manifest, or one split asset. Any other URI is refused — before the split,
- * this handler echoed the UI HTML for every URI it was asked about; that
- * silent fallback is gone by design (see the demo's CHANGELOG).
- *
- * Dev mode short-circuits ahead of all of this: the live Vite dev server is
- * the only source of truth there (no split assets exist to read), so it keeps
- * echoing the dev shell for whatever URI was requested, matching the
- * pre-split behavior exactly.
+ * Production exposes only the self-contained shell URI; stale split-asset
+ * requests are rejected. Dev mode keeps forwarding requests to its live Vite
+ * shell because those URLs exist only for the lifetime of the dev server.
  */
 function handleResourcesRead(uri: unknown): { contents: unknown[] } {
 	if (devPublicUrl) {
@@ -216,74 +181,10 @@ function handleResourcesRead(uri: unknown): { contents: unknown[] } {
 		return { contents: [{ uri: UI_RESOURCE_URI, mimeType: 'text/html;profile=mcp-app', text: currentShellHtml() }] };
 	}
 
-	if (uri === ASSETS_MANIFEST_URI) {
-		return {
-			contents: [{ uri: ASSETS_MANIFEST_URI, mimeType: 'application/json', text: JSON.stringify(getBuiltUi().readAssetsManifest()) }],
-		};
-	}
-
-	const asset = typeof uri === 'string' ? getBuiltUi().readAsset(uri) : null;
-	if (asset) return { contents: [asset] };
 
 	throw Object.assign(new Error(`Unknown resource: ${typeof uri === 'string' ? uri : '<missing>'}`), {
 		code: INVALID_PARAMS,
 	});
-}
-
-/**
- * Backend handler for the `hr_whoami` tool.
- *
- * `actor` is only ever the SDK-verified {@link VerifiedActor} the caller
- * (`http-server.ts` for Managed Direct HTTP, `relay-transport.ts` for Relay)
- * forwarded from `runtime-identity.ts` / `context.actor`. This function never
- * reads any plain, unverified caller-identity field (e.g. request
- * `_meta.privosUser.userId`) — those ride alongside the signed token but are
- * not proof of anything on their own, and there is intentionally no fallback
- * to them here. The iframe never receives or forwards a bearer/user token.
- */
-async function handleWhoami(actor?: VerifiedActor): Promise<any> {
-	const wrap = (obj: Record<string, any>) => ({ content: [{ type: 'text', text: JSON.stringify(obj) }] });
-	if (!actor) {
-		return wrap({
-			verified: false,
-			error: 'No verified caller identity is available for this request (no token presented, or verification failed).',
-		});
-	}
-	const username = actor.username || actor.userId;
-	return wrap({
-		verified: true,
-		username,
-		userId: actor.userId,
-		roomId: actor.roomId,
-		provenance: actor.provenance,
-		message: `Backend verified this request came from ${username} (${actor.userId}) via ${actor.provenance}.`,
-		platform: describePlatformEnvironment(),
-	});
-}
-
-/**
- * What the platform injected and what the operator configured — reported so an
- * end-to-end check can prove the environment actually reached the container.
- *
- * A secret is reported as SET or UNSET and never by value: this output travels
- * through the room, so printing the SMTP password — or the agent bot
- * credential — here would be exactly the leak the whole write-only path
- * exists to prevent. `PRIVOS_AGENT_BOT_CREDENTIAL` is written by a workspace
- * admin from Admin > Apps > this app > Settings, never by this app; this
- * backend only ever reads it from its own environment, the same as any other
- * declared secret.
- */
-function describePlatformEnvironment(): Record<string, unknown> {
-	const platform = getPlatformContext();
-	return {
-		publicUrl: platform.publicUrl ?? null,
-		accessMode: platform.accessMode ?? null,
-		mediaUrlExample: publicUrlFor('/public/icon.svg') ?? null,
-		companyName: process.env.HRM_COMPANY_NAME ?? null,
-		locale: process.env.HRM_LOCALE ?? 'en-US',
-		smtpPasswordSet: Boolean(process.env.HRM_SMTP_PASSWORD),
-		agentBotCredentialSet: Boolean(process.env.PRIVOS_AGENT_BOT_CREDENTIAL),
-	};
 }
 
 /**
@@ -299,7 +200,7 @@ function getDevUiHtml(publicUrl: string): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-	  <title>${pkg.title || 'PrivOS Demo MCP App'} (dev)</title>
+	  <title>${pkg.title || 'PrivOS Onboarding'} (dev)</title>
   <script type="module" src="${base}/@vite/client"></script>
   <script type="module">
     import RefreshRuntime from "${base}/@react-refresh";

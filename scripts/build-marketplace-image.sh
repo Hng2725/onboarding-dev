@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-image_tag="${1:-privos-mcp-app-demo:local}"
+image_tag="${1:-privos-onboarding:local}"
 mapfile -t manifest_values < <(node --input-type=module <<'NODE'
 import crypto from 'node:crypto';
 import fs from 'node:fs';
