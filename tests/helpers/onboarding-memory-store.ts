@@ -10,6 +10,8 @@ export class MemoryOnboardingStore implements OnboardingStore {
   private sequence = 0;
   private readonly rows = new Map<string, Map<string, StoreRecord>>();
 
+  constructor(private readonly maxPageSize?: number) {}
+
   private table(collection: string): Map<string, StoreRecord> {
     const current = this.rows.get(collection) ?? new Map<string, StoreRecord>();
     this.rows.set(collection, current);
@@ -49,7 +51,14 @@ export class MemoryOnboardingStore implements OnboardingStore {
         return order.direction === 'asc' ? compared : -compared;
       });
     }
-    return { records: records.slice(0, options.limit ?? 50) as T[] };
+    const offset = options.cursor ? Number(options.cursor) : 0;
+    const requestedPageSize = options.limit ?? 50;
+    const pageSize = Math.min(requestedPageSize, this.maxPageSize ?? requestedPageSize);
+    const nextOffset = offset + pageSize;
+    return {
+      records: records.slice(offset, nextOffset) as T[],
+      ...(nextOffset < records.length ? { nextCursor: String(nextOffset) } : {}),
+    };
   }
 
   async update<T extends StoreRecord>(

@@ -74,7 +74,7 @@ function MountedRoute({ id, activeRoute, children }: { id: OnboardingRoute; acti
 
 export function AdminWorkspace({ api, summary, route, onNavigate }: { api: OnboardingApi; summary: AdminBootstrapSummary; route: OnboardingRoute; onNavigate: (route: OnboardingRoute) => void }) {
   return <>
-    <MountedRoute id="admin-overview" activeRoute={route}><AdminDashboard api={api} onOpenEmployees={() => onNavigate('employees')} /></MountedRoute>
+    <MountedRoute id="admin-overview" activeRoute={route}><AdminDashboard api={api} onNavigate={(target) => onNavigate(target)} /></MountedRoute>
     <MountedRoute id="employees" activeRoute={route}><EmployeesPage api={api} /></MountedRoute>
     <MountedRoute id="templates" activeRoute={route}><TemplatesPage api={api} onUseTemplate={() => onNavigate('employees')} /></MountedRoute>
     <MountedRoute id="essay-feedback" activeRoute={route}><EssayFeedbackPage api={api} /></MountedRoute>

@@ -25,8 +25,8 @@ function themeBlock(pattern: RegExp): ReadonlyMap<string, string> {
   return declarations(block);
 }
 
-function cssRule(pattern: RegExp): ReadonlyMap<string, string> {
-  const block = templateEditorStylesheet.match(pattern)?.[1] ?? '';
+function cssRule(pattern: RegExp, source = templateEditorStylesheet): ReadonlyMap<string, string> {
+  const block = source.match(pattern)?.[1] ?? '';
   return new Map(
     [...block.matchAll(/([\w-]+)\s*:\s*([^;]+);/g)]
       .map((match) => [match[1], match[2].trim()] as const),
@@ -96,5 +96,12 @@ describe('onboarding visual theme', () => {
     expect(text).toMatch(/^#[0-9a-f]{6}$/i);
     expect(background).toMatch(/^#[0-9a-f]{6}$/i);
     expect(contrast(text, background)).toBeGreaterThanOrEqual(7);
+  });
+
+  it('keeps operation notices above modal backdrops', () => {
+    const notice = cssRule(/\.inline-notice\s*\{([\s\S]*?)\}/, stylesheet);
+
+    expect(notice.get('position')).toBe('fixed');
+    expect(Number.parseInt(notice.get('z-index') ?? '0', 10)).toBeGreaterThan(50);
   });
 });

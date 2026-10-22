@@ -18,6 +18,7 @@ function unreachableServices(): OnboardingServiceBundle {
   return {
     prepare: unreachable,
     listRoomMembers: unreachable,
+    employees: { list: unreachable, getByMemberId: unreachable, add: unreachable },
     templates: {
       list: unreachable, getAdminDetail: unreachable, getLearnerSnapshot: unreachable,
       createDraft: unreachable, updateDraft: unreachable, cloneSystemTemplate: unreachable,

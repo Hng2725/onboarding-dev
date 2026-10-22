@@ -11,6 +11,7 @@ const COLLECTION_NAMES = [
   'onboarding_modules',
   'onboarding_resources',
   'onboarding_questions',
+  'onboarding_employees',
   'onboarding_assignments',
   'onboarding_material_progress',
   'onboarding_attempts',
@@ -25,12 +26,18 @@ describe('onboarding App Database schema', () => {
     callAppPlatformTool.mockReset();
   });
 
-  it('defines all eleven room-scoped collections and required unique indexes', () => {
+  it('defines all twelve room-scoped collections and required unique indexes', () => {
     expect(ONBOARDING_COLLECTIONS.map((definition) => definition.collection)).toEqual(COLLECTION_NAMES);
     expect(ONBOARDING_COLLECTIONS.every((definition) => definition.scope === 'room')).toBe(true);
 
     const indexes = (collection: string) => ONBOARDING_COLLECTIONS
       .find((definition) => definition.collection === collection)?.indexes;
+    expect(indexes('onboarding_employees')).toContainEqual(expect.objectContaining({
+      fields: { memberId: 1 }, unique: true,
+    }));
+    expect(indexes('onboarding_assignments')).not.toContainEqual(expect.objectContaining({
+      fields: { memberId: 1, templateId: 1, templateVersion: 1 }, unique: true,
+    }));
     expect(indexes('onboarding_material_progress')).toContainEqual(expect.objectContaining({
       fields: { assignmentId: 1, resourceId: 1 }, unique: true,
     }));
@@ -50,7 +57,7 @@ describe('onboarding App Database schema', () => {
 
     await ensureOnboardingSchema('room-a');
 
-    expect(callAppPlatformTool).toHaveBeenCalledTimes(22);
+    expect(callAppPlatformTool).toHaveBeenCalledTimes(24);
     for (const [index, [toolName, args, scope, roomId]] of callAppPlatformTool.mock.calls.entries()) {
       if (index % 2 === 0) {
         expect(toolName).toBe('mcpapp.db.registerCollection');
@@ -72,7 +79,7 @@ describe('onboarding App Database schema', () => {
 
     const result = await ensureOnboardingSchema('room-a');
     expect(result).toBeUndefined();
-    expect(callAppPlatformTool).toHaveBeenCalledTimes(22);
+    expect(callAppPlatformTool).toHaveBeenCalledTimes(24);
   });
 });
 

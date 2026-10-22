@@ -102,6 +102,17 @@ export interface AssignmentRecord {
   readonly updatedAt: string;
 }
 
+export interface EmployeeRecord {
+  readonly id: string;
+  readonly roomId: string;
+  readonly memberId: string;
+  readonly employeeType: EmployeeType;
+  readonly addedBy: string;
+  readonly addedAt: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
 export interface AttemptRecord {
   readonly id: string;
   readonly roomId: string;

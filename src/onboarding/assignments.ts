@@ -9,13 +9,13 @@ import type {
   TemplateSnapshot,
 } from './contracts';
 import { createNotificationPort, type NotificationPort } from './notifications';
+import { EmployeeServiceError, type EmployeeService } from './employees';
 import type { OnboardingStore, StoreRecord } from './store';
 import type { AdminTemplateDetail, TemplateService } from './templates';
 import { canUnlockExercise } from './workflow';
 
 export interface AssignMemberInput {
   readonly memberId: string;
-  readonly employeeType: EmployeeType;
   readonly templateId: string;
   readonly templateVersion: number;
   readonly dueAt?: string;
@@ -61,8 +61,10 @@ export interface AssignmentService {
 type AssignmentErrorCode =
   | 'ADMIN_REQUIRED'
   | 'MEMBER_NOT_FOUND'
+  | 'EMPLOYEE_NOT_FOUND'
   | 'MEMBER_FORBIDDEN'
   | 'ASSIGNMENT_NOT_FOUND'
+  | 'ASSIGNMENT_ALREADY_EXISTS'
   | 'TEMPLATE_MISMATCH'
   | 'TEMPLATE_NOT_PUBLISHED'
   | 'RESOURCE_NOT_FOUND'
@@ -109,9 +111,11 @@ interface AttemptDbRecord extends StoreRecord {
 
 interface AuditDbRecord extends StoreRecord {
   readonly operationId?: string;
+  readonly metadata?: StoreRecord;
 }
 
 export interface AssignmentServiceOptions {
+  readonly employees: EmployeeService;
   readonly callPlatform?: AppPlatformToolCaller;
   readonly notifications?: NotificationPort;
   readonly id?: () => string;
@@ -188,12 +192,27 @@ function warningFrom(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isDuplicateError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const record = error as Record<string, unknown>;
+  return record.code === 11000 || [record.message, record.error, String(error)]
+    .some((value) => typeof value === 'string' && /E11000|duplicate key/i.test(value));
+}
+
+function memberIdFrom(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const row = value as Record<string, unknown>;
+  return [row.userId, row.id, row._id]
+    .find((candidate): candidate is string => typeof candidate === 'string' && Boolean(candidate.trim()));
+}
+
 export function createAssignmentService(
   store: OnboardingStore,
   templates: TemplateService,
-  options: AssignmentServiceOptions = {},
+  options: AssignmentServiceOptions,
 ): AssignmentService {
   const caller = options.callPlatform ?? callAppPlatformTool;
+  const makeId = options.id ?? (() => crypto.randomUUID());
   const now = options.now ?? (() => new Date().toISOString());
 
   function notificationsFor(roomId: string): NotificationPort {
@@ -207,16 +226,17 @@ export function createAssignmentService(
     targetId: string,
     metadata: StoreRecord = {},
     operationId?: string,
-  ): Promise<void> {
-    await store.create(actor.roomId, 'onboarding_audit_events', {
+  ): Promise<AuditDbRecord> {
+    const resolvedOperationId = operationId ?? `audit:${makeId()}`;
+    return store.create<AuditDbRecord>(actor.roomId, 'onboarding_audit_events', {
       actorId: actor.userId,
       action,
       targetType,
       targetId,
       metadata,
-      operationId,
+      operationId: resolvedOperationId,
       occurredAt: now(),
-    });
+    }, resolvedOperationId);
   }
 
   async function assignmentRow(roomId: string, assignmentId: string): Promise<AssignmentDbRecord | undefined> {
@@ -343,53 +363,101 @@ export function createAssignmentService(
     async assign(actor, input) {
       requireAdmin(actor);
       const memberId = input.memberId.trim();
-      const rawMembers = await caller('mcpapp.rooms.getMembers', { roomId: actor.roomId }, 'rooms:read', actor.roomId);
-      const members = rawMembers && typeof rawMembers === 'object'
+      let employee;
+      try {
+        employee = await options.employees.getByMemberId(actor, memberId);
+      } catch (error) {
+        if (error instanceof EmployeeServiceError && error.code === 'EMPLOYEE_NOT_FOUND') {
+          throw new AssignmentServiceError('EMPLOYEE_NOT_FOUND', 'Nhân sự chưa được thêm vào danh sách.');
+        }
+        throw error;
+      }
+      const rawMembers = await caller(
+        'mcpapp.rooms.getMembers', { roomId: actor.roomId }, 'rooms:read', actor.roomId,
+      );
+      const members: readonly unknown[] = Array.isArray(rawMembers)
+        ? rawMembers
+        : rawMembers && typeof rawMembers === 'object'
         && Array.isArray((rawMembers as { members?: unknown }).members)
-        ? (rawMembers as { members: Array<{ userId?: unknown }> }).members
-        : [];
-      if (!members.some((item) => item && item.userId === memberId)) {
-        throw new AssignmentServiceError('MEMBER_NOT_FOUND', 'The selected user is not a current member of this room.');
+          ? (rawMembers as { members: unknown[] }).members
+          : [];
+      if (!members.some((member) => memberIdFrom(member) === memberId)) {
+        throw new AssignmentServiceError('MEMBER_NOT_FOUND', 'Thành viên đã chọn không còn trong room.');
       }
       const template = await templates.getAdminDetail(actor, input.templateId, input.templateVersion);
       if (template.status !== 'published') {
         throw new AssignmentServiceError('TEMPLATE_NOT_PUBLISHED', 'Only published template versions can be assigned.');
       }
-      if (template.employeeType !== input.employeeType) {
+      if (template.employeeType !== employee.employeeType) {
         throw new AssignmentServiceError('TEMPLATE_MISMATCH', 'Template and employee classifications must match.');
       }
-      const timestamp = now();
-      const row = await store.create<AssignmentDbRecord>(actor.roomId, 'onboarding_assignments', {
-        memberId,
-        employeeType: input.employeeType,
-        templateSource: template.source,
-        templateId: template.id,
-        templateVersion: template.version,
-        templateSnapshot: snapshotOf(template),
-        dueAt: input.dueAt,
-        status: 'assigned',
-        attemptLimit: template.maxAttempts,
-        allowedAttempts: 1,
-        assignedBy: actor.userId,
-        assignedAt: timestamp,
-        createdAt: timestamp,
-        updatedAt: timestamp,
+      const duplicate = await store.query<AssignmentDbRecord>(actor.roomId, 'onboarding_assignments', {
+        filter: { memberId, templateId: template.id, templateVersion: template.version }, limit: 1,
       });
-      await audit(actor, 'assignment.created', 'assignment', row.id, {
-        memberId, employeeType: input.employeeType, templateId: template.id, templateVersion: template.version,
-      });
-
-      let warning: string | undefined;
-      try {
-        const result = await notificationsFor(actor.roomId).notify(
-          memberId,
-          'Bạn có chương trình onboarding mới',
-          `Bạn đã được gán chương trình “${template.title}”.`,
+      if (duplicate.records.length > 0) {
+        throw new AssignmentServiceError(
+          'ASSIGNMENT_ALREADY_EXISTS',
+          'Template và phiên bản này đã được gán cho nhân sự.',
         );
-        if (!result.delivered) warning = result.warning ?? 'Không thể gửi thông báo.';
-      } catch (error) {
-        warning = warningFrom(error);
       }
+      const timestamp = now();
+      const assignmentOperationId = `assignment:${memberId}:${template.id}:${template.version}`;
+      let row: AssignmentDbRecord;
+      try {
+        row = await store.create<AssignmentDbRecord>(actor.roomId, 'onboarding_assignments', {
+          memberId,
+          employeeType: employee.employeeType,
+          templateSource: template.source,
+          templateId: template.id,
+          templateVersion: template.version,
+          templateSnapshot: snapshotOf(template),
+          dueAt: input.dueAt,
+          status: 'assigned',
+          attemptLimit: template.maxAttempts,
+          allowedAttempts: 1,
+          assignedBy: actor.userId,
+          assignedAt: timestamp,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }, assignmentOperationId);
+      } catch (error) {
+        if (isDuplicateError(error)) {
+          throw new AssignmentServiceError(
+            'ASSIGNMENT_ALREADY_EXISTS',
+            'Template và phiên bản này đã được gán cho nhân sự.',
+          );
+        }
+        throw error;
+      }
+      const warnings: string[] = [];
+      const sideEffectToken = `assignment-side-effect:${makeId()}`;
+      let shouldNotify = false;
+      try {
+        const auditRow = await audit(actor, 'assignment.created', 'assignment', row.id, {
+          memberId,
+          employeeType: employee.employeeType,
+          templateId: template.id,
+          templateVersion: template.version,
+          sideEffectToken,
+        }, `audit:${assignmentOperationId}`);
+        shouldNotify = auditRow.metadata?.sideEffectToken === sideEffectToken;
+      } catch (error) {
+        warnings.push(`Không thể ghi nhật ký kiểm toán: ${warningFrom(error)}`);
+      }
+
+      if (shouldNotify) {
+        try {
+          const result = await notificationsFor(actor.roomId).notify(
+            memberId,
+            'Bạn có chương trình onboarding mới',
+            `Bạn đã được gán chương trình “${template.title}”.`,
+          );
+          if (!result.delivered) warnings.push(result.warning ?? 'Không thể gửi thông báo.');
+        } catch (error) {
+          warnings.push(warningFrom(error));
+        }
+      }
+      const warning = warnings.length > 0 ? warnings.join(' ') : undefined;
       return { assignment: assignmentFrom(row, actor.roomId), ...(warning ? { warning } : {}) };
     },
 

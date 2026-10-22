@@ -134,6 +134,7 @@ interface EvaluationDbRecord extends StoreRecord {
 
 export interface ReviewServiceOptions {
   readonly notifications?: NotificationPort;
+  readonly id?: () => string;
   readonly now?: () => string;
 }
 
@@ -201,6 +202,7 @@ export function createReviewService(
   _attempts: AttemptService,
   options: ReviewServiceOptions = {},
 ): ReviewService {
+  const makeId = options.id ?? (() => crypto.randomUUID());
   const now = options.now ?? (() => new Date().toISOString());
 
   async function attemptAndAssignment(roomId: string, attemptId: string) {
@@ -299,6 +301,7 @@ export function createReviewService(
         action: 'essay.feedback_saved',
         targetType: 'answer',
         targetId: input.answerId,
+        operationId: `audit:${makeId()}`,
         metadata: { attemptId: input.attemptId },
         occurredAt: timestamp,
       });

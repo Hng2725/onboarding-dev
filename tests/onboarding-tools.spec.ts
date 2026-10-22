@@ -24,6 +24,11 @@ function services(): OnboardingServiceBundle {
   return {
     prepare: vi.fn().mockResolvedValue(undefined),
     listRoomMembers: vi.fn().mockResolvedValue([{ userId: 'member-1', username: 'learner.minh' }]),
+    employees: {
+      list: vi.fn().mockResolvedValue([{ id: 'employee-1', memberId: 'member-1', employeeType: 'normal' }]),
+      getByMemberId: vi.fn(),
+      add: vi.fn().mockResolvedValue({ id: 'employee-2', memberId: 'member-2', employeeType: 'advanced' }),
+    },
     templates: {
       list: vi.fn().mockResolvedValue([{ id: 'privos-foundations', version: 1 }]),
       getAdminDetail: vi.fn(), getLearnerSnapshot: vi.fn(), createDraft: vi.fn(), updateDraft: vi.fn(),
@@ -136,6 +141,34 @@ describe('onboarding tool dispatcher', () => {
     expect(bundle.prepare).not.toHaveBeenCalled();
     expect(bundle.templates.list).not.toHaveBeenCalled();
     expect(bundle.assignments.listAdmin).not.toHaveBeenCalled();
+  });
+
+  it('dispatches employee list and add actions with the verified Admin actor', async () => {
+    const bundle = services();
+    const handle = createOnboardingToolHandler(() => bundle);
+    const actor = verified({ room_roles: ['owner'] }, 'admin-1');
+
+    await expect(handle('onboarding_admin_assignments', { action: 'list_employees' }, actor))
+      .resolves.toMatchObject({ employees: [{ memberId: 'member-1' }] });
+    await expect(handle('onboarding_admin_assignments', {
+      action: 'add_employee', memberId: 'member-2', employeeType: 'advanced',
+    }, actor)).resolves.toMatchObject({ employee: { memberId: 'member-2', employeeType: 'advanced' } });
+
+    expect(bundle.employees.list).toHaveBeenCalledWith(expect.objectContaining({ userId: 'admin-1', access: 'admin' }));
+    expect(bundle.employees.add).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'admin-1', access: 'admin' }),
+      { memberId: 'member-2', employeeType: 'advanced' },
+    );
+  });
+
+  it('rejects Learners before employee Admin actions reach the service', async () => {
+    const bundle = services();
+    const handle = createOnboardingToolHandler(() => bundle);
+
+    await expect(handle('onboarding_admin_assignments', {
+      action: 'add_employee', memberId: 'member-2', employeeType: 'advanced',
+    }, verified())).rejects.toMatchObject({ data: { code: 'ADMIN_REQUIRED' } });
+    expect(bundle.employees.add).not.toHaveBeenCalled();
   });
 
   it('binds Learner selectors to the verified member before service dispatch', async () => {

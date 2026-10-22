@@ -5,7 +5,8 @@ import {
   LoadingOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 
 import type { AssignmentStatus, FinalConclusion } from '../../onboarding/contracts';
 
@@ -94,6 +95,52 @@ export function ErrorState({ error, onRetry }: { error: Error; onRetry?: () => v
       {onRetry && <button className="button button-primary" type="button" onClick={onRetry}><ReloadOutlined /> Thử lại</button>}
     </section>
   );
+}
+
+export interface InlineNoticeMessage {
+  readonly message: string;
+  readonly tone: 'success' | 'error';
+}
+
+export interface NoticeScheduler {
+  set(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
+  clear(handle: ReturnType<typeof setTimeout>): void;
+}
+
+const DEFAULT_NOTICE_SCHEDULER: NoticeScheduler = {
+  set: (callback, delayMs) => setTimeout(callback, delayMs),
+  clear: (handle) => clearTimeout(handle),
+};
+
+export function scheduleNoticeDismiss(
+  onDismiss: () => void,
+  scheduler: NoticeScheduler = DEFAULT_NOTICE_SCHEDULER,
+): () => void {
+  const handle = scheduler.set(onDismiss, 2_000);
+  return () => scheduler.clear(handle);
+}
+
+export function InlineNotice({
+  notice,
+  onDismiss,
+  className,
+}: {
+  notice: InlineNoticeMessage | null;
+  onDismiss: () => void;
+  className?: string;
+}) {
+  const dismissRef = useRef(onDismiss);
+  dismissRef.current = onDismiss;
+
+  useEffect(() => {
+    if (!notice) return undefined;
+    return scheduleNoticeDismiss(() => dismissRef.current());
+  }, [notice]);
+
+  if (!notice) return null;
+  const classes = ['inline-notice', `inline-notice-${notice.tone}`, className].filter(Boolean).join(' ');
+  const content = <div className={classes} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.message}</div>;
+  return typeof document === 'undefined' ? content : createPortal(content, document.body);
 }
 
 export function ConfirmDialog({

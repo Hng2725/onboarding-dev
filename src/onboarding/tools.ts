@@ -5,6 +5,7 @@ import { requireAdmin, requireSelf, resolveOnboardingActor, type OnboardingActor
 import { createAssignmentService, type AssignmentService } from './assignments';
 import { createAttemptService, type AttemptService, type DraftAnswerInput } from './attempts';
 import type { AssignmentStatus, EmployeeType, FinalConclusion } from './contracts';
+import { createEmployeeService, type EmployeeService } from './employees';
 import { createReviewService, type ReviewService } from './reviews';
 import { ensureOnboardingSchema } from './schema';
 import { createOnboardingStore } from './store';
@@ -25,7 +26,9 @@ export type OnboardingToolName = OnboardingDataToolName | typeof ONBOARDING_DASH
 const ACTIONS: Readonly<Record<OnboardingDataToolName, readonly string[]>> = {
   onboarding_bootstrap: ['load'],
   onboarding_admin_templates: ['list', 'get', 'create', 'update', 'clone_system', 'publish', 'archive', 'delete'],
-  onboarding_admin_assignments: ['list', 'get', 'list_members', 'assign', 'grant_retry', 'send_due_reminders'],
+  onboarding_admin_assignments: [
+    'list', 'get', 'list_members', 'list_employees', 'add_employee', 'assign', 'grant_retry', 'send_due_reminders',
+  ],
   onboarding_learning: [
     'list', 'get', 'open_resource', 'complete_resource', 'start_attempt', 'save_draft', 'submit', 'get_result',
     'get_feedback',
@@ -43,6 +46,7 @@ export interface RoomMemberDto {
 export interface OnboardingServiceBundle {
   readonly prepare: (actor: OnboardingActor) => Promise<void>;
   readonly listRoomMembers: (actor: OnboardingActor) => Promise<readonly RoomMemberDto[]>;
+  readonly employees: EmployeeService;
   readonly templates: TemplateService;
   readonly assignments: AssignmentService;
   readonly attempts: AttemptService;
@@ -252,10 +256,16 @@ async function dispatchAssignments(
     case 'list': return { assignments: await services.assignments.listAdmin(actor) };
     case 'get': return { detail: await services.assignments.getAdminDetail(actor, requiredString(args, 'assignmentId')) };
     case 'list_members': return { members: await services.listRoomMembers(actor) };
+    case 'list_employees': return { employees: await services.employees.list(actor) };
+    case 'add_employee': return {
+      employee: await services.employees.add(actor, {
+        memberId: requiredString(args, 'memberId'),
+        employeeType: requiredString(args, 'employeeType') as EmployeeType,
+      }),
+    };
     case 'assign': return {
       result: await services.assignments.assign(actor, {
         memberId: requiredString(args, 'memberId'),
-        employeeType: requiredString(args, 'employeeType') as EmployeeType,
         templateId: requiredString(args, 'templateId'),
         templateVersion: requiredNumber(args, 'templateVersion'),
         dueAt: optionalString(args, 'dueAt'),
@@ -387,7 +397,8 @@ function memberFrom(value: unknown): RoomMemberDto | undefined {
 function createDefaultServices(_actor: OnboardingActor): OnboardingServiceBundle {
   const store = createOnboardingStore();
   const templates = createTemplateService(store);
-  const assignments = createAssignmentService(store, templates);
+  const employees = createEmployeeService(store);
+  const assignments = createAssignmentService(store, templates, { employees });
   const attempts = createAttemptService(store, assignments, templates);
   const reviews = createReviewService(store, assignments, attempts);
   return {
@@ -401,6 +412,7 @@ function createDefaultServices(_actor: OnboardingActor): OnboardingServiceBundle
           : [];
       return rows.map(memberFrom).filter((member): member is RoomMemberDto => Boolean(member));
     },
+    employees,
     templates,
     assignments,
     attempts,

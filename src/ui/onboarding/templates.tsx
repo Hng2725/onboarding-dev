@@ -19,7 +19,13 @@ import type {
   TemplateResourceInput,
 } from '../../onboarding/templates';
 import type { OnboardingApi } from './api';
-import { ConfirmDialog, ErrorState, LoadingState } from './components';
+import {
+  ConfirmDialog,
+  ErrorState,
+  InlineNotice,
+  LoadingState,
+  type InlineNoticeMessage,
+} from './components';
 import {
   QuestionEditor,
   TemplateCard,
@@ -177,6 +183,16 @@ function fileBase64(file: File): Promise<string> {
   });
 }
 
+export function templateOperationError(
+  caught: unknown,
+  fallback = 'Không thể cập nhật template.',
+): InlineNoticeMessage {
+  return {
+    message: caught instanceof Error && caught.message ? caught.message : fallback,
+    tone: 'error',
+  };
+}
+
 export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUseTemplate: () => void }) {
   const app = usePrivosApp();
   const { roomId } = usePrivosContext();
@@ -185,8 +201,8 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
   const [statusFilter, setStatusFilter] = useState<TemplateStatusFilter>('all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [editorMessage, setEditorMessage] = useState<string | null>(null);
+  const [notice, setNotice] = useState<InlineNoticeMessage | null>(null);
+  const [editorMessage, setEditorMessage] = useState<InlineNoticeMessage | null>(null);
   const [editorUi, setEditorUi] = useState<TemplateEditorUiState>(CLOSED_EDITOR);
   const [step, setStep] = useState(0);
   const [draft, setDraft] = useState<TemplateDraftInput>(() => emptyDraft());
@@ -318,11 +334,11 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
       }
       if (action === 'clone') {
         await api.adminTemplates('clone_system', { templateId: detailItem.id, version: detailItem.version });
-        setNotice('Đã tạo bản nháp tùy chỉnh từ template hệ thống.');
+        setNotice({ message: 'Đã tạo bản nháp tùy chỉnh từ template hệ thống.', tone: 'success' });
       }
       if (action === 'archive') {
         await api.adminTemplates('archive', { templateId: detailItem.id, version: detailItem.version });
-        setNotice('Đã lưu trữ phiên bản template.');
+        setNotice({ message: 'Đã lưu trữ phiên bản template.', tone: 'success' });
       }
       if (action === 'delete') {
         setPendingDelete(detailItem);
@@ -334,7 +350,7 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
       setDetailActionError(null);
       await refresh();
     } catch (caught) {
-      setDetailActionError(caught instanceof Error ? caught.message : 'Không thể cập nhật template.');
+      setNotice(templateOperationError(caught));
     }
   }
 
@@ -344,14 +360,16 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
     try {
       await api.adminTemplates('delete', { templateId: pendingDelete.id, version: pendingDelete.version });
       setPendingDelete(null);
-      setNotice('Đã xóa template.');
+      setNotice({ message: 'Đã xóa template.', tone: 'success' });
       await refresh();
-    } catch (caught) { setNotice(caught instanceof Error ? caught.message : 'Không thể xóa template.'); }
+    } catch (caught) {
+      setNotice(templateOperationError(caught, 'Không thể xóa template.'));
+    }
     finally { setDeleting(false); }
   }
 
   async function upload(file: File, moduleIndex: number) {
-    if (!roomId) { setEditorMessage('Không xác định được room để tải file.'); return; }
+    if (!roomId) { setEditorMessage({ message: 'Không xác định được room để tải file.', tone: 'error' }); return; }
     setUploading(true);
     setEditorMessage(null);
     try {
@@ -361,14 +379,16 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
       const resource: TemplateResourceInput = { title: uploaded.title, kind: 'file', required: true, fileId: uploaded.fileId };
       const module = draft.modules[moduleIndex];
       updateDraft(patchModule(draft, moduleIndex, { resources: [...module.resources, resource] }));
-      setEditorMessage(`Đã tải ${uploaded.title} lên room.`);
-    } catch (caught) { setEditorMessage(caught instanceof Error ? caught.message : 'Không thể tải file.'); }
+      setEditorMessage({ message: `Đã tải ${uploaded.title} lên room.`, tone: 'success' });
+    } catch (caught) {
+      setEditorMessage({ message: caught instanceof Error ? caught.message : 'Không thể tải file.', tone: 'error' });
+    }
     finally { setUploading(false); }
   }
 
   async function save(publish: boolean) {
     if (publish && blockingIssues.length) {
-      setEditorMessage(`Còn ${blockingIssues.length} mục cần hoàn thiện trước khi xuất bản.`);
+      setEditorMessage({ message: `Còn ${blockingIssues.length} mục cần hoàn thiện trước khi xuất bản.`, tone: 'error' });
       return;
     }
     setSaving(true);
@@ -387,15 +407,20 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
           await api.adminTemplates('publish', { templateId: saved.template.id, version: saved.template.version, expectedUpdatedAt: saved.template.updatedAt });
         } catch (caught) {
           const message = caught instanceof Error ? caught.message : 'Không thể xuất bản template.';
-          setEditorMessage(`Bản nháp đã được lưu nhưng chưa thể xuất bản: ${message}`);
+          setEditorMessage({ message: `Bản nháp đã được lưu nhưng chưa thể xuất bản: ${message}`, tone: 'error' });
           return;
         }
       }
 
-      setNotice(publish ? 'Đã xuất bản phiên bản template.' : 'Đã lưu bản nháp.');
+      setNotice({
+        message: publish ? 'Đã xuất bản phiên bản template.' : 'Đã lưu bản nháp.',
+        tone: 'success',
+      });
       setEditorUi((current) => templateEditorTransition(current, 'save_succeeded'));
       await refresh();
-    } catch (caught) { setEditorMessage(caught instanceof Error ? caught.message : 'Không thể lưu template.'); }
+    } catch (caught) {
+      setEditorMessage({ message: caught instanceof Error ? caught.message : 'Không thể lưu template.', tone: 'error' });
+    }
     finally { setSaving(false); }
   }
 
@@ -404,7 +429,7 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
 
   return <div className="page-stack">
     <section className="page-heading"><div><span className="section-kicker">THƯ VIỆN NỘI DUNG</span><h2>Template onboarding</h2><p>Chọn một template để xem đầy đủ tài liệu, câu hỏi và các thao tác phù hợp.</p></div><button className="button button-primary" type="button" onClick={openNew}><PlusOutlined /> Tạo template</button></section>
-    {notice && <div className="inline-notice" role="status">{notice}</div>}
+    <InlineNotice notice={notice} onDismiss={() => setNotice(null)} />
     <TemplateLibraryToolbar
       query={query}
       status={statusFilter}
@@ -423,7 +448,7 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
       <header className="builder-header"><div><span className="section-kicker">WIZARD 5 BƯỚC</span><h2 id="builder-title">{editing ? 'Chỉnh sửa template' : 'Template onboarding mới'}</h2></div><button className="icon-button" type="button" aria-label="Đóng" onClick={requestEditorClose}><CloseOutlined /></button></header>
       <ol className="wizard-steps">{steps.map((label, index) => <li key={label} className={index === step ? 'active' : index < step ? 'done' : ''}><span>{index < step ? <CheckOutlined /> : index + 1}</span><small>{label}</small></li>)}</ol>
       <div className="builder-body">
-        {editorMessage && <div className="inline-notice editor-notice" role="status">{editorMessage}</div>}
+        <InlineNotice notice={editorMessage} className="editor-notice" onDismiss={() => setEditorMessage(null)} />
         {step === 0 && <div className="form-stack two-column-form"><label className="form-field form-wide"><span>Tên template</span><input value={draft.title} onChange={(event) => updateDraft({ ...draft, title: event.target.value })} placeholder="Ví dụ: Hội nhập đội Kinh doanh" /></label><label className="form-field form-wide"><span>Mô tả</span><textarea rows={3} value={draft.description} onChange={(event) => updateDraft({ ...draft, description: event.target.value })} /></label><label className="form-field"><span>Loại nhân sự</span><select value={draft.employeeType} onChange={(event) => updateDraft({ ...draft, employeeType: event.target.value as EmployeeType })}><option value="normal">Thông thường</option><option value="advanced">Chuyên sâu</option></select></label><label className="form-field"><span>Số lượt làm tối đa</span><input type="number" min={1} value={draft.maxAttempts ?? 1} onChange={(event) => updateDraft({ ...draft, maxAttempts: Number(event.target.value) })} /></label></div>}
         {step === 1 && <div className="module-editor"><div className="section-header"><div><h3>Cấu trúc module</h3><p>Mỗi module là một chặng học có tài liệu và câu hỏi riêng.</p></div><button className="button button-secondary" type="button" onClick={() => updateDraft({ ...draft, modules: [...draft.modules, newModule(draft.modules.length)] })}><PlusOutlined /> Thêm module</button></div>{draft.modules.map((module, index) => <div className="module-block" key={module.id ?? index}><strong>Module {index + 1}</strong><div className="form-grid"><label className="form-field"><span>Mã</span><input value={module.key} onChange={(event) => updateDraft(patchModule(draft, index, { key: event.target.value }))} /></label><label className="form-field"><span>Tiêu đề</span><input value={module.title} onChange={(event) => updateDraft(patchModule(draft, index, { title: event.target.value }))} /></label><label className="form-field form-wide"><span>Mô tả</span><textarea rows={2} value={module.description} onChange={(event) => updateDraft(patchModule(draft, index, { description: event.target.value }))} /></label></div></div>)}</div>}
         {step === 2 && <div className="module-editor"><div className="section-header"><div><h3>Tài liệu bắt buộc</h3><p>Nhân sự phải mở và xác nhận hoàn thành trước khi làm bài.</p></div></div>{draft.modules.map((module, index) => <div className="module-block" key={module.id ?? index}><strong>{module.title || `Module ${index + 1}`}</strong><label className="upload-zone"><UploadOutlined /><span>{uploading ? 'Đang tải lên PrivOS…' : 'Tải tài liệu lên room'}</span><input type="file" disabled={uploading} onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, index); event.target.value = ''; }} /></label><div className="resource-list">{module.resources.map((resource, resourceIndex) => <span key={`${resource.fileId ?? resource.sourceUrl}-${resourceIndex}`}><FileAddOutlined /> {resource.title}</span>)}</div><button className="text-button" type="button" onClick={() => { const sourceUrl = window.prompt('Nhập URL tài liệu'); if (sourceUrl) updateDraft(patchModule(draft, index, { resources: [...module.resources, { title: sourceUrl, kind: 'link' as ResourceKind, required: true, sourceUrl }] })); }}>+ Thêm liên kết</button></div>)}</div>}

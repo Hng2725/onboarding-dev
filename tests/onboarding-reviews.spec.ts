@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { OnboardingActor } from '../src/onboarding/auth';
 import { createAssignmentService } from '../src/onboarding/assignments';
 import { createAttemptService } from '../src/onboarding/attempts';
+import { createEmployeeService } from '../src/onboarding/employees';
 import { createReviewService } from '../src/onboarding/reviews';
 import { createTemplateService, type TemplateQuestionInput } from '../src/onboarding/templates';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
@@ -19,10 +20,13 @@ function setup() {
     now: () => `2026-10-20T00:00:${String(++sequence).padStart(2, '0')}.000Z`,
   });
   const notifications = { notify: vi.fn().mockResolvedValue({ delivered: true }) };
-  const assignments = createAssignmentService(store, templates, {
-    callPlatform: vi.fn().mockResolvedValue({ members: [
+  const callPlatform = vi.fn().mockResolvedValue({ members: [
       { userId: 'admin-1' }, { userId: 'member-1' }, { userId: 'member-2' },
-    ] }),
+    ] });
+  const employees = createEmployeeService(store, { callPlatform });
+  const assignments = createAssignmentService(store, templates, {
+    callPlatform,
+    employees,
     notifications,
     now: () => '2026-10-20T01:00:00.000Z',
   });
@@ -33,13 +37,23 @@ function setup() {
     notifications,
     now: () => '2026-10-20T03:00:00.000Z',
   });
-  return { store, templates, assignments, attempts, reviews, notifications };
+  return { store, templates, employees, assignments, attempts, reviews, notifications };
+}
+
+async function ensureEmployee(context: ReturnType<typeof setup>) {
+  try {
+    await context.employees.getByMemberId(admin, 'member-1');
+  } catch (error) {
+    if (!(error && typeof error === 'object' && 'code' in error && error.code === 'EMPLOYEE_NOT_FOUND')) throw error;
+    await context.employees.add(admin, { memberId: 'member-1', employeeType: 'normal' });
+  }
 }
 
 async function submitted(
   context: ReturnType<typeof setup>,
   questions: readonly TemplateQuestionInput[],
 ) {
+  await ensureEmployee(context);
   const templateInput = {
     title: 'Bài đánh giá', description: '', employeeType: 'normal' as const,
     ...(questions.some((question) => question.type !== 'essay') ? { passingScore: 70 } : {}),
@@ -52,7 +66,7 @@ async function submitted(
   const draftTemplate = await context.templates.createDraft(admin, templateInput);
   await context.templates.publish(admin, draftTemplate.id, 1, draftTemplate.updatedAt);
   const assignment = (await context.assignments.assign(admin, {
-    memberId: 'member-1', employeeType: 'normal', templateId: draftTemplate.id, templateVersion: 1,
+    memberId: 'member-1', templateId: draftTemplate.id, templateVersion: 1,
   })).assignment;
   const detail = await context.assignments.getMine(learner, assignment.id);
   const resource = detail.template.modules[0].resources[0];
@@ -103,6 +117,23 @@ describe('onboarding review service', () => {
     expect(feedback).toMatchObject({ comment: 'Lập luận rõ ràng.', reviewerId: 'admin-1' });
     expect(feedback).not.toHaveProperty('score');
     expect((await context.reviews.listEssayQueue(admin)).filter((item) => !item.reviewed)).toHaveLength(1);
+  });
+
+  it('writes a unique operation ID for every essay feedback audit event', async () => {
+    const context = setup();
+    const { attemptId } = await submitted(context, [essay('Câu 1'), essay('Câu 2')]);
+    const queue = await context.reviews.listEssayQueue(admin);
+
+    for (const item of queue) {
+      await context.reviews.saveEssayFeedback(admin, {
+        attemptId, answerId: item.answerId, comment: 'Đã nhận xét.',
+      });
+    }
+
+    const audits = await context.store.query('room-a', 'onboarding_audit_events');
+    const operationIds = audits.records.map((record) => record.operationId);
+    expect(operationIds.every((operationId) => typeof operationId === 'string' && operationId.length > 0)).toBe(true);
+    expect(new Set(operationIds).size).toBe(operationIds.length);
   });
 
   it('blocks overall evaluation until every essay has feedback', async () => {

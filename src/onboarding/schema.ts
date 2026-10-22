@@ -81,6 +81,13 @@ export const ONBOARDING_COLLECTIONS: readonly OnboardingCollectionDefinition[] =
     index('questions_module_order_unique', ['moduleId', 'order'], true),
     index('questions_module_id_unique', ['moduleId', 'questionId'], true),
   ]),
+  collection('onboarding_employees', [
+    field('memberId', 'string', true), field('employeeType', 'string', true),
+    field('addedBy', 'string', true), field('addedAt', 'datetime', true),
+    field('createdAt', 'datetime', true), field('updatedAt', 'datetime', true),
+  ], [
+    index('employees_member_unique', ['memberId'], true),
+  ]),
   collection('onboarding_assignments', [
     field('memberId', 'string', true), field('employeeType', 'string', true),
     field('templateSource', 'string', true), field('templateId', 'string', true),

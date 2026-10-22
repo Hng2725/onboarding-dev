@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { OnboardingActor } from '../src/onboarding/auth';
 import { createAssignmentService } from '../src/onboarding/assignments';
 import { createAttemptService } from '../src/onboarding/attempts';
+import { createEmployeeService } from '../src/onboarding/employees';
 import { createTemplateService, type TemplateDraftInput } from '../src/onboarding/templates';
 import { SYSTEM_TEMPLATES } from '../src/onboarding/system-templates';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
@@ -18,22 +19,35 @@ function setup() {
     id: () => `stable-${++sequence}`,
     now: () => `2026-10-20T00:00:${String(++sequence).padStart(2, '0')}.000Z`,
   });
-  const assignments = createAssignmentService(store, templates, {
-    callPlatform: vi.fn().mockResolvedValue({ members: [
+  const callPlatform = vi.fn().mockResolvedValue({ members: [
       { userId: 'admin-1' }, { userId: 'member-1' }, { userId: 'member-2' },
-    ] }),
+    ] });
+  const employees = createEmployeeService(store, { callPlatform });
+  const assignments = createAssignmentService(store, templates, {
+    callPlatform,
+    employees,
     notifications: { notify: vi.fn().mockResolvedValue({ delivered: true }) },
     now: () => '2026-10-20T01:00:00.000Z',
   });
   const attempts = createAttemptService(store, assignments, templates, {
     now: () => '2026-10-20T02:00:00.000Z',
   });
-  return { store, templates, assignments, attempts };
+  return { store, templates, employees, assignments, attempts };
+}
+
+async function ensureEmployee(context: ReturnType<typeof setup>) {
+  try {
+    await context.employees.getByMemberId(admin, 'member-1');
+  } catch (error) {
+    if (!(error && typeof error === 'object' && 'code' in error && error.code === 'EMPLOYEE_NOT_FOUND')) throw error;
+    await context.employees.add(admin, { memberId: 'member-1', employeeType: 'normal' });
+  }
 }
 
 async function foundation(setupResult: ReturnType<typeof setup>) {
+  await ensureEmployee(setupResult);
   return (await setupResult.assignments.assign(admin, {
-    memberId: 'member-1', employeeType: 'normal',
+    memberId: 'member-1',
     templateId: 'privos-foundations', templateVersion: 1,
   })).assignment;
 }
@@ -62,6 +76,7 @@ async function customAssignment(
   context: ReturnType<typeof setup>,
   questions: TemplateDraftInput['modules'][number]['questions'],
 ) {
+  await ensureEmployee(context);
   const input: TemplateDraftInput = {
     title: 'Bài tùy chỉnh', description: '', employeeType: 'normal', maxAttempts: 1,
     ...(questions.some((question) => question.type !== 'essay') ? { passingScore: 70 } : {}),
@@ -74,7 +89,7 @@ async function customAssignment(
   const draft = await context.templates.createDraft(admin, input);
   await context.templates.publish(admin, draft.id, 1, draft.updatedAt);
   const assignment = (await context.assignments.assign(admin, {
-    memberId: 'member-1', employeeType: 'normal', templateId: draft.id, templateVersion: 1,
+    memberId: 'member-1', templateId: draft.id, templateVersion: 1,
   })).assignment;
   await unlockAll(context.assignments, assignment.id);
   return assignment;
