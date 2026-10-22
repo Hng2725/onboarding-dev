@@ -19,7 +19,8 @@ Admin chỉ onboarding những thành viên được gán thủ công. Khi gán,
 | App shell | `src/ui/onboarding/AppShell.tsx` | Navigation theo role, responsive drawer, host identity và theme |
 | Admin tổng quan | `admin-dashboard.tsx` | KPI, hàng chờ và nhắc hạn |
 | Nhân sự | `employees.tsx` | Thành viên room, gán thủ công, phân loại và tiến độ |
-| Template | `templates.tsx` | Template hệ thống bất biến, custom draft, upload file, publish/archive/delete |
+| Template | `templates.tsx`, `template-editor-ui.tsx` | Xem chi tiết trước khi thao tác, tìm theo tên, lọc trạng thái, tạo/sửa, upload file, publish/archive/delete |
+| Đồng bộ dữ liệu | `polling.ts` | Polling dùng chung mỗi 2 giây, không chồng request, tạm dừng khi tab trình duyệt bị ẩn |
 | Nhận xét/đánh giá | `reviews.tsx` | Nhận xét riêng từng tự luận và đánh giá chung |
 | Learner tổng quan | `learner-dashboard.tsx` | Assignment, tiến độ và tiếp tục chương trình gần hạn nhất |
 | Workspace học | `learning-workspace.tsx` | Đọc tài liệu, mở khóa bài, recovery draft và nộp bài |
@@ -38,6 +39,8 @@ Admin chỉ onboarding những thành viên được gán thủ công. Khi gán,
 
 Tool dispatcher kiểm tra action, actor và role trước khi gọi service. `operationId` bảo vệ submit/evaluation khỏi retry trùng hoặc payload thay đổi.
 
+Tất cả route Admin và Learner được mount ngay khi workspace mở. Mỗi màn hình tải dữ liệu lần đầu ngay lập tức rồi dùng polling 2 giây; lần refresh nền giữ nguyên dữ liệu đang hiển thị nếu có lỗi tạm thời. Riêng thư viện template preload cả chi tiết và làm mới cache theo `id`, `version`, `updatedAt`, nên thay đổi từ user khác xuất hiện mà không cần bấm vào tab trước.
+
 ## Dữ liệu
 
 Schema bootstrap đăng ký 11 collection room-scoped:
@@ -48,7 +51,7 @@ Schema bootstrap đăng ký 11 collection room-scoped:
 - essay feedback và evaluations;
 - notification/audit state cần thiết cho workflow.
 
-Assignment giữ snapshot template đã giao nên lần publish mới không làm đổi chương trình đang học. Learner snapshot loại `correctOptionIds` và `explanation`. Template hệ thống được định nghĩa trong `src/onboarding/system-templates.ts`, deep-freeze và không có hành động xóa.
+Assignment giữ snapshot template đã giao nên lần publish mới không làm đổi chương trình đang học. Learner snapshot loại `correctOptionIds` và `explanation`. Template hệ thống được định nghĩa trong `src/onboarding/system-templates.ts`, deep-freeze và không có hành động xóa. Template tùy chỉnh ở mọi trạng thái có thể xóa khi chưa được assignment tham chiếu; template đã lưu trữ không thể dùng hoặc chỉnh sửa.
 
 ## Trạng thái nghiệp vụ
 

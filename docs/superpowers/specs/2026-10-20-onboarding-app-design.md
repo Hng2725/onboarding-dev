@@ -114,10 +114,13 @@ Frontend role checks control presentation only. Every privileged operation is en
    - Assignment action with employee type, template, due date, and attempt policy.
    - Employee detail: assignment timeline, material progress, attempts, scores, feedback, evaluations.
 3. **Templates**
-   - `PrivOS templates` tab for immutable built-in templates.
-   - `Room templates` tab for custom templates.
-   - Creation wizard: Basics → Modules and resources → Questions → Rules → Preview and publish.
+   - Unified catalog for immutable PrivOS templates and custom room templates.
+   - Accent-insensitive name search plus a status filter for Published, Archived, and Draft templates.
+   - Selecting any card opens its full detail before actions are offered.
    - Built-in templates expose Use and Clone; they never expose Edit or Delete.
+   - Custom actions follow lifecycle state: Draft exposes Edit/Delete, Published exposes Use/Edit/Archive/Delete, and Archived exposes Delete only.
+   - Creation wizard: Basics → Modules and resources → Questions → Rules → Preview and publish.
+   - Questions are optional. An empty module shows a named suggestion, while an invalid question remains a blocking error.
 4. **Essay feedback**
    - Queue of submitted assignments with unanswered essay-feedback items.
    - Focused review workspace with prompt, learner answer, comment editor, and reviewed state.
@@ -159,7 +162,7 @@ Their source material is based on the official [PrivOS documentation](https://do
 
 Custom templates are stored in room-scoped App Database collections. A template starts as a draft. Publishing creates an immutable version snapshot. Editing published content creates a new draft version; existing assignments stay pinned to their original version.
 
-A custom template can be deleted only while it is an unassigned draft. Otherwise it can only be archived. Soft-deleted database records are not exposed in ordinary queries.
+A custom template can be deleted in Draft, Published, or Archived state only when no assignment references it. Published templates may also be archived; archived templates cannot be assigned or edited. Built-in templates are never deletable. Soft-deleted database records are not exposed in ordinary queries.
 
 ### 6.2 Module sequencing
 
@@ -230,6 +233,8 @@ draft → published → archived
 ```
 
 Publishing creates a new immutable version. Built-in versions are always published and locked.
+
+Archived custom templates are terminal for assignment and editing, but an unassigned archived record can still be deleted.
 
 ## 8. Data Architecture
 
@@ -345,14 +350,23 @@ Required capability/scopes for the finished app are minimized to context and ver
 - Notification failure: record the core action as successful and surface a non-blocking warning.
 - Database schema bootstrap failure: fail closed with a recoverable setup error; do not render misleading empty dashboards.
 
+### 12.1 Live data synchronization
+
+- All Admin and Learner route panels mount when the workspace opens so their initial data is ready before tab navigation.
+- A shared poller refreshes mounted data views every 2 seconds. It runs immediately, never overlaps requests, and schedules the next interval only after the current request settles.
+- Polling pauses while the document is hidden and refreshes immediately when it becomes visible again.
+- Background refresh failures retain the last successful screen and do not replace it with a loading or error page; initial-load failures remain explicit and retryable.
+- Template details preload with the catalog and are cached by template ID, version, and `updatedAt`, so another user's create or edit appears without requiring the current user to open the Templates tab first.
+
 ## 13. Accessibility and Usability
 
 - Full keyboard navigation for sidebar, stepper, forms, tables, dialogs, and question choices.
 - Visible focus rings from PrivOS theme tokens.
 - Semantic landmarks, headings, labels, field errors, live status regions, and descriptive button names.
 - Minimum 44 px practical touch target on narrow layouts.
-- Confirmation dialogs for publish, archive, delete-eligible draft, submit, and final evaluation.
+- Confirmation dialogs for publish, archive, deletion of an eligible custom template, submit, and final evaluation.
 - Unsaved-change guard in template creation, essay feedback, and evaluation forms.
+- Native select options remain readable in both light and dark themes.
 - Responsive support beginning at 360 px iframe width.
 
 ## 14. Testing Strategy
@@ -384,6 +398,8 @@ Required capability/scopes for the finished app are minimized to context and ver
 - Unassigned learner empty state.
 - Resource completion gate and locked exercise state.
 - Template builder validation and unsaved-change protection.
+- Template name search, lifecycle-status filtering, detail-first actions, optional-question suggestions, and multiple-choice answer editing.
+- Shared polling timing, non-overlap, visibility pause/resume, eager route mounting, and silent background refresh behavior.
 - Submission, automatic score, essay feedback, and evaluation flows.
 - Loading, empty, failure, degraded-permission, and retry states.
 - Responsive layout, light/dark theme, keyboard flow, and reduced motion.
@@ -422,4 +438,6 @@ The MVP is accepted when:
 11. Data remains isolated by app and room, and privileged commands are enforced server-side.
 12. The interface is responsive, inherits PrivOS theme tokens, uses free Ant Design icons, and respects reduced-motion preferences.
 13. Typecheck, tests, production build, and PrivOS preflight pass.
-
+14. Every Admin and Learner tab starts loading when the app opens and reflects remote changes through non-overlapping 2-second polling.
+15. The template library combines accent-insensitive name search with lifecycle-status filtering and keeps the native filter options readable in dark mode.
+16. An unassigned custom template can be deleted in any lifecycle state; deletion is unavailable for built-in or assigned templates and shows a disabled loading action while in progress.

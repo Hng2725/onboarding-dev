@@ -57,11 +57,14 @@
 
 - `src/ui/onboarding/api.ts` — typed `callServerTool` client and result parsing.
 - `src/ui/onboarding/navigation.ts` — role-aware route model and labels.
+- `src/ui/onboarding/polling.ts` — shared immediate/non-overlapping 2-second polling with visibility pause/resume.
 - `src/ui/onboarding/AppShell.tsx` — responsive header/sidebar/drawer and page states.
 - `src/ui/onboarding/components.tsx` — progress, status, empty/error, and confirmation primitives.
 - `src/ui/onboarding/admin-dashboard.tsx` — KPIs and work queue.
 - `src/ui/onboarding/employees.tsx` — member assignment and employee detail.
 - `src/ui/onboarding/templates.tsx` — template library, preview, and builder wizard.
+- `src/ui/onboarding/template-editor-ui.tsx` — template search/filter, detail actions, editor primitives, and detail preloading.
+- `src/ui/onboarding/template-editor.css` — centered template dialogs and editor/catalog visuals.
 - `src/ui/onboarding/reviews.tsx` — essay-feedback and overall-evaluation workspaces.
 - `src/ui/onboarding/learner-dashboard.tsx` — learner overview and assignment cards.
 - `src/ui/onboarding/learning-workspace.tsx` — resources, completion gate, questions, draft, submit.
@@ -82,6 +85,9 @@
 - `tests/onboarding-ui-model.spec.ts`
 - `tests/onboarding-admin-ui.spec.ts`
 - `tests/onboarding-learner-ui.spec.ts`
+- `tests/onboarding-eager-tabs.spec.ts`
+- `tests/onboarding-polling.spec.ts`
+- `tests/template-editor-ui.spec.ts`
 
 ---
 
@@ -284,7 +290,7 @@ Cover:
 
 - system templates list as published/locked and reject edit/archive/delete;
 - cloning creates a room-scoped custom draft with copied modules/resources/questions but new stable IDs;
-- only unassigned custom drafts can be deleted;
+- unassigned custom templates can be deleted in draft, published, or archived state, while assigned custom templates reject deletion;
 - publishing creates immutable version 1; editing a published template creates version 2 draft data;
 - an assignment pinned to version 1 still resolves version 1 after version 2 publishes;
 - stale `updatedAt`/version edits throw `TEMPLATE_CONFLICT` rather than overwriting;
@@ -607,8 +613,8 @@ Cover:
 - reminder action shows the sent/skipped/failed totals returned by `sendDueReminders` without changing assignment state;
 - assignment form requires member, employee type, template version, and valid due date;
 - system template actions are exactly Use and Clone, never Edit/Delete;
-- custom assigned/published templates offer Archive rather than Delete;
-- wizard blocks publishing without module/resource/question requirements from the spec;
+- custom draft templates offer Edit/Delete, published templates offer Use/Edit/Archive/Delete, and archived templates offer Delete only;
+- wizard blocks publishing without required template/module/resource data, treats an empty question list as a named suggestion, and validates answer sets when questions exist;
 - file upload normalization preserves stable file ID/name/MIME/size;
 - inaccessible/deleted file shows recoverable status and does not alter progress records.
 
@@ -624,7 +630,7 @@ Use a dense responsive table on wide screens and stacked rows on narrow screens.
 
 - [ ] **Step 4: Implement Template Library and Builder**
 
-Build the five-step wizard from the spec. Upload through `app.uploadFile`, store only returned/stable file metadata in the template draft, add unsaved-change confirmation, and show immutable/version badges.
+Build the five-step wizard from the spec. Upload through `app.uploadFile`, store only returned/stable file metadata in the template draft, add unsaved-change confirmation, and show immutable/version badges. The catalog uses accent-insensitive name search and lifecycle-status filtering, opens a preloaded detail view before actions, and closes the editor after a successful save or publish.
 
 - [ ] **Step 5: Run Admin UI, type, and build checks**
 
@@ -823,6 +829,30 @@ git add README.md docs/app-overview.md PUBLISHING.md PRIVACY.md TERMS.md CHANGEL
 git add -u -- src tests
 git commit -m "chore: complete onboarding product migration"
 ```
+
+---
+
+## Implementation Status — updated 2026-10-22
+
+The task checkboxes above are preserved as the original execution recipe. The repository currently contains the delivered implementation for Tasks 1–13 plus these completed follow-up refinements:
+
+- [x] Room-role mapping, manual assignment, normal/advanced employee classification, room-scoped persistence, and immutable built-in PrivOS templates.
+- [x] Resource-first learning flow, optional exercises, automatic multiple-choice scoring, essay submission without numeric score, per-essay feedback, overall evaluation, and `passed`/`failed`/`retry` conclusions.
+- [x] Responsive Admin and Learner workspaces with free Ant Design icons, Vietnamese-capable typography, light/dark tokens, reduced-motion support, centered dialogs, and unsaved-change guards.
+- [x] Eager mounting for every Admin and Learner route so inactive tabs initialize without a first click.
+- [x] Shared 2-second polling across dashboard, employees, templates, review queues, learner overview/workspace, and results; requests do not overlap, pause while hidden, resume immediately, and preserve the last successful UI on transient background errors.
+- [x] Detail-first template library with preloaded details, accent-insensitive name search, combined status filter, multiple-choice answer editing, numbered questions, add-question controls beside the current question, and module-named validation messages.
+- [x] Template questions made optional: empty modules produce a suggestion instead of blocking save/publish.
+- [x] Custom-template lifecycle actions completed: Draft = Edit/Delete, Published = Use/Edit/Archive/Delete, Archived = Delete; deletion remains blocked when an assignment references the template, and the delete confirmation is disabled with a spinner while running.
+- [x] Stale-editor timestamp normalization and custom-version uniqueness fixes, including independent editing of clones without mutating the source system template.
+- [x] Native template-status options receive explicit dark-theme foreground/background colors.
+- [x] Docker image rebuilt and reported healthy; live PrivOS pairing, installation, room-scope approval, role rendering, and template flows were exercised during development.
+
+Verification snapshot on 2026-10-22:
+
+- `npm run typecheck:strict-unused` passed.
+- 169 tests across 30 Vitest files passed; `tests/packaging.spec.ts` was excluded from the Windows run because its packaging harness requires Bash/`unzip`.
+- `npm run build` and manifest lint passed.
 
 ---
 
