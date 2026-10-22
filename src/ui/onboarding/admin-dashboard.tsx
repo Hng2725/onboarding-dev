@@ -6,12 +6,13 @@ import {
   CommentOutlined,
   TeamOutlined,
 } from '@ant-design/icons';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 
 import type { AssignmentStatus } from '../../onboarding/contracts';
 import type { ReminderSummary } from '../../onboarding/assignments';
 import type { OnboardingApi } from './api';
 import { ErrorState, LoadingState, StatusBadge } from './components';
+import { usePolling, type PollReason } from './polling';
 
 interface AssignmentRow {
   readonly id: string;
@@ -57,20 +58,21 @@ export function AdminDashboard({ api, onOpenEmployees }: { api: OnboardingApi; o
   const [reminding, setReminding] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const load = useCallback(async (reason: PollReason) => {
+    const initial = reason === 'initial';
+    if (initial) { setLoading(true); setError(null); }
     try {
       const response = await api.adminAssignments<{ assignments: readonly AssignmentRow[] }>('list');
       setRows(response.assignments);
+      setError(null);
     } catch (caught) {
-      setError(caught instanceof Error ? caught : new Error('Không thể tải dashboard.'));
+      if (initial) setError(caught instanceof Error ? caught : new Error('Không thể tải dashboard.'));
     } finally {
-      setLoading(false);
+      if (initial) setLoading(false);
     }
   }, [api]);
 
-  useEffect(() => { void load(); }, [load]);
+  const refresh = usePolling(load);
 
   async function sendReminders() {
     setReminding(true);
@@ -88,7 +90,7 @@ export function AdminDashboard({ api, onOpenEmployees }: { api: OnboardingApi; o
   }
 
   if (loading) return <LoadingState label="Đang tổng hợp tiến độ trong room…" />;
-  if (error) return <ErrorState error={error} onRetry={() => void load()} />;
+  if (error) return <ErrorState error={error} onRetry={() => void refresh()} />;
 
   const kpis = deriveAdminKpis(rows);
   const recent = rows.slice(0, 5);

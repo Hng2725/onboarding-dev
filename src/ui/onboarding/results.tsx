@@ -5,7 +5,7 @@ import {
   RedoOutlined,
   TrophyOutlined,
 } from '@ant-design/icons';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 
 import type {
   EssayFeedbackRecord,
@@ -18,6 +18,7 @@ import type {
 import type { PublishedReviewDto } from '../../onboarding/reviews';
 import type { OnboardingApi } from './api';
 import { EmptyState, ErrorState, LoadingState, StatusBadge, conclusionLabel } from './components';
+import { usePolling, type PollReason } from './polling';
 
 export interface ResultPresentationInput {
   readonly mcScore?: MultipleChoiceScore | null;
@@ -55,9 +56,9 @@ export function ResultsPage({ api, onRetry }: { api: OnboardingApi; onRetry: (as
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const load = useCallback(async (reason: PollReason) => {
+    const initial = reason === 'initial';
+    if (initial) { setLoading(true); setError(null); }
     try {
       const response = await api.learning<{ assignments: readonly LearnerAssignmentDto[] }>('list');
       const next = await Promise.all(response.assignments.map(async (assignment): Promise<ResultItem> => {
@@ -70,17 +71,18 @@ export function ResultsPage({ api, onRetry }: { api: OnboardingApi; onRetry: (as
         return { assignment, feedback, result: resultResponse?.result };
       }));
       setItems(next.filter((item) => item.assignment.activeAttemptId || item.feedback.evaluation));
+      setError(null);
     } catch (caught) {
-      setError(caught instanceof Error ? caught : new Error('Không thể tải kết quả onboarding.'));
+      if (initial) setError(caught instanceof Error ? caught : new Error('Không thể tải kết quả onboarding.'));
     } finally {
-      setLoading(false);
+      if (initial) setLoading(false);
     }
   }, [api]);
 
-  useEffect(() => { void load(); }, [load]);
+  const refresh = usePolling(load);
 
   if (loading) return <LoadingState label="Đang tải kết quả của bạn…" />;
-  if (error) return <ErrorState error={error} onRetry={() => void load()} />;
+  if (error) return <ErrorState error={error} onRetry={() => void refresh()} />;
   if (!items.length) return <EmptyState title="Chưa có kết quả" description="Kết quả sẽ xuất hiện sau khi bạn nộp bài. Nhận xét chỉ hiển thị khi Admin đã công bố đánh giá." icon={<ClockCircleOutlined />} />;
 
   return <div className="page-stack">

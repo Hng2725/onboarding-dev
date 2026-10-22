@@ -6,10 +6,12 @@ import {
   EditOutlined,
   EyeOutlined,
   FileTextOutlined,
+  FilterOutlined,
   InboxOutlined,
   LockOutlined,
   PlusOutlined,
   RocketOutlined,
+  SearchOutlined,
 } from '@ant-design/icons';
 import type { ReactNode, ReactPortal } from 'react';
 import { createPortal } from 'react-dom';
@@ -50,6 +52,54 @@ export function filterTemplatesByName(
   const needle = normalizeTemplateSearchText(query);
   if (!needle) return items;
   return items.filter((item) => normalizeTemplateSearchText(item.title).includes(needle));
+}
+
+export type TemplateStatusFilter = TemplateStatus | 'all';
+
+export function filterTemplates(
+  items: readonly TemplateCatalogView[],
+  query: string,
+  status: TemplateStatusFilter,
+): readonly TemplateCatalogView[] {
+  return filterTemplatesByName(items, query)
+    .filter((item) => status === 'all' || item.status === status);
+}
+
+export function TemplateLibraryToolbar({
+  query,
+  status,
+  count,
+  total,
+  onQueryChange,
+  onStatusChange,
+}: {
+  query: string;
+  status: TemplateStatusFilter;
+  count: number;
+  total: number;
+  onQueryChange: (value: string) => void;
+  onStatusChange: (value: TemplateStatusFilter) => void;
+}) {
+  return (
+    <section className="template-library-toolbar" aria-label="Tìm kiếm và lọc template">
+      <div className="template-toolbar-controls">
+        <label className="search-field">
+          <SearchOutlined />
+          <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Tìm template theo tên…" aria-label="Tìm template theo tên" />
+        </label>
+        <label className="template-filter-field">
+          <FilterOutlined />
+          <select value={status} onChange={(event) => onStatusChange(event.target.value as TemplateStatusFilter)} aria-label="Lọc template theo trạng thái">
+            <option value="all">Tất cả trạng thái</option>
+            <option value="published">Đã xuất bản</option>
+            <option value="archived">Đã lưu trữ</option>
+            <option value="draft">Bản nháp</option>
+          </select>
+        </label>
+      </div>
+      <span>{count}/{total} template</span>
+    </section>
+  );
 }
 
 export function insertQuestionAfter(
@@ -93,8 +143,8 @@ export type TemplateDetailAction = 'use' | 'clone' | 'edit' | 'delete' | 'archiv
 export function templateDetailActions(template: Pick<TemplateCatalogView, 'source' | 'status'>): readonly TemplateDetailAction[] {
   if (template.source === 'system') return ['use', 'clone'];
   if (template.status === 'draft') return ['edit', 'delete'];
-  if (template.status === 'published') return ['use', 'edit', 'archive'];
-  return [];
+  if (template.status === 'published') return ['use', 'edit', 'archive', 'delete'];
+  return ['delete'];
 }
 
 function statusLabel(status: TemplateStatus): string {

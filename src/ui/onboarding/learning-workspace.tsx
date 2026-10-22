@@ -26,6 +26,7 @@ import type {
 import type { MaterialProgressRecord } from '../../onboarding/assignments';
 import { reconcileDraft, type OnboardingApi, type RecoveryDraft } from './api';
 import { ConfirmDialog, EmptyState, ErrorState, LoadingState, ProgressBar } from './components';
+import { usePolling, type PollReason } from './polling';
 
 export interface DraftAnswer {
   readonly questionId: string;
@@ -161,8 +162,9 @@ export function LearningWorkspace({ api, assignmentId, onBack, onSubmitted }: { 
   const [submission, setSubmission] = useState<SubmissionOperation | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true); setError(null);
+  const load = useCallback(async (reason: PollReason) => {
+    const initial = reason === 'initial';
+    if (initial) { setLoading(true); setError(null); }
     try {
       let id = assignmentId ?? resolvedId;
       if (!id) {
@@ -173,10 +175,14 @@ export function LearningWorkspace({ api, assignmentId, onBack, onSubmitted }: { 
       setResolvedId(id);
       const response = await api.learning<{ detail: LearnerDetail }>('get', { assignmentId: id });
       setDetail(response.detail);
-    } catch (caught) { setError(caught instanceof Error ? caught : new Error('Không thể tải nội dung học.')); }
-    finally { setLoading(false); }
+      setError(null);
+    } catch (caught) {
+      if (initial) setError(caught instanceof Error ? caught : new Error('Không thể tải nội dung học.'));
+    } finally {
+      if (initial) setLoading(false);
+    }
   }, [api, assignmentId, resolvedId]);
-  useEffect(() => { void load(); }, [load]);
+  const refresh = usePolling(load);
   useEffect(() => () => { if (saveTimer.current) clearTimeout(saveTimer.current); }, []);
 
   const allQuestions = useMemo(() => detail?.template.modules.flatMap((module) => module.questions) ?? [], [detail]);
@@ -207,7 +213,7 @@ export function LearningWorkspace({ api, assignmentId, onBack, onSubmitted }: { 
       }
       setPreview(next);
       await api.learning('open_resource', { assignmentId: resolvedId, resourceId: resource.id });
-      await load();
+      await refresh();
     } catch (caught) {
       setPreview({ resource });
       setPreviewError(caught instanceof Error ? caught : new Error('Không thể mở tài liệu.'));
@@ -217,7 +223,7 @@ export function LearningWorkspace({ api, assignmentId, onBack, onSubmitted }: { 
   async function completeResource(resource: TemplateResource) {
     if (!resolvedId) return;
     setBusyResource(resource.id);
-    try { await api.learning('complete_resource', { assignmentId: resolvedId, resourceId: resource.id }); await load(); }
+    try { await api.learning('complete_resource', { assignmentId: resolvedId, resourceId: resource.id }); await refresh(); }
     catch (caught) { setPreviewError(caught instanceof Error ? caught : new Error('Không thể xác nhận tài liệu.')); }
     finally { setBusyResource(null); }
   }
@@ -279,7 +285,7 @@ export function LearningWorkspace({ api, assignmentId, onBack, onSubmitted }: { 
   }
 
   if (loading) return <LoadingState label="Đang tải nội dung học…" />;
-  if (error) return <ErrorState error={error} onRetry={() => void load()} />;
+  if (error) return <ErrorState error={error} onRetry={() => void refresh()} />;
   if (!detail || !module) return <EmptyState title="Không có nội dung học" description="Bạn chưa có chương trình onboarding để mở." icon={<FileTextOutlined />} />;
   const progressById = new Map(detail.progress.map((item) => [item.resourceId, item]));
   const exerciseSelected = moduleIndex >= detail.template.modules.length;

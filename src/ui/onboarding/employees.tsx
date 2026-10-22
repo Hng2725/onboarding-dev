@@ -6,12 +6,13 @@ import {
   TeamOutlined,
   UserOutlined,
 } from '@ant-design/icons';
-import { useCallback, useEffect, useMemo, useState, type ReactNode, type ReactPortal } from 'react';
+import { useCallback, useMemo, useState, type ReactNode, type ReactPortal } from 'react';
 import { createPortal } from 'react-dom';
 
 import type { AssignmentStatus, EmployeeType, TemplateStatus } from '../../onboarding/contracts';
 import type { OnboardingApi } from './api';
 import { ErrorState, LoadingState, ProgressBar, StatusBadge } from './components';
+import { usePolling, type PollReason } from './polling';
 
 export interface AssignmentDraft {
   readonly memberId: string;
@@ -125,9 +126,9 @@ export function EmployeesPage({ api }: { api: OnboardingApi }) {
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const load = useCallback(async (reason: PollReason) => {
+    const initial = reason === 'initial';
+    if (initial) { setLoading(true); setError(null); }
     try {
       const [memberResult, assignmentResult, templateResult] = await Promise.all([
         api.adminAssignments<{ members: readonly MemberRow[] }>('list_members'),
@@ -137,14 +138,15 @@ export function EmployeesPage({ api }: { api: OnboardingApi }) {
       setMembers(memberResult.members);
       setAssignments(assignmentResult.assignments);
       setTemplates(templateResult.templates);
+      setError(null);
     } catch (caught) {
-      setError(caught instanceof Error ? caught : new Error('Không thể tải danh sách nhân sự.'));
+      if (initial) setError(caught instanceof Error ? caught : new Error('Không thể tải danh sách nhân sự.'));
     } finally {
-      setLoading(false);
+      if (initial) setLoading(false);
     }
   }, [api]);
 
-  useEffect(() => { void load(); }, [load]);
+  const refresh = usePolling(load);
 
   const availableTemplates = useMemo(() => templates.filter((item) => (
     item.status === 'published' && item.employeeType === draft.employeeType
@@ -175,7 +177,7 @@ export function EmployeesPage({ api }: { api: OnboardingApi }) {
       setNotice(result.result.warning ? `Đã giao onboarding. Lưu ý: ${result.result.warning}` : 'Đã giao onboarding thành công.');
       setFormOpen(false);
       setDraft(initialDraft);
-      await load();
+      await refresh();
     } catch (caught) {
       setNotice(caught instanceof Error ? caught.message : 'Không thể giao onboarding.');
     } finally {
@@ -184,7 +186,7 @@ export function EmployeesPage({ api }: { api: OnboardingApi }) {
   }
 
   if (loading) return <LoadingState label="Đang tải thành viên trong room…" />;
-  if (error) return <ErrorState error={error} onRetry={() => void load()} />;
+  if (error) return <ErrorState error={error} onRetry={() => void refresh()} />;
 
   return (
     <div className="page-stack">

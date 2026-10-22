@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FinalConclusion } from '../../onboarding/contracts';
 import type { OnboardingApi } from './api';
 import { ConfirmDialog, EmptyState, ErrorState, LoadingState, conclusionLabel } from './components';
+import { usePolling, type PollReason } from './polling';
 
 export interface EssayQueueItem {
   readonly assignmentId: string;
@@ -91,16 +92,21 @@ export function EssayFeedbackPage({ api }: { api: OnboardingApi }) {
   const [error, setError] = useState<Error | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true); setError(null);
+  const load = useCallback(async (reason: PollReason) => {
+    const initial = reason === 'initial';
+    if (initial) { setLoading(true); setError(null); }
     try {
       const response = await api.reviews<{ items: readonly EssayQueueItem[] }>('list_essays');
       setItems(response.items);
       setSelectedId((current) => current && response.items.some((item) => item.answerId === current) ? current : response.items[0]?.answerId ?? null);
-    } catch (caught) { setError(caught instanceof Error ? caught : new Error('Không thể tải câu tự luận.')); }
-    finally { setLoading(false); }
+      setError(null);
+    } catch (caught) {
+      if (initial) setError(caught instanceof Error ? caught : new Error('Không thể tải câu tự luận.'));
+    } finally {
+      if (initial) setLoading(false);
+    }
   }, [api]);
-  useEffect(() => { void load(); }, [load]);
+  const refresh = usePolling(load);
 
   const groups = useMemo(() => groupEssayQueue(items), [items]);
   const selected = items.find((item) => item.answerId === selectedId);
@@ -118,7 +124,7 @@ export function EssayFeedbackPage({ api }: { api: OnboardingApi }) {
   }
 
   if (loading) return <LoadingState label="Đang tải hàng đợi tự luận…" />;
-  if (error) return <ErrorState error={error} onRetry={() => void load()} />;
+  if (error) return <ErrorState error={error} onRetry={() => void refresh()} />;
   if (!items.length) return <EmptyState title="Không có câu tự luận đang chờ" description="Các bài trắc nghiệm hoàn toàn sẽ đi thẳng tới hàng đợi đánh giá chung." icon={<CommentOutlined />} />;
 
   return <div className="page-stack">
@@ -143,15 +149,20 @@ export function EvaluationsPage({ api }: { api: OnboardingApi }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [issues, setIssues] = useState<readonly EvaluationIssue[]>([]);
 
-  const load = useCallback(async () => {
-    setLoading(true); setError(null);
+  const load = useCallback(async (reason: PollReason) => {
+    const initial = reason === 'initial';
+    if (initial) { setLoading(true); setError(null); }
     try {
       const response = await api.reviews<{ items: readonly EvaluationQueueItem[] }>('list_evaluations');
       setItems(response.items); setSelectedId((current) => current && response.items.some((item) => item.attemptId === current) ? current : response.items[0]?.attemptId ?? null);
-    } catch (caught) { setError(caught instanceof Error ? caught : new Error('Không thể tải hàng đợi đánh giá.')); }
-    finally { setLoading(false); }
+      setError(null);
+    } catch (caught) {
+      if (initial) setError(caught instanceof Error ? caught : new Error('Không thể tải hàng đợi đánh giá.'));
+    } finally {
+      if (initial) setLoading(false);
+    }
   }, [api]);
-  useEffect(() => { void load(); }, [load]);
+  const refresh = usePolling(load);
   const selected = items.find((item) => item.attemptId === selectedId);
 
   function update(patch: Partial<EvaluationDraft>) { setDraft((current) => ({ ...current, ...patch })); setDirty(true); setIssues([]); }
@@ -173,13 +184,13 @@ export function EvaluationsPage({ api }: { api: OnboardingApi }) {
       });
       const retry = draft.conclusion === 'retry';
       setNotice(`${retry ? 'Đã mở lượt làm lại mới.' : 'Đã công bố đánh giá.'}${response.result.warning ? ` Lưu ý: ${response.result.warning}` : ''}`);
-      setConfirming(false); setDraft(emptyEvaluation); setDirty(false); await load();
+      setConfirming(false); setDraft(emptyEvaluation); setDirty(false); await refresh();
     } catch (caught) { setNotice(caught instanceof Error ? caught.message : 'Không thể công bố đánh giá.'); setConfirming(false); }
     finally { setPublishing(false); }
   }
 
   if (loading) return <LoadingState label="Đang tải hàng đợi đánh giá…" />;
-  if (error) return <ErrorState error={error} onRetry={() => void load()} />;
+  if (error) return <ErrorState error={error} onRetry={() => void refresh()} />;
   if (!items.length) return <EmptyState title="Không có bài đang chờ đánh giá" description="Bài trắc nghiệm sẽ xuất hiện ngay sau khi nộp; bài có tự luận xuất hiện sau khi đã nhận xét đủ." icon={<AuditOutlined />} />;
   const issue = (field: keyof EvaluationDraft) => issues.find((item) => item.field === field)?.message;
 

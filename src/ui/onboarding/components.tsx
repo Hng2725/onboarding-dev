@@ -101,6 +101,8 @@ export function ConfirmDialog({
   title,
   description,
   confirmLabel = 'Xác nhận',
+  busy = false,
+  busyLabel = 'Đang xử lý…',
   onConfirm,
   onCancel,
 }: {
@@ -108,19 +110,23 @@ export function ConfirmDialog({
   title: string;
   description: string;
   confirmLabel?: string;
+  busy?: boolean;
+  busyLabel?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
   if (!open) return null;
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={onCancel}>
+    <div className="dialog-backdrop" role="presentation" onMouseDown={() => { if (!busy) onCancel(); }}>
       <div className="dialog-card" role="dialog" aria-modal="true" aria-labelledby="confirm-title" onMouseDown={(event) => event.stopPropagation()}>
         <ExclamationCircleFilled className="dialog-icon" aria-hidden="true" />
         <h2 id="confirm-title">{title}</h2>
         <p>{description}</p>
         <div className="dialog-actions">
-          <button className="button button-secondary" type="button" onClick={onCancel}>Hủy</button>
-          <button className="button button-primary" type="button" onClick={onConfirm}>{confirmLabel}</button>
+          <button className="button button-secondary" type="button" disabled={busy} onClick={onCancel}>Hủy</button>
+          <button className="button button-primary" type="button" disabled={busy} onClick={onConfirm}>
+            {busy ? <><LoadingOutlined spin aria-hidden="true" /> {busyLabel}</> : confirmLabel}
+          </button>
         </div>
       </div>
     </div>

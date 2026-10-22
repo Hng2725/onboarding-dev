@@ -6,6 +6,7 @@ import {
   createTemplateService,
   type TemplateDraftInput,
 } from '../src/onboarding/templates';
+import type { StoreQueryOptions, StoreRecord, StoreUpdateOptions } from '../src/onboarding/store';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 
 const admin: OnboardingActor = {
@@ -46,6 +47,80 @@ function setup() {
   return { store, service };
 }
 
+class NativeDateReadStore extends MemoryOnboardingStore {
+  override async query<T extends StoreRecord>(
+    roomId: string,
+    collection: string,
+    options: StoreQueryOptions = {},
+  ): Promise<{ records: readonly T[]; nextCursor?: string }> {
+    const result = await super.query<T>(roomId, collection, options);
+    return {
+      ...result,
+      records: result.records.map((record) => typeof record.updatedAt === 'string'
+        ? { ...record, updatedAt: new Date(record.updatedAt) } as unknown as T
+        : record),
+    };
+  }
+}
+
+const mongoUniqueIndexes: Readonly<Record<string, readonly (readonly string[])[]>> = {
+  onboarding_modules: [
+    ['templateId', 'templateVersion', 'order'],
+    ['templateId', 'templateVersion', 'key'],
+  ],
+  onboarding_resources: [
+    ['moduleId', 'order'],
+    ['moduleId', 'resourceId'],
+  ],
+  onboarding_questions: [
+    ['moduleId', 'order'],
+    ['moduleId', 'questionId'],
+  ],
+};
+
+class MongoUniqueIndexStore extends NativeDateReadStore {
+  private async rejectDuplicate(
+    roomId: string,
+    collection: string,
+    candidate: StoreRecord,
+    excludedId?: string,
+  ): Promise<void> {
+    const indexes = mongoUniqueIndexes[collection] ?? [];
+    if (indexes.length === 0) return;
+    const { records } = await super.query<StoreRecord>(roomId, collection, {
+      includeDeleted: true,
+      limit: 1000,
+    });
+    for (const fields of indexes) {
+      const duplicate = records.some((record) => record.id !== excludedId
+        && fields.every((field) => record[field] === candidate[field]));
+      if (duplicate) throw new Error(`E11000 duplicate key error: ${collection} (${fields.join(', ')})`);
+    }
+  }
+
+  override async create<T extends StoreRecord>(
+    roomId: string,
+    collection: string,
+    data: StoreRecord,
+  ): Promise<T> {
+    await this.rejectDuplicate(roomId, collection, data);
+    return super.create<T>(roomId, collection, data);
+  }
+
+  override async update<T extends StoreRecord>(
+    roomId: string,
+    collection: string,
+    id: string,
+    data: StoreRecord,
+    options?: StoreUpdateOptions,
+  ): Promise<T> {
+    const current = await super.get<StoreRecord>(roomId, collection, id);
+    if (!current) throw new Error('missing record');
+    await this.rejectDuplicate(roomId, collection, { ...current, ...data, id }, id);
+    return super.update<T>(roomId, collection, id, data, options);
+  }
+}
+
 describe('onboarding template service', () => {
   it('lists system templates as published and locked and rejects every mutation', async () => {
     const { service } = setup();
@@ -75,6 +150,31 @@ describe('onboarding template service', () => {
     expect(clone.modules[0].questions[0].id).not.toBe(source.modules[0].questions[0].id);
   });
 
+  it('saves and publishes a cloned template when database datetimes hydrate as Date objects', async () => {
+    let tick = 0;
+    const service = createTemplateService(new MongoUniqueIndexStore(), {
+      id: () => `date-id-${++tick}`,
+      now: () => `2026-10-20T00:01:${String(++tick).padStart(2, '0')}.000Z`,
+    });
+    const clone = await service.cloneSystemTemplate(admin, 'privos-foundations', 1);
+    const clientClone = JSON.parse(JSON.stringify(clone)) as typeof clone;
+
+    const saved = await service.updateDraft(admin, {
+      templateId: clientClone.id,
+      version: clientClone.version,
+      expectedUpdatedAt: clientClone.updatedAt,
+      draft: { ...draftInput, title: 'Bản sao đã chỉnh sửa' },
+    });
+    const published = await service.publish(admin, saved.id, saved.version, saved.updatedAt);
+
+    expect(published).toMatchObject({
+      id: clone.id,
+      source: 'custom',
+      status: 'published',
+      title: 'Bản sao đã chỉnh sửa',
+    });
+  });
+
   it('creates and publishes a document-only template without requiring questions or a passing score', async () => {
     const { service } = setup();
     const documentOnly: TemplateDraftInput = {
@@ -93,11 +193,22 @@ describe('onboarding template service', () => {
     expect(published.passingScore).toBeUndefined();
   });
 
-  it('deletes only unassigned custom drafts', async () => {
+  it('deletes unassigned custom templates in draft, published, or archived state', async () => {
     const { service, store } = setup();
     const disposable = await service.createDraft(admin, draftInput);
     await service.deleteDraft(admin, disposable.id, disposable.version);
     await expect(service.getAdminDetail(admin, disposable.id, disposable.version)).rejects.toMatchObject({ code: 'TEMPLATE_NOT_FOUND' });
+
+    const published = await service.createDraft(admin, { ...draftInput, title: 'Đã xuất bản' });
+    await service.publish(admin, published.id, published.version, published.updatedAt);
+    await service.deleteDraft(admin, published.id, published.version);
+    await expect(service.getAdminDetail(admin, published.id, published.version)).rejects.toMatchObject({ code: 'TEMPLATE_NOT_FOUND' });
+
+    const archivedDraft = await service.createDraft(admin, { ...draftInput, title: 'Đã lưu trữ' });
+    const archivedPublished = await service.publish(admin, archivedDraft.id, archivedDraft.version, archivedDraft.updatedAt);
+    await service.archive(admin, archivedPublished.id, archivedPublished.version);
+    await service.deleteDraft(admin, archivedPublished.id, archivedPublished.version);
+    await expect(service.getAdminDetail(admin, archivedPublished.id, archivedPublished.version)).rejects.toMatchObject({ code: 'TEMPLATE_NOT_FOUND' });
 
     const assigned = await service.createDraft(admin, { ...draftInput, title: 'Đang được dùng' });
     await store.create('room-a', 'onboarding_assignments', {

@@ -44,10 +44,10 @@ describe('Admin onboarding UI models', () => {
     expect(templateActions({ source: 'system', status: 'published' })).toEqual(['use', 'clone']);
   });
 
-  it('edits or archives published custom templates instead of deleting them', () => {
-    expect(templateActions({ source: 'custom', status: 'published' })).toEqual(['use', 'edit', 'archive']);
+  it('offers deletion for every custom template lifecycle while archived templates remain inactive', () => {
+    expect(templateActions({ source: 'custom', status: 'published' })).toEqual(['use', 'edit', 'archive', 'delete']);
     expect(templateActions({ source: 'custom', status: 'draft' })).toEqual(['edit', 'delete']);
-    expect(templateActions({ source: 'custom', status: 'archived' })).toEqual([]);
+    expect(templateActions({ source: 'custom', status: 'archived' })).toEqual(['delete']);
   });
 
   it('keeps missing resources blocking but makes missing questions module-named suggestions', () => {

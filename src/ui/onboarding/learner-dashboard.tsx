@@ -6,11 +6,12 @@ import {
   ClockCircleOutlined,
   TrophyOutlined,
 } from '@ant-design/icons';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 
 import type { AssignmentStatus, EmployeeType } from '../../onboarding/contracts';
 import type { OnboardingApi } from './api';
 import { EmptyState, ErrorState, LEARNER_EMPTY_STATE, LoadingState, ProgressBar, StatusBadge } from './components';
+import { usePolling, type PollReason } from './polling';
 
 export interface LearnerAssignmentListItem {
   readonly id: string;
@@ -45,18 +46,24 @@ export function LearnerDashboard({ api, onContinue, onOpenResults }: { api: Onbo
   const [items, setItems] = useState<readonly LearnerAssignmentListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
-  const load = useCallback(async () => {
-    setLoading(true); setError(null);
-    try { setItems((await api.learning<{ assignments: readonly LearnerAssignmentListItem[] }>('list')).assignments); }
-    catch (caught) { setError(caught instanceof Error ? caught : new Error('Không thể tải lộ trình của bạn.')); }
-    finally { setLoading(false); }
+  const load = useCallback(async (reason: PollReason) => {
+    const initial = reason === 'initial';
+    if (initial) { setLoading(true); setError(null); }
+    try {
+      setItems((await api.learning<{ assignments: readonly LearnerAssignmentListItem[] }>('list')).assignments);
+      setError(null);
+    } catch (caught) {
+      if (initial) setError(caught instanceof Error ? caught : new Error('Không thể tải lộ trình của bạn.'));
+    } finally {
+      if (initial) setLoading(false);
+    }
   }, [api]);
-  useEffect(() => { void load(); }, [load]);
+  const refresh = usePolling(load);
 
   const next = useMemo(() => chooseContinueAssignment(items), [items]);
   const complete = items.filter((item) => item.status === 'passed' || item.status === 'failed').length;
   if (loading) return <LoadingState label="Đang tải lộ trình của bạn…" />;
-  if (error) return <ErrorState error={error} onRetry={() => void load()} />;
+  if (error) return <ErrorState error={error} onRetry={() => void refresh()} />;
   if (!items.length) return <EmptyState {...LEARNER_EMPTY_STATE} icon={<BookOutlined />} />;
 
   return <div className="page-stack">

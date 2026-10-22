@@ -24,8 +24,9 @@ import {
   QuestionEditor,
   TemplateCard,
   TemplateDetailPanel,
+  TemplateLibraryToolbar,
   TemplateModalLayer,
-  filterTemplatesByName,
+  filterTemplates,
   insertQuestionAfter,
   newQuestion,
   preloadTemplateDetails,
@@ -35,13 +36,17 @@ import {
   type TemplateCatalogView,
   type TemplateDetailAction,
   type TemplateEditorUiState,
+  type TemplateStatusFilter,
 } from './template-editor-ui';
+import { usePolling, type PollReason } from './polling';
 
 export {
   QuestionEditor,
   TemplateCard,
   TemplateDetailPanel,
+  TemplateLibraryToolbar,
   TemplateModalLayer,
+  filterTemplates,
   filterTemplatesByName,
   insertQuestionAfter,
   newQuestion,
@@ -177,6 +182,7 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
   const { roomId } = usePrivosContext();
   const [items, setItems] = useState<readonly TemplateCatalogView[]>([]);
   const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<TemplateStatusFilter>('all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -192,13 +198,17 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
   const [detailCache, setDetailCache] = useState<ReadonlyMap<string, TemplateDetailCacheEntry>>(detailCacheRef.current);
   const [detailActionError, setDetailActionError] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<TemplateCatalogView | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const load = useCallback(async (reason: PollReason) => {
+    const initial = reason === 'initial';
+    if (initial) { setLoading(true); setError(null); }
     try {
       const nextItems = (await api.adminTemplates<{ templates: readonly TemplateCatalogView[] }>('list')).templates;
       setItems(nextItems);
+      setDetailItem((current) => current
+        ? nextItems.find((item) => item.id === current.id && item.version === current.version) ?? null
+        : null);
       const nextCache = await preloadTemplateDetails(nextItems, detailCacheRef.current, async (item) => (
         await api.adminTemplates<{ template: AdminTemplateDetail }>('get', {
           templateId: item.id,
@@ -207,16 +217,19 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
       ).template);
       detailCacheRef.current = nextCache;
       setDetailCache(nextCache);
+      setError(null);
     } catch (caught) {
-      setError(caught instanceof Error ? caught : new Error('Không thể tải thư viện template.'));
-    } finally { setLoading(false); }
+      if (initial) setError(caught instanceof Error ? caught : new Error('Không thể tải thư viện template.'));
+    } finally {
+      if (initial) setLoading(false);
+    }
   }, [api]);
 
-  useEffect(() => { void load(); }, [load]);
+  const refresh = usePolling(load);
   const issues = useMemo(() => validateTemplateDraft(draft), [draft]);
   const blockingIssues = useMemo(() => issues.filter((issue) => issue.level === 'error'), [issues]);
   const suggestions = useMemo(() => issues.filter((issue) => issue.level === 'suggestion'), [issues]);
-  const filteredItems = useMemo(() => filterTemplatesByName(items, query), [items, query]);
+  const filteredItems = useMemo(() => filterTemplates(items, query, statusFilter), [items, query, statusFilter]);
   const detailEntry = detailItem ? detailCache.get(templateDetailCacheKey(detailItem)) : undefined;
   const detail = detailEntry?.detail ?? null;
   const detailLoading = Boolean(detailItem && !detailEntry);
@@ -319,20 +332,22 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
       }
       setDetailItem(null);
       setDetailActionError(null);
-      await load();
+      await refresh();
     } catch (caught) {
       setDetailActionError(caught instanceof Error ? caught.message : 'Không thể cập nhật template.');
     }
   }
 
   async function confirmDelete() {
-    if (!pendingDelete) return;
+    if (!pendingDelete || deleting) return;
+    setDeleting(true);
     try {
       await api.adminTemplates('delete', { templateId: pendingDelete.id, version: pendingDelete.version });
       setPendingDelete(null);
-      setNotice('Đã xóa bản nháp.');
-      await load();
-    } catch (caught) { setNotice(caught instanceof Error ? caught.message : 'Không thể xóa bản nháp.'); }
+      setNotice('Đã xóa template.');
+      await refresh();
+    } catch (caught) { setNotice(caught instanceof Error ? caught.message : 'Không thể xóa template.'); }
+    finally { setDeleting(false); }
   }
 
   async function upload(file: File, moduleIndex: number) {
@@ -379,21 +394,25 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
 
       setNotice(publish ? 'Đã xuất bản phiên bản template.' : 'Đã lưu bản nháp.');
       setEditorUi((current) => templateEditorTransition(current, 'save_succeeded'));
-      await load();
+      await refresh();
     } catch (caught) { setEditorMessage(caught instanceof Error ? caught.message : 'Không thể lưu template.'); }
     finally { setSaving(false); }
   }
 
   if (loading) return <LoadingState label="Đang tải thư viện template…" />;
-  if (error) return <ErrorState error={error} onRetry={() => void load()} />;
+  if (error) return <ErrorState error={error} onRetry={() => void refresh()} />;
 
   return <div className="page-stack">
     <section className="page-heading"><div><span className="section-kicker">THƯ VIỆN NỘI DUNG</span><h2>Template onboarding</h2><p>Chọn một template để xem đầy đủ tài liệu, câu hỏi và các thao tác phù hợp.</p></div><button className="button button-primary" type="button" onClick={openNew}><PlusOutlined /> Tạo template</button></section>
     {notice && <div className="inline-notice" role="status">{notice}</div>}
-    <section className="template-library-toolbar" aria-label="Tìm kiếm template">
-      <label className="search-field"><SearchOutlined /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm template theo tên…" aria-label="Tìm template theo tên" /></label>
-      <span>{filteredItems.length}/{items.length} template</span>
-    </section>
+    <TemplateLibraryToolbar
+      query={query}
+      status={statusFilter}
+      count={filteredItems.length}
+      total={items.length}
+      onQueryChange={setQuery}
+      onStatusChange={setStatusFilter}
+    />
     {filteredItems.length > 0
       ? <section className="template-grid">{filteredItems.map((item) => <TemplateCard item={item} key={`${item.id}@${item.version}`} onOpen={() => { setDetailActionError(null); setDetailItem(item); }} />)}</section>
       : <section className="template-search-empty"><SearchOutlined /><strong>Không tìm thấy template</strong><p>Thử tìm bằng một tên khác.</p></section>}
@@ -425,6 +444,6 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
     </section></div></TemplateModalLayer>}
 
     {editorUi.confirmDiscard && <TemplateModalLayer><ConfirmDialog open title="Đóng khi chưa lưu?" description="Các thay đổi trong template chưa được lưu và sẽ bị mất." confirmLabel="Đóng không lưu" onCancel={() => setEditorUi((current) => templateEditorTransition(current, 'cancel_discard'))} onConfirm={() => setEditorUi((current) => templateEditorTransition(current, 'confirm_discard'))} /></TemplateModalLayer>}
-    {pendingDelete && <TemplateModalLayer><ConfirmDialog open title="Xóa bản nháp?" description="Thao tác này chỉ áp dụng cho template tùy chỉnh chưa được sử dụng." confirmLabel="Xóa bản nháp" onCancel={() => setPendingDelete(null)} onConfirm={() => void confirmDelete()} /></TemplateModalLayer>}
+    {pendingDelete && <TemplateModalLayer><ConfirmDialog open title="Xóa template?" description="Chỉ có thể xóa template tùy chỉnh chưa được gán cho nhân sự." confirmLabel="Xóa template" busy={deleting} busyLabel="Đang xóa…" onCancel={() => { if (!deleting) setPendingDelete(null); }} onConfirm={() => void confirmDelete()} /></TemplateModalLayer>}
   </div>;
 }

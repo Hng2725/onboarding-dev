@@ -7,6 +7,10 @@ const stylesheet = readFileSync(
   fileURLToPath(new URL('../src/ui/onboarding/styles.css', import.meta.url)),
   'utf8',
 );
+const templateEditorStylesheet = readFileSync(
+  fileURLToPath(new URL('../src/ui/onboarding/template-editor.css', import.meta.url)),
+  'utf8',
+);
 
 function declarations(block: string): ReadonlyMap<string, string> {
   return new Map(
@@ -19,6 +23,19 @@ function themeBlock(pattern: RegExp): ReadonlyMap<string, string> {
   const block = stylesheet.match(pattern)?.[1];
   if (!block) throw new Error(`Theme block not found: ${pattern}`);
   return declarations(block);
+}
+
+function cssRule(pattern: RegExp): ReadonlyMap<string, string> {
+  const block = templateEditorStylesheet.match(pattern)?.[1] ?? '';
+  return new Map(
+    [...block.matchAll(/([\w-]+)\s*:\s*([^;]+);/g)]
+      .map((match) => [match[1], match[2].trim()] as const),
+  );
+}
+
+function resolveThemeColor(value: string, theme: ReadonlyMap<string, string>): string {
+  const token = value.match(/^var\((--[\w-]+)\)$/)?.[1];
+  return token ? theme.get(token) ?? '' : value;
 }
 
 function rgb(hex: string): readonly [number, number, number] {
@@ -68,5 +85,16 @@ describe('onboarding visual theme', () => {
     expect(surface).not.toBe(background);
     expect(contrast(text, background)).toBeGreaterThanOrEqual(7);
     expect(contrast(muted, background)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('keeps native template status options readable in dark mode', () => {
+    const dark = themeBlock(/:root\[data-theme="dark"\]\s*\{([\s\S]*?)\}/);
+    const option = cssRule(/:root\[data-theme="dark"\]\s+\.template-filter-field option\s*\{([\s\S]*?)\}/);
+    const text = resolveThemeColor(option.get('color') ?? '', dark);
+    const background = resolveThemeColor(option.get('background-color') ?? '', dark);
+
+    expect(text).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(background).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(contrast(text, background)).toBeGreaterThanOrEqual(7);
   });
 });

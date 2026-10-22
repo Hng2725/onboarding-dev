@@ -201,6 +201,18 @@ function text(value: string, label: string): string {
   return normalized;
 }
 
+function canonicalTimestamp(value: unknown, label: string): string {
+  if (value instanceof Date) {
+    if (!Number.isNaN(value.getTime())) return value.toISOString();
+    throw new TemplateServiceError('TEMPLATE_INVALID', `${label} is not a valid timestamp.`);
+  }
+  if (typeof value === 'string') {
+    const milliseconds = Date.parse(value);
+    return Number.isNaN(milliseconds) ? value : new Date(milliseconds).toISOString();
+  }
+  throw new TemplateServiceError('TEMPLATE_INVALID', `${label} is not a valid timestamp.`);
+}
+
 function normalizeDraft(
   input: TemplateDraftInput,
   templateId: string,
@@ -403,8 +415,21 @@ export function createTemplateService(
         store.query<ResourceDbRecord>(roomId, 'onboarding_resources', { filter: { moduleId: module.moduleId }, limit: 1000 }),
         store.query<QuestionDbRecord>(roomId, 'onboarding_questions', { filter: { moduleId: module.moduleId }, limit: 1000 }),
       ]);
-      for (const resource of resources.records) await store.softDelete(roomId, 'onboarding_resources', resource.id);
-      for (const question of questions.records) await store.softDelete(roomId, 'onboarding_questions', question.id);
+      for (const resource of resources.records) {
+        await store.update(roomId, 'onboarding_resources', resource.id, {
+          moduleId: `deleted:${resource.id}`,
+        });
+        await store.softDelete(roomId, 'onboarding_resources', resource.id);
+      }
+      for (const question of questions.records) {
+        await store.update(roomId, 'onboarding_questions', question.id, {
+          moduleId: `deleted:${question.id}`,
+        });
+        await store.softDelete(roomId, 'onboarding_questions', question.id);
+      }
+      await store.update(roomId, 'onboarding_modules', module.id, {
+        templateId: `deleted:${module.id}`,
+      });
       await store.softDelete(roomId, 'onboarding_modules', module.id);
     }
   }
@@ -463,9 +488,11 @@ export function createTemplateService(
       modules,
       locked: false,
       maxAttempts: record.maxAttempts,
-      createdAt: record.createdAt,
-      updatedAt: record.updatedAt,
-      publishedAt: record.publishedAt,
+      createdAt: canonicalTimestamp(record.createdAt, 'Template createdAt'),
+      updatedAt: canonicalTimestamp(record.updatedAt, 'Template updatedAt'),
+      publishedAt: record.publishedAt === undefined
+        ? undefined
+        : canonicalTimestamp(record.publishedAt, 'Template publishedAt'),
     };
   }
 
@@ -520,7 +547,7 @@ export function createTemplateService(
           title: record.title,
           description: record.description,
           locked: false,
-          updatedAt: record.updatedAt,
+          updatedAt: canonicalTimestamp(record.updatedAt, 'Template updatedAt'),
         })),
       ];
     },
@@ -551,7 +578,9 @@ export function createTemplateService(
       requireAdmin(actor);
       if (systemId(input.templateId)) return locked(input.templateId);
       const record = await requireRecord(actor.roomId, input.templateId, input.version);
-      if (record.updatedAt !== input.expectedUpdatedAt) {
+      const currentUpdatedAt = canonicalTimestamp(record.updatedAt, 'Template updatedAt');
+      const expectedUpdatedAt = canonicalTimestamp(input.expectedUpdatedAt, 'Expected template updatedAt');
+      if (currentUpdatedAt !== expectedUpdatedAt) {
         throw new TemplateServiceError('TEMPLATE_CONFLICT', 'Template changed after this editor loaded it.');
       }
       const timestamp = now();
@@ -565,7 +594,7 @@ export function createTemplateService(
           passingScore: normalized.snapshot.passingScore,
           maxAttempts: normalized.maxAttempts,
           updatedAt: timestamp,
-        }, { expectedUpdatedAt: input.expectedUpdatedAt });
+        }, { expectedUpdatedAt: currentUpdatedAt });
         await persistContent(actor.roomId, normalized.snapshot, timestamp);
         return loadCustom(actor.roomId, await requireRecord(actor.roomId, record.templateId, record.version));
       }
@@ -606,13 +635,14 @@ export function createTemplateService(
       if (systemId(templateId)) return locked(templateId);
       const record = await requireRecord(actor.roomId, templateId, version);
       if (record.status !== 'draft') throw new TemplateServiceError('TEMPLATE_CONFLICT', 'Only a draft can be published.');
-      if (expectedUpdatedAt && expectedUpdatedAt !== record.updatedAt) {
+      const currentUpdatedAt = canonicalTimestamp(record.updatedAt, 'Template updatedAt');
+      if (expectedUpdatedAt && canonicalTimestamp(expectedUpdatedAt, 'Expected template updatedAt') !== currentUpdatedAt) {
         throw new TemplateServiceError('TEMPLATE_CONFLICT', 'Template changed before publication.');
       }
       const timestamp = now();
       await store.update(actor.roomId, 'onboarding_templates', record.id, {
         status: 'published', publishedAt: timestamp, updatedAt: timestamp,
-      }, { expectedUpdatedAt: expectedUpdatedAt ?? record.updatedAt });
+      }, { expectedUpdatedAt: currentUpdatedAt });
       return loadCustom(actor.roomId, await requireRecord(actor.roomId, templateId, version));
     },
 
@@ -633,9 +663,6 @@ export function createTemplateService(
       requireAdmin(actor);
       if (systemId(templateId)) return locked(templateId);
       const record = await requireRecord(actor.roomId, templateId, version);
-      if (record.status !== 'draft') {
-        throw new TemplateServiceError('TEMPLATE_INVALID', 'Only an unassigned custom draft can be deleted.');
-      }
       const assignments = await store.count(actor.roomId, 'onboarding_assignments', {
         templateId, templateVersion: version,
       });

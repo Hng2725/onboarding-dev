@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
 import type { AdminTemplateDetail, TemplateDraftInput, TemplateQuestionInput } from '../src/onboarding/templates';
+import { ConfirmDialog } from '../src/ui/onboarding/components';
 import * as templatesModule from '../src/ui/onboarding/templates';
 
 const completeDraft = (question: TemplateQuestionInput): TemplateDraftInput => ({
@@ -50,6 +51,56 @@ describe('template detail and editor UI', () => {
     expect(filterTemplatesByName!(items, 'NEN TANG').map((item) => item.id)).toEqual(['privos']);
     expect(filterTemplatesByName!(items, '  kinh doanh  ').map((item) => item.id)).toEqual(['sales']);
     expect(filterTemplatesByName!(items, '')).toEqual(items);
+  });
+
+  it('combines title search with draft, published, and archived status filters', () => {
+    const filterTemplates = (templatesModule as unknown as {
+      filterTemplates?: (
+        items: readonly ReturnType<typeof catalogItem>[],
+        query: string,
+        status: 'all' | 'draft' | 'published' | 'archived',
+      ) => readonly ReturnType<typeof catalogItem>[];
+    }).filterTemplates;
+    const items = [
+      { ...catalogItem('published', 'PrivOS cơ bản'), status: 'published' as const },
+      { ...catalogItem('draft', 'PrivOS chuyên sâu'), status: 'draft' as const },
+      { ...catalogItem('archived', 'Kinh doanh'), status: 'archived' as const },
+    ];
+
+    expect(filterTemplates).toBeTypeOf('function');
+    expect(filterTemplates!(items, 'privos', 'draft').map((item) => item.id)).toEqual(['draft']);
+    expect(filterTemplates!(items, '', 'archived').map((item) => item.id)).toEqual(['archived']);
+    expect(filterTemplates!(items, '', 'all').map((item) => item.id)).toEqual(['published', 'draft', 'archived']);
+  });
+
+  it('renders the template search and all status choices in one toolbar', () => {
+    const TemplateLibraryToolbar = (templatesModule as unknown as {
+      TemplateLibraryToolbar?: (props: {
+        query: string;
+        status: 'all' | 'draft' | 'published' | 'archived';
+        count: number;
+        total: number;
+        onQueryChange: (value: string) => void;
+        onStatusChange: (value: 'all' | 'draft' | 'published' | 'archived') => void;
+      }) => ReactNode;
+    }).TemplateLibraryToolbar;
+
+    expect(TemplateLibraryToolbar).toBeTypeOf('function');
+    const markup = renderToStaticMarkup(createElement(TemplateLibraryToolbar!, {
+      query: '',
+      status: 'all',
+      count: 3,
+      total: 5,
+      onQueryChange: () => undefined,
+      onStatusChange: () => undefined,
+    }));
+
+    expect(markup).toContain('aria-label="Tìm template theo tên"');
+    expect(markup).toContain('aria-label="Lọc template theo trạng thái"');
+    expect(markup).toContain('Đã xuất bản');
+    expect(markup).toContain('Đã lưu trữ');
+    expect(markup).toContain('Bản nháp');
+    expect(markup).toContain('3/5 template');
   });
 
   it('inserts a new question immediately below the selected question', () => {
@@ -199,14 +250,42 @@ describe('template detail and editor UI', () => {
     expect(markup).not.toContain('Clone');
   });
 
-  it('never offers edit for a system template but offers it for a custom template detail', () => {
+  it('keeps system templates locked and offers delete for published and archived custom templates', () => {
     const detailActions = (templatesModule as unknown as {
       templateDetailActions?: (template: { source: 'system' | 'custom'; status: 'draft' | 'published' | 'archived' }) => readonly string[];
     }).templateDetailActions;
 
     expect(detailActions).toBeTypeOf('function');
     expect(detailActions!({ source: 'system', status: 'published' })).toEqual(['use', 'clone']);
-    expect(detailActions!({ source: 'custom', status: 'published' })).toEqual(['use', 'edit', 'archive']);
+    expect(detailActions!({ source: 'custom', status: 'published' })).toEqual(['use', 'edit', 'archive', 'delete']);
+    expect(detailActions!({ source: 'custom', status: 'archived' })).toEqual(['delete']);
+  });
+
+  it('locks confirmation actions and shows a spinning icon while deletion is pending', () => {
+    const BusyConfirmDialog = ConfirmDialog as unknown as (props: {
+      open: boolean;
+      title: string;
+      description: string;
+      confirmLabel: string;
+      busy: boolean;
+      busyLabel: string;
+      onConfirm: () => void;
+      onCancel: () => void;
+    }) => ReactNode;
+    const markup = renderToStaticMarkup(createElement(BusyConfirmDialog, {
+      open: true,
+      title: 'Xóa template?',
+      description: 'Kiểm tra',
+      confirmLabel: 'Xóa template',
+      busy: true,
+      busyLabel: 'Đang xóa…',
+      onConfirm: () => undefined,
+      onCancel: () => undefined,
+    }));
+
+    expect(markup.match(/disabled=""/g) ?? []).toHaveLength(2);
+    expect(markup).toContain('anticon-loading');
+    expect(markup).toContain('Đang xóa…');
   });
 
   it('portals template modals outside animated route stacking contexts', () => {
