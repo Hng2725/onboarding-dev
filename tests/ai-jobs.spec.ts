@@ -98,6 +98,41 @@ async function setup() {
 }
 
 describe('AI job service', () => {
+  it('propagates optimistic conflict for questions captured before the first approved lesson is replaced', async () => {
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    const sourceRefs = generatedTemplate.modules[0].blocks[0].sourceRefs;
+    await store.create(admin.roomId, 'onboarding_ai_jobs', {
+      jobId: 'inventory-question-version', kind: 'inventory', status: 'completed', sourceIds: ['source-1'],
+      promptVersion: 'old', calls: [], stageOutputs: {},
+      result: { systemSummary: { purpose: 'Orders', modules: [], sourceRefs }, glossary: [], features: [], flags: [] },
+      operationId: 'inventory-question-version', createdBy: admin.userId,
+      createdAt: '2026-10-28T00:00:00.000Z', updatedAt: '2026-10-28T00:00:00.000Z',
+    });
+    const service = createAiJobService(store, { now: () => '2026-10-28T01:00:00.000Z' });
+    const job = await service.startJob(admin, {
+      kind: 'template', inventoryJobId: 'inventory-question-version', templateKind: 'normal', operationId: 'question-version',
+    });
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 });
+    const outline = job.moduleRuns![0].outline;
+    const input = { jobId: job.jobId, moduleLocalId: outline.moduleLocalId };
+    const module = { ...generatedTemplate.modules[0], localId: outline.moduleLocalId, frameKey: outline.frameKey, featureIds: outline.featureIds, questions: [] };
+    await service.updateModuleLesson(admin, { ...input, expectedVersion: 0, module });
+    const first = await service.approveModuleLesson(admin, { ...input, expectedVersion: 1 });
+    const staleRequest = { ...input, expectedVersion: first.moduleRuns![0].questionVersion, questions: generatedTemplate.modules[0].questions };
+    expect(staleRequest.expectedVersion).toBe(0);
+
+    await service.updateModuleLesson(admin, { ...input, expectedVersion: 1, module: { ...module, title: 'Lesson version two' } });
+    await service.approveModuleLesson(admin, { ...input, expectedVersion: 2 });
+    await expect(service.updateModuleQuestions(admin, staleRequest)).rejects.toMatchObject({ code: 'OPERATION_CONFLICT' });
+
+    const current = (await service.getJob(admin, job.jobId)).moduleRuns![0];
+    expect(current).toMatchObject({ lessonVersion: 2, approvedLessonVersion: 2, questionVersion: 1, questionState: 'queued' });
+    expect(current.questionDraft).toBeUndefined();
+    expect(current.questionLessonVersion).toBeUndefined();
+    const accepted = await service.updateModuleQuestions(admin, { ...staleRequest, expectedVersion: 1 });
+    expect(accepted.moduleRuns![0]).toMatchObject({ questionVersion: 2, questionLessonVersion: 2, questionState: 'review_ready' });
+  });
   it('builds one verification claim per learning sentence, step, and scored question', () => {
     const template = {
       ...generatedTemplate,

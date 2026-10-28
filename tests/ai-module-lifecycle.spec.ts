@@ -46,6 +46,20 @@ async function approveManualPair(service: ReturnType<typeof createAiJobService>,
 }
 
 describe('module lifecycle transitions', () => {
+  it('rejects a first-question request captured before an approved lesson is replaced', () => {
+    const firstLesson = approveLesson(updateLesson(createModuleRuns(outline)[0], 0, lesson, 'manual'), 1);
+    const staleQuestionVersion = firstLesson.questionVersion;
+    expect(staleQuestionVersion).toBe(0);
+    expect(firstLesson.questionDraft).toBeUndefined();
+
+    const replacement = updateLesson(firstLesson, 1, { ...lesson, title: 'Lesson version two' }, 'manual');
+    const secondLesson = approveLesson(replacement, 2);
+
+    expect(() => updateQuestions(secondLesson, staleQuestionVersion, lesson.questions)).toThrow('Questions require the current approved lesson and version.');
+    expect(secondLesson.questionVersion).toBe(1);
+    expect(secondLesson.questionDraft).toBeUndefined();
+    expect(updateQuestions(secondLesson, 1, lesson.questions)).toMatchObject({ questionVersion: 2, questionLessonVersion: 2, questionState: 'review_ready' });
+  });
   it('does not carry flags from a replaced draft into a new lesson or question version', () => {
     const flag = { type: 'ambiguous' as const, severity: 'warning' as const, message: 'Old draft', questionForAdmin: 'Verify?', location: { blockLocalId: 'old-block' }, evidence: [] };
     const run = { ...approvedRun(), lessonFlags: [flag], questionFlags: [flag] };

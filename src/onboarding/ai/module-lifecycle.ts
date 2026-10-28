@@ -28,7 +28,9 @@ export function updateLesson(run: AiModuleDraftRun, expectedVersion: number, mod
   conflict(run.outline.tombstoned === true || run.lessonVersion !== expectedVersion, 'Lesson version conflict.');
   conflict(module.localId !== run.outline.moduleLocalId || module.frameKey !== run.outline.frameKey || JSON.stringify(module.featureIds) !== JSON.stringify(run.outline.featureIds), 'Module identity cannot change.');
   const { approvedLessonVersion: _lesson, approvedQuestionVersion: _questions, nextRetryAt: _retry, providerWaitStartedAt: _wait, ...rest } = run;
-  return { ...rest, lessonDraft: { ...module, questions: [] }, lessonFlags: [], lessonProvenance: provenance, lessonVersion: run.lessonVersion + 1, lessonState: provenance === 'fallback' ? 'fallback_review' : 'review_ready', questionState: run.questionVersion ? 'stale' : 'blocked', questionVersion: run.questionVersion ? run.questionVersion + 1 : 0 };
+  // Replacing a lesson invalidates even an unsaved first-question request.
+  const questionVersion = run.lessonVersion > 0 ? run.questionVersion + 1 : run.questionVersion;
+  return { ...rest, lessonDraft: { ...module, questions: [] }, lessonFlags: [], lessonProvenance: provenance, lessonVersion: run.lessonVersion + 1, lessonState: provenance === 'fallback' ? 'fallback_review' : 'review_ready', questionState: run.questionVersion ? 'stale' : 'blocked', questionVersion };
 }
 export function approveLesson(run: AiModuleDraftRun, expectedVersion: number): AiModuleDraftRun {
   conflict(run.outline.tombstoned === true || run.lessonVersion !== expectedVersion || !run.lessonDraft || !['review_ready', 'fallback_review'].includes(run.lessonState), 'Lesson is not ready for approval.');
