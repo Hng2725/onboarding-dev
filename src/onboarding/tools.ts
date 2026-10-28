@@ -503,7 +503,7 @@ async function dispatchAdminAi(
     case 'retry_module': {
       const target = requiredString(args, 'target');
       if (target !== 'lesson' && target !== 'questions') throw toolError('ARGUMENT_INVALID', 'target must be lesson or questions.');
-      return { job: await services.aiJobs.retryModule(actor, { jobId: requiredString(args, 'jobId'), moduleLocalId: requiredString(args, 'moduleLocalId'), target }) };
+      return { job: await services.aiJobs.retryModule(actor, { jobId: requiredString(args, 'jobId'), moduleLocalId: requiredString(args, 'moduleLocalId'), target, expectedVersion: requiredNumber(args, 'expectedVersion') }) };
     }
     case 'get_job': return { job: await services.aiJobs.getJob(actor, requiredString(args, 'jobId')) };
     case 'next_step': return services.aiJobs.nextStep(actor, {

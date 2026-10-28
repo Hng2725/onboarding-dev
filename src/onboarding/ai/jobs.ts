@@ -1,3 +1,4 @@
+import { validateAdminOutline } from './outline-validation';
 import { createHash } from 'node:crypto';
 
 import type { OnboardingActor } from '../auth';
@@ -27,7 +28,7 @@ import {
 import { AI_GENERATION_LIMITS } from './limits';
 import { sanitizeAiDiagnosticText } from './diagnostics';
 import { materializeAiTemplate } from './materialize';
-import { buildTemplateOutline, applyTemplateOutlineEdits, validateTemplateOutline } from './outline';
+import { buildTemplateOutline, applyTemplateOutlineEdits } from './outline';
 import { buildFallbackLesson } from './fallback-lessons';
 import { buildModuleLessonPrompt, buildModuleQuestionPrompt, validateModuleLessonOutput, validateModuleQuestionOutput, validApprovedLesson, type ModuleLessonPromptInput } from './module-draft';
 import { createModuleRuns, reconcileModuleRuns, invalidateModule, updateLesson, approveLesson, updateQuestions, approveQuestions, retryModuleRun, lessonApproved, modulesComplete } from './module-lifecycle';
@@ -45,8 +46,6 @@ import {
   type AiPromptRequest,
 } from './prompts';
 import {
-  NORMAL_FRAMES,
-  ADVANCED_FRAMES,
   removeQuestionsBlockedByFlags,
   validateGeneratedTemplate,
   type GeneratedTemplate,
@@ -352,7 +351,7 @@ export interface AiJobService {
   approveModuleLesson(actor: OnboardingActor, input: ModuleVersionInput): Promise<AiJobRecord>;
   updateModuleQuestions(actor: OnboardingActor, input: ModuleVersionInput & { readonly questions: readonly GeneratedQuestion[] }): Promise<AiJobRecord>;
   approveModuleQuestions(actor: OnboardingActor, input: ModuleVersionInput): Promise<AiJobRecord>;
-  retryModule(actor: OnboardingActor, input: ModuleInput & { readonly target: 'lesson' | 'questions' }): Promise<AiJobRecord>;
+  retryModule(actor: OnboardingActor, input: ModuleInput & { readonly target: 'lesson' | 'questions'; readonly expectedVersion: number }): Promise<AiJobRecord>;
   startJob(actor: OnboardingActor, input: StartAiJobInput): Promise<AiJobRecord>;
   listJobs(actor: OnboardingActor): Promise<readonly AiJobRecord[]>;
   getJob(actor: OnboardingActor, jobId: string): Promise<AiJobRecord>;
@@ -1431,20 +1430,7 @@ export function createAiJobService(
     if (row.outline!.revision !== revision || !Number.isSafeInteger(revision)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Outline revision conflict.');
   }
   function validateOutline(row: AiJobDbRecord, outline: TemplateOutline): void {
-    // Admin reorder is explicit; IDs, frames and contiguous order remain server owned.
-    const frames: readonly string[] = row.templateKind === 'advanced' ? ADVANCED_FRAMES : NORMAL_FRAMES;
-    if (outline.modules.filter((module) => !module.tombstoned).some((module, order) => !frames.includes(module.frameKey) || module.order !== order)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Outline frames and order must be server owned.');
-    const strings = (value: unknown): value is readonly string[] => Array.isArray(value) && value.every((item) => typeof item === 'string');
-    if (outline.modules.some((module) =>
-      typeof module.title !== 'string' || !module.title.trim() || module.title.length > 80
-      || typeof module.description !== 'string' || module.description.length > 500
-      || !Number.isFinite(module.estimatedMinutes) || module.estimatedMinutes <= 0
-      || !strings(module.objectives) || module.objectives.length > 4 || module.objectives.some((item) => !item.trim())
-      || !strings(module.featureIds) || module.featureIds.some((id) => !id.trim())
-      || !strings(module.sourceSectionIds) || !Array.isArray(module.responsibilityIndexes))) {
-      throw new AiJobServiceError('OPERATION_CONFLICT', 'Outline metadata is invalid.');
-    }
-    const errors = validateTemplateOutline(outline, { templateKind: row.templateKind ?? 'normal', responsibilities: row.roleProfile?.responsibilities ?? [] }).filter((error) => error.code !== 'FRAME_ORDER');
+    const errors = validateAdminOutline(outline, { templateKind: row.templateKind ?? 'normal', responsibilities: row.roleProfile?.responsibilities ?? [] });
     if (errors.length) throw new AiJobServiceError('OPERATION_CONFLICT', errors.map((error) => error.message).join(' '));
   }
   async function fallbackRun(actor: OnboardingActor, row: AiJobDbRecord, run: AiModuleDraftRun): Promise<AiModuleDraftRun> {
@@ -1695,7 +1681,9 @@ export function createAiJobService(
     async retryModule(actor, input) {
       const row = await requireModuleJob(actor, input.jobId);
       if (input.target !== 'lesson' && input.target !== 'questions') throw new AiJobServiceError('OPERATION_CONFLICT', 'Retry target is invalid.');
-      return saveRun(actor, row, retryModuleRun(requireRun(row, input.moduleLocalId), input.target));
+      const run = requireRun(row, input.moduleLocalId);
+      if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion !== (input.target === 'lesson' ? run.lessonVersion : run.questionVersion)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Module version conflict.');
+      return saveRun(actor, row, retryModuleRun(run, input.target));
     },
 
     async getJob(actor, jobId) {

@@ -112,6 +112,8 @@ describe('onboarding tool dispatcher', () => {
     }
     await expect(handle('onboarding_admin_ai', { action: 'approve_outline', jobId: 'job-1' }, actor)).rejects.toThrow();
     await expect(handle('onboarding_admin_ai', { action: 'retry_module', jobId: 'job-1', moduleLocalId: 'm1', target: 'other' }, actor)).rejects.toThrow();
+    await expect(handle('onboarding_admin_ai', { action: 'retry_module', jobId: 'job-1', moduleLocalId: 'm1', target: 'lesson' }, actor)).rejects.toThrow();
+    expect(bundle.aiJobs.retryModule).toHaveBeenCalledWith(expect.objectContaining({ roomId: 'room-a', userId: 'admin-1' }), { jobId: 'job-1', moduleLocalId: 'm1', target: 'lesson', expectedVersion: 1 });
     expect(bundle.aiJobs.updateOutline).toHaveBeenCalledWith(expect.objectContaining({ roomId: 'room-a', userId: 'admin-1' }), { jobId: 'job-1', expectedRevision: 1, edits: [] });
   });
   it('normalizes only matching room-file metadata for AI source verification', () => {

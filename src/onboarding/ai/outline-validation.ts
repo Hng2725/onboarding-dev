@@ -36,3 +36,13 @@ export function validateTemplateOutline(outline: TemplateOutline, input: { templ
   }
   return errors;
 }
+
+/** Rules for an explicitly edited Admin outline; frame order is user controlled. */
+export function validateAdminOutline(outline: TemplateOutline, input: { templateKind: EmployeeType; responsibilities: readonly string[] }): readonly ValidationError[] {
+  const errors = validateTemplateOutline(outline, input).filter((error) => error.code !== 'FRAME_ORDER');
+  const frames: readonly string[] = input.templateKind === 'normal' ? NORMAL_FRAMES : ADVANCED_FRAMES;
+  if (outline.modules.filter((module) => !module.tombstoned).some((module, order) => !frames.includes(module.frameKey) || module.order !== order)) errors.push({ code: 'FRAME_ORDER', path: 'modules', message: 'Outline frames and order must be valid.' });
+  const strings = (value: unknown): value is readonly string[] => Array.isArray(value) && value.every((item) => typeof item === 'string');
+  if (outline.modules.some((module) => typeof module.title !== 'string' || !module.title.trim() || module.title.length > 80 || typeof module.description !== 'string' || module.description.length > 500 || !Number.isFinite(module.estimatedMinutes) || module.estimatedMinutes <= 0 || !strings(module.objectives) || module.objectives.length > 4 || module.objectives.some((item) => !item.trim()) || !strings(module.featureIds) || module.featureIds.some((id) => !id.trim()) || !strings(module.sourceSectionIds) || !Array.isArray(module.responsibilityIndexes))) errors.push({ code: 'METADATA', path: 'modules', message: 'Outline metadata is invalid.' });
+  return errors;
+}

@@ -24,3 +24,16 @@ it('edits the selected outline card and sends a reorder for that card', () => {
   act(() => cards[1].findAllByType('button').find((b) => b.children.join('') === '↑')!.props.onClick());
   expect(onEdit).toHaveBeenCalledWith([{ type: 'reorder', moduleLocalId: 'm1', order: 0 }]);
 });
+
+it('permits valid admin reorder and disables approval while a title edit is unsaved', () => {
+  const modules = ['t1-core', 't1-overview', 't1-access', 't1-navigation'].map((frameKey, order) => ({ moduleLocalId: `m${order}`, frameKey, order, title: frameKey, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] }));
+  const view = TestRenderer.create(createElement(AiOutlineReview, { outline: { revision: 2, modules, taskCoverage: [], flags: [] }, templateKind: 'normal', responsibilities: [], busy: false, onEdit: () => {}, onApprove: () => {} }));
+  const approve = () => view.root.findAllByType('button').find((b) => b.children.join('') === 'Duyệt khung và bắt đầu viết')!;
+  expect(approve().props.disabled).toBe(false);
+  act(() => view.root.findAllByType('article')[0].findAllByType('input')[0].props.onChange({ target: { value: '' } }));
+  expect(approve().props.disabled).toBe(true);
+  act(() => view.root.findAllByType('article')[0].findAllByType('input')[0].props.onChange({ target: { value: 'Updated' } }));
+  expect(approve().props.disabled).toBe(true);
+  act(() => view.update(createElement(AiOutlineReview, { outline: { revision: 3, modules: modules.map((item, i) => i === 0 ? { ...item, title: 'Updated' } : item), taskCoverage: [], flags: [] }, templateKind: 'normal', responsibilities: [], busy: false, onEdit: () => {}, onApprove: () => {} })));
+  expect(approve().props.disabled).toBe(false);
+});

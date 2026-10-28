@@ -248,3 +248,20 @@ it('lets an admin explicitly start Template 2 after Template 1 completed without
   expect(api.adminAi.mock.calls.filter(([action]) => action === 'start_job')).toHaveLength(1);
   view.unmount(); vi.unstubAllGlobals();
 });
+
+it('resumes an interrupted module job only on explicit action', async () => {
+  const storage = new Map([['onboarding:ai:template:room-1:normal', 'template-1']]);
+  vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+  const module = { moduleLocalId: 'm', frameKey: 't1-core', order: 0, title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] };
+  const job = { ...failedTemplateJob, templateKind: 'normal' as const, roleProfile: undefined, status: 'running' as const, pipelineVersion: 'module_v2' as const, outline: { revision: 1, modules: [module], flags: [], taskCoverage: [] }, outlineApprovedRevision: 1, moduleRuns: [{ outline: module, outlineRevision: 1, lessonState: 'drafting' as const, lessonVersion: 1, questionState: 'blocked' as const, questionVersion: 0 }], calls: [] };
+  const api = { adminAi: vi.fn(async (action: string) => { if (action === 'list_sources') return { sources: [] }; if (action === 'list_jobs') return { jobs: [inventoryJob, job] }; if (action === 'next_step') return { kind: 'awaiting_admin', job }; throw new Error('Unexpected action: ' + action); }) };
+  let view!: TestRenderer.ReactTestRenderer;
+  await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+  expect(api.adminAi.mock.calls.some(([action]) => action === 'next_step')).toBe(false);
+  const button = view.root.findAllByType('button').find((item) => item.children.join('').includes('Tiếp tục xử lý'));
+  expect(button).toBeDefined();
+  await act(async () => { button!.props.onClick(); });
+  expect(api.adminAi).toHaveBeenCalledWith('next_step', expect.objectContaining({ jobId: 'template-1' }));
+  expect(api.adminAi.mock.calls.some(([action]) => action === 'start_job' || action === 'cancel_job' || action === 'retry_module')).toBe(false);
+  view.unmount(); vi.unstubAllGlobals();
+});

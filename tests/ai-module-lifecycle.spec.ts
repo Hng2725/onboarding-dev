@@ -228,7 +228,7 @@ describe('persisted module jobs', () => {
     if (repair.kind !== 'ai_call') throw new Error('No schema repair');
     invalid = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab', callId: repair.callId, text: '{still-invalid' });
     expect(active(invalid)).toMatchObject({ lessonState: 'fallback_review', lessonVersion: 1, lessonAttempts: 2, schemaRepairs: 1 });
-    const retried = await service.retryModule(admin, { jobId: job.jobId, moduleLocalId: active(job).outline.moduleLocalId, target: 'lesson' });
+    const retried = await service.retryModule(admin, { jobId: job.jobId, moduleLocalId: active(job).outline.moduleLocalId, target: 'lesson', expectedVersion: active(invalid).lessonVersion });
     expect(active(retried)).toMatchObject({ lessonState: 'queued', lessonVersion: 2 });
     expect(retried.moduleRuns![1].lessonVersion).toBe(0);
     const next = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' });
@@ -297,7 +297,7 @@ describe('persisted module jobs', () => {
     expect(active(missing).lessonState).toBe('manual_required');
     expect(missing.calls).toEqual([]);
     await expect(service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId, expectedVersion: active(missing).lessonVersion })).rejects.toThrow();
-    await expect(service.retryModule(admin, { jobId: job.jobId, moduleLocalId, target: 'questions' })).rejects.toThrow();
+    await expect(service.retryModule(admin, { jobId: job.jobId, moduleLocalId, target: 'questions', expectedVersion: 0 })).rejects.toThrow();
   });
 });
 
@@ -323,4 +323,21 @@ it('allows approved manual content without sources while rejecting invalid and f
   current = await service.updateModuleQuestions(admin, { ...args, expectedVersion: active(current).questionVersion, questions: qs });
   current = await service.approveModuleQuestions(admin, { ...args, expectedVersion: active(current).questionVersion });
   expect(active(current)).toMatchObject({ questionState: 'approved', questionLessonVersion: active(current).lessonVersion });
+});
+
+it('rejects module retry when the target version is stale', async () => {
+  const { service, job } = await setup();
+  const run = active(job);
+  await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 });
+  const args = { jobId: job.jobId, moduleLocalId: run.outline.moduleLocalId, target: 'lesson' as const };
+  await expect(service.retryModule(admin, { ...args, expectedVersion: run.lessonVersion + 1 })).rejects.toThrow();
+});
+
+it('rejects stale question retries without invalidating an approved pair', async () => {
+  const { service, job } = await setup();
+  await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 });
+  const complete = await approveManualPair(service, job, active(job));
+  const run = active(complete);
+  await expect(service.retryModule(admin, { jobId: job.jobId, moduleLocalId: run.outline.moduleLocalId, target: 'questions', expectedVersion: run.questionVersion - 1 })).rejects.toThrow('version');
+  expect(active(await service.getJob(admin, job.jobId))).toMatchObject({ lessonState: 'approved', questionState: 'approved', questionVersion: run.questionVersion });
 });

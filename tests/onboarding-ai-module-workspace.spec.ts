@@ -32,3 +32,18 @@ it('sends the selected module version for lesson approval and exposes stale hist
   act(() => approve.props.onClick());
   expect(onAction).toHaveBeenCalledWith('approve_module_lesson', { moduleLocalId: 'm', expectedVersion: 4 });
 });
+
+it('keeps unsaved text on a server status refresh and sends the current retry version', () => {
+  const outline = { moduleLocalId: 'm', frameKey: 't1-core', order: 0, title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] };
+  const run = { outline, outlineRevision: 1, lessonState: 'failed' as const, lessonVersion: 4, questionState: 'blocked' as const, questionVersion: 2 };
+  const onAction = vi.fn();
+  const props = { runs: [run], calls: [], selectedId: 'm', busy: false, onSelect: () => {}, onAction, onSources: () => {} };
+  let view!: TestRenderer.ReactTestRenderer;
+  act(() => { view = TestRenderer.create(createElement(AiModuleWorkspace, props)); });
+  const title = () => view.root.findAllByType('input').find((item) => item.props.value === 'Core' || item.props.value === 'Unsaved')!;
+  act(() => title().props.onChange({ target: { value: 'Unsaved' } }));
+  act(() => view.update(createElement(AiModuleWorkspace, { ...props, runs: [{ ...run, nextRetryAt: '2026-10-28T00:00:00Z' }] })));
+  expect(title().props.value).toBe('Unsaved');
+  act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Viết lại module')!.props.onClick());
+  expect(onAction).toHaveBeenCalledWith('retry_module', { moduleLocalId: 'm', target: 'lesson', expectedVersion: 4 });
+});
