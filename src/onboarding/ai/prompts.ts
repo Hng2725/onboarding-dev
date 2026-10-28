@@ -153,7 +153,7 @@ function roleInstruction(input: TemplatePromptInput): string {
     return 'Tạo Template 1 cho nhân sự thông thường; chỉ dùng tính năng audience=all hoặc thao tác chung.';
   }
   return 'Tạo Template 2 chuyên sâu cho hồ sơ vai trò sau: '
-    + JSON.stringify(input.roleProfile ?? null)
+    + JSON.stringify(input.roleProfile ? { responsibilities: input.roleProfile.responsibilities } : null)
     + '. Mỗi trách nhiệm phải có đúng một taskCoverage.';
 }
 

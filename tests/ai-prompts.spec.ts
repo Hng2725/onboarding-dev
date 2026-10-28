@@ -4,6 +4,8 @@ import type { SourceRecord } from '../src/onboarding/contracts';
 import {
   CONTEXT_LINE_CHARS,
   buildInventoryPrompt,
+  buildModuleRepairPrompt,
+  buildTemplateRepairBase,
   buildRepairPrompt,
   buildTemplateLessonsPrompt,
   buildTemplateQuestionsPrompt,
@@ -125,5 +127,33 @@ describe('AI template prompts', () => {
     expect(repair.prompt).toContain('moduleLocalId');
     expect(repair.prompt).toContain('blockLocalId');
     expect(repair.systemContext).toContain('<lessons>');
+  });
+});
+
+describe('legacy role metadata in template prompts', () => {
+  it('includes only responsibilities in lessons, questions, and repair prompts', () => {
+    const input = {
+      templateKind: 'advanced' as const,
+      inventory: {},
+      roleProfile: { department: 'other' as const, departmentLabel: 'DEPARTMENT_SENTINEL', jobTitle: 'TITLE_SENTINEL', responsibilities: ['TASK_ONE', 'TASK_TWO'] },
+    };
+    const questions = buildTemplateQuestionsPrompt({ ...input, lessons: {} });
+    const requests = [
+      buildTemplateLessonsPrompt(input),
+      questions,
+      buildTemplateRepairBase(input),
+      buildModuleRepairPrompt({ ...input, stage: 'lessons', moduleLocalIds: ['m1'], previous: {}, errors: [] }),
+      buildModuleRepairPrompt({ ...input, stage: 'questions', moduleLocalIds: ['m1'], previous: {}, lessons: {}, errors: [] }),
+      buildRepairPrompt('{}', [], questions.systemContext, questions.prompt),
+    ];
+    for (const request of requests) {
+      const text = request.prompt + request.systemContext;
+      expect(text).toContain('TASK_ONE');
+      expect(text).toContain('TASK_TWO');
+      expect(text).not.toContain('DEPARTMENT_SENTINEL');
+      expect(text).not.toContain('TITLE_SENTINEL');
+      expect(text).not.toContain('department');
+      expect(text).not.toContain('jobTitle');
+    }
   });
 });
