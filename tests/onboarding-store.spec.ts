@@ -21,6 +21,7 @@ const COLLECTION_NAMES = [
   'onboarding_audit_events',
   'onboarding_sources',
   'onboarding_ai_jobs',
+  'onboarding_ai_room_leases',
   'onboarding_template_content',
   'onboarding_module_progress',
   'onboarding_module_attempts',

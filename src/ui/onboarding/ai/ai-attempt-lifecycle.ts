@@ -58,6 +58,18 @@ async function terminalState(
   }
 }
 
+/** Restore and automatic cleanup may observe an attempt, but never request cancellation. */
+export async function observeAttemptTermination(
+  gateway: AiGateway,
+  attemptRef: string,
+  signal?: AbortSignal,
+): Promise<AiCancellationOutcome> {
+  const state = await terminalState(gateway, attemptRef, signal);
+  return state
+    ? { state: 'confirmed', terminalState: state }
+    : { state: 'unknown', message: 'Provider termination was not confirmed.' };
+}
+
 /**
  * Requests cancellation of a provider attempt and waits for evidence that it stopped.
  * Any terminal state is safe for a new attempt; without one the outcome is `unknown`.

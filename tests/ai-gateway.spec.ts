@@ -8,6 +8,11 @@ function appWithRest(rest: McpApp['rest']): McpApp {
 }
 
 describe('Sandbox AI gateway', () => {
+  it('classifies a project-busy rejection before a provider attempt exists', async () => {
+    const gateway = createSandboxAiGateway(appWithRest(vi.fn<McpApp['rest']>().mockResolvedValue({ statusCode: 409, body: { error: 'Another request in this project is still running' } })), 'room-a');
+    await expect(gateway.dispatch({ operationId: 'op', prompt: 'p' })).rejects.toMatchObject({ code: 'PROJECT_BUSY' });
+  });
+
   it('cancels a dispatched sandbox attempt in the bound room', async () => {
     const rest = vi.fn<McpApp['rest']>().mockResolvedValue({ status: 'cancelled' } as never);
     const gateway = createSandboxAiGateway(appWithRest(rest), 'room-a');

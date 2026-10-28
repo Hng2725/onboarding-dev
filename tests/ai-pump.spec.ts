@@ -1,9 +1,101 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { AiGateway } from '../src/ui/onboarding/ai/ai-gateway-sandbox';
+import { AiGatewayError, type AiGateway } from '../src/ui/onboarding/ai/ai-gateway-sandbox';
 import { pumpAiJob } from '../src/ui/onboarding/ai/ai-pump';
 
 describe('AI browser pump', () => {
+  it('releases a dispatch claim when the gateway proves it stopped before contacting the provider', async () => {
+    const controller = new AbortController();
+    const adminAi = vi.fn().mockResolvedValueOnce({ kind: 'ai_call', callId: 'A1', operationId: 'job-1:A1', prompt: 'p' }).mockResolvedValue({ jobId: 'job-1', status: 'running' });
+    const gateway: AiGateway = {
+      dispatch: vi.fn(async () => { controller.abort(new Error('closed')); throw new AiGatewayError('DISPATCH_NOT_STARTED', 'Closed before dispatch'); }),
+      status: vi.fn(), cancel: vi.fn(),
+    };
+    await expect(pumpAiJob({ api: { adminAi }, gateway, provider: 'native_chat', jobId: 'job-1', workerId: 'tab-a', signal: controller.signal })).rejects.toThrow('closed');
+    expect(adminAi).toHaveBeenCalledWith('report_ai_failure', expect.objectContaining({ kind: 'failed', providerErrorCode: 'DISPATCH_NOT_STARTED' }));
+    expect(gateway.cancel).not.toHaveBeenCalled();
+  });
+
+  it('reports a known permission rejection as terminal instead of leaving an uncertain dispatch fence', async () => {
+    const adminAi = vi.fn().mockResolvedValueOnce({ kind: 'ai_call', callId: 'A1', operationId: 'job-1:A1', prompt: 'p' }).mockResolvedValue({ jobId: 'job-1', status: 'failed' });
+    const gateway: AiGateway = { dispatch: vi.fn().mockRejectedValue(new AiGatewayError('AI_PERMISSION_DENIED', 'Permission denied')), status: vi.fn() };
+    await expect(pumpAiJob({ api: { adminAi }, gateway, provider: 'sandbox', jobId: 'job-1', workerId: 'tab-a' })).rejects.toThrow('Permission denied');
+    expect(adminAi).toHaveBeenCalledWith('report_ai_failure', expect.objectContaining({ kind: 'failed', providerErrorCode: 'AI_PERMISSION_DENIED' }));
+  });
+
+  it('returns awaiting_admin without dispatching or polling', async () => {
+    const job = { jobId: 'job-1', status: 'running' };
+    const adminAi = vi.fn().mockResolvedValue({ kind: 'awaiting_admin', job });
+    const gateway: AiGateway = { dispatch: vi.fn(), status: vi.fn() };
+    await expect(pumpAiJob({ api: { adminAi }, gateway, provider: 'sandbox', jobId: 'job-1', workerId: 'tab-a' })).resolves.toEqual(job);
+    expect(gateway.dispatch).not.toHaveBeenCalled();
+    expect(gateway.status).not.toHaveBeenCalled();
+    expect(adminAi).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes after recording without cancelling and reconnects to the same provider attempt', async () => {
+    const controller = new AbortController();
+    let recorded = false;
+    let submitted = false;
+    const adminAi = vi.fn(async (action: string) => {
+      if (action === 'next_step') return submitted
+        ? { kind: 'awaiting_admin', job: { jobId: 'job-1', status: 'running' } }
+        : { kind: 'ai_call', callId: 'module-1', operationId: 'job-1:module-1', prompt: 'p', ...(recorded ? { attemptRef: 'native-chat:s:m', provider: 'native_chat' } : {}) };
+      if (action === 'record_dispatch') { recorded = true; controller.abort(new Error('closed')); }
+      if (action === 'submit_ai_output') submitted = true;
+      return { jobId: 'job-1', status: 'running' };
+    });
+    const gateway: AiGateway = {
+      dispatch: vi.fn().mockResolvedValue({ attemptRef: 'native-chat:s:m' }),
+      status: vi.fn().mockResolvedValue({ state: 'completed', text: '{}' }),
+      cancel: vi.fn().mockResolvedValue(undefined),
+    };
+    await expect(pumpAiJob({ api: { adminAi }, gateway, provider: 'native_chat', jobId: 'job-1', workerId: 'tab-a', signal: controller.signal })).rejects.toThrow('closed');
+    expect(gateway.cancel).not.toHaveBeenCalled();
+    expect(gateway.status).not.toHaveBeenCalled();
+    expect(adminAi.mock.calls.filter(([action]) => action === 'next_step')).toHaveLength(1);
+    await pumpAiJob({ api: { adminAi }, gateway, provider: 'native_chat', jobId: 'job-1', workerId: 'tab-new' });
+    expect(gateway.dispatch).toHaveBeenCalledTimes(1);
+    expect(gateway.status).toHaveBeenCalledWith('native-chat:s:m', undefined);
+  });
+
+  it('does not dispatch when closing during next_step or submit output after closing during status', async () => {
+    for (const closeDuring of ['next_step', 'status']) {
+      const controller = new AbortController();
+      const adminAi = vi.fn(async () => {
+        if (closeDuring === 'next_step') controller.abort(new Error('closed'));
+        return { kind: 'ai_call', callId: 'A1', operationId: 'job-1:A1', prompt: 'p', ...(closeDuring === 'status' ? { attemptRef: 'attempt-1' } : {}) };
+      });
+      const gateway: AiGateway = {
+        dispatch: vi.fn(),
+        status: vi.fn(async () => { controller.abort(new Error('closed')); return { state: 'completed', text: '{}' }; }),
+        cancel: vi.fn(),
+      };
+      await expect(pumpAiJob({ api: { adminAi }, gateway, provider: 'sandbox', jobId: 'job-1', workerId: 'tab-a', signal: controller.signal })).rejects.toThrow('closed');
+      expect(gateway.dispatch).not.toHaveBeenCalled();
+      expect(gateway.cancel).not.toHaveBeenCalled();
+      if (closeDuring === 'next_step') {
+        expect(adminAi).toHaveBeenCalledWith('report_ai_failure', expect.objectContaining({ providerErrorCode: 'DISPATCH_NOT_STARTED' }));
+      } else expect(adminAi).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('reports PROJECT_BUSY distinctly and sleeps until persisted nextRetryAt', async () => {
+    let now = Date.parse('2026-10-28T00:00:00.000Z');
+    const waiting = { jobId: 'job-1', status: 'running', nextRetryAt: '2026-10-28T00:00:12.000Z' };
+    const adminAi = vi.fn()
+      .mockResolvedValueOnce({ kind: 'ai_call', callId: 'A1', operationId: 'job-1:A1', prompt: 'p' })
+      .mockResolvedValueOnce(waiting)
+      .mockResolvedValueOnce({ kind: 'wait', job: waiting })
+      .mockResolvedValueOnce({ kind: 'awaiting_admin', job: { jobId: 'job-1', status: 'running' } });
+    const gateway: AiGateway = { dispatch: vi.fn().mockRejectedValue(new AiGatewayError('PROJECT_BUSY', 'Another request in this project is still running')), status: vi.fn() };
+    const sleep = vi.fn(async (milliseconds: number) => { now += milliseconds; });
+    await pumpAiJob({ api: { adminAi }, gateway, provider: 'native_chat', jobId: 'job-1', workerId: 'tab-a', nowMs: () => now, sleep });
+    expect(adminAi).toHaveBeenCalledWith('report_ai_failure', expect.objectContaining({ kind: 'failed', providerErrorCode: 'PROJECT_BUSY' }));
+    expect(sleep).toHaveBeenCalledWith(12_000, undefined);
+    expect(gateway.dispatch).toHaveBeenCalledTimes(1);
+  });
+
   it('dispatches, records, polls, submits, and stops only when the server says done', async () => {
     const adminAi = vi.fn()
       .mockResolvedValueOnce({
@@ -67,7 +159,7 @@ describe('AI browser pump', () => {
         controller.abort(new DOMException('cancelled', 'AbortError'));
         return { attemptRef: 'native-chat:s:late' };
       }),
-      status: vi.fn(),
+      status: vi.fn().mockResolvedValueOnce({ state: 'running' }).mockResolvedValue({ state: 'cancelled' }),
       cancel: vi.fn().mockResolvedValue(undefined),
     };
 
@@ -76,8 +168,8 @@ describe('AI browser pump', () => {
       signal: controller.signal, sleep: vi.fn().mockResolvedValue(undefined),
     })).rejects.toMatchObject({ name: 'AbortError' });
     expect(adminAi).toHaveBeenCalledWith('record_dispatch', expect.objectContaining({ attemptRef: 'native-chat:s:late' }));
-    expect(gateway.cancel).toHaveBeenCalledWith('native-chat:s:late');
-    expect(gateway.status).not.toHaveBeenCalled();
+    expect(gateway.cancel).toHaveBeenCalledWith('native-chat:s:late', undefined);
+    expect(adminAi).toHaveBeenCalledWith('record_attempt_cleanup', expect.objectContaining({ attemptRef: 'native-chat:s:late', state: 'confirmed' }));
   });
 
   it('adopts a recorded attempt through its persisted provider instead of the default gateway', async () => {
@@ -132,7 +224,7 @@ describe('AI browser pump', () => {
     })).rejects.toThrow('AI polling timed out.');
     expect(adminAi).toHaveBeenCalledWith('report_ai_failure', expect.objectContaining({ kind: 'timeout' }));
     expect(gateway.status).toHaveBeenCalledTimes(2);
-    expect(gateway.cancel).toHaveBeenCalledWith('attempt-1');
+    expect(gateway.cancel).not.toHaveBeenCalled();
   });
 
   it('submits a completion found by the final deadline check instead of cancelling it', async () => {

@@ -169,6 +169,7 @@ export const ONBOARDING_COLLECTIONS: readonly OnboardingCollectionDefinition[] =
     index('sources_checksum', ['checksum']),
   ]),
   collection('onboarding_ai_jobs', [
+    field('nextRetryAt', 'datetime'), field('providerWaitStartedAt', 'datetime'), field('providerWaitAttempts', 'number'),
     field('pipelineVersion'), field('outline', 'json'), field('outlineApprovedRevision', 'number'), field('moduleRuns', 'json'),
     field('jobId', 'string', true), field('kind', 'string', true),
     field('status', 'string', true), field('templateKind'), field('roleProfile', 'json'),
@@ -184,6 +185,11 @@ export const ONBOARDING_COLLECTIONS: readonly OnboardingCollectionDefinition[] =
     index('ai_jobs_status_time', ['status', 'createdAt']),
     index('ai_jobs_operation', ['operationId']),
   ]),
+  collection('onboarding_ai_room_leases', [
+    field('leaseKey', 'string', true), field('jobId', 'string', true),
+    field('callId', 'string', true), field('holderId', 'string', true),
+    field('expiresAt', 'datetime', true), field('updatedAt', 'datetime', true),
+  ], [index('ai_room_leases_key_unique', ['leaseKey'], true)]),
   collection('onboarding_template_content', [
     field('templateId', 'string', true), field('templateVersion', 'number', true),
     field('content', 'json', true), field('flags', 'json', true),

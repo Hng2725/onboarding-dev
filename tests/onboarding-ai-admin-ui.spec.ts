@@ -200,6 +200,16 @@ describe('Admin AI template UI model', () => {
     }]);
   });
 
+  it('explicitly cancels timed-out provider attempts as well as dispatched calls', async () => {
+    const call = { callId: 'A1', status: 'failed', attemptRef: 'attempt-timeout', cleanupState: 'pending' };
+    const cancelled = { jobId: 'job-1', status: 'cancelled', calls: [call] };
+    const confirm = vi.fn(async () => ({ state: 'confirmed', terminalState: 'cancelled' }));
+    const api = { adminAi: vi.fn(async () => ({ job: cancelled })) };
+    await cancelRunningAiJob(api as never, 'job-1', () => undefined, confirm as never);
+    expect(confirm).toHaveBeenCalledWith(call);
+    expect(api.adminAi).toHaveBeenCalledWith('record_attempt_cleanup', expect.objectContaining({ attemptRef: 'attempt-timeout', state: 'confirmed' }));
+  });
+
   it('selects only the current user\'s unconfirmed Native attempts as blocking', () => {
     const jobs = [
       {

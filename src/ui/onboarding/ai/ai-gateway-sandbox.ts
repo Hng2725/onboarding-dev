@@ -27,6 +27,8 @@ export interface AiGateway {
 }
 
 export type AiGatewayErrorCode =
+  | 'DISPATCH_NOT_STARTED'
+  | 'PROJECT_BUSY'
   | 'AI_PERMISSION_DENIED'
   | 'AI_REQUEST_FAILED'
   | 'AI_RESPONSE_INVALID';
@@ -38,6 +40,10 @@ export class AiGatewayError extends Error {
   }
 }
 
+export function isProjectBusyMessage(value: unknown): boolean {
+  return typeof value === 'string' && /Another request in this project is still running/i.test(value);
+}
+
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -47,6 +53,7 @@ function record(value: unknown): Record<string, unknown> {
 function responseError(statusCode: number, body: unknown): AiGatewayError {
   const value = record(body);
   const detail = [value.error, value.message].find((candidate): candidate is string => typeof candidate === 'string');
+  if (isProjectBusyMessage(detail) || value.code === 'PROJECT_BUSY') return new AiGatewayError('PROJECT_BUSY', detail ?? 'Another request in this project is still running');
   if (statusCode === 401 || statusCode === 403 || detail === 'OPTIONAL_PERMISSION_NOT_GRANTED') {
     return new AiGatewayError(
       'AI_PERMISSION_DENIED',
@@ -74,6 +81,7 @@ function requestError(error: unknown): AiGatewayError {
   if (error instanceof AiGatewayError) return error;
   const value = record(error);
   const message = error instanceof Error ? error.message : String(error || '');
+  if (isProjectBusyMessage(message) || value.code === 'PROJECT_BUSY') return new AiGatewayError('PROJECT_BUSY', message);
   if (
     value.code === 'OPTIONAL_PERMISSION_NOT_GRANTED'
     || /App is not permitted to call .*agents\.sandbox\./i.test(message)
@@ -87,7 +95,7 @@ function requestError(error: unknown): AiGatewayError {
 }
 
 function requireSuccess(statusCode: number, body: unknown): Record<string, unknown> {
-  if (statusCode < 200 || statusCode >= 300) throw responseError(statusCode, body);
+  if (statusCode < 200 || statusCode >= 300 || record(body).success === false) throw responseError(statusCode, body);
   return record(body);
 }
 
@@ -171,6 +179,7 @@ export function createSandboxAiGateway(app: Pick<McpApp, 'rest'>, roomId: string
         state: body.status as AiAttemptState,
         ...(typeof body.text === 'string' ? { text: body.text } : {}),
         ...(sanitizeAiDiagnosticText(body.error) ? { error: sanitizeAiDiagnosticText(body.error) } : {}),
+        ...(isProjectBusyMessage(body.error) ? { errorCode: 'PROJECT_BUSY' } : {}),
       };
       if (summary.state !== 'failed' && summary.state !== 'cancelled') return summary;
 
@@ -193,7 +202,7 @@ export function createSandboxAiGateway(app: Pick<McpApp, 'rest'>, roomId: string
         return {
           ...summary,
           ...(terminalMessage ? { error: terminalMessage } : {}),
-          ...(terminalCode ? { errorCode: terminalCode } : {}),
+          ...(isProjectBusyMessage(terminalMessage) ? { errorCode: 'PROJECT_BUSY' } : terminalCode ? { errorCode: terminalCode } : {}),
           ...(phase ? { phase } : {}),
         };
       } catch (error) {

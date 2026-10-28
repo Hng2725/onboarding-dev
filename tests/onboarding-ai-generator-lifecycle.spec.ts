@@ -6,7 +6,7 @@ import type { AiJobRecord } from '../src/onboarding/contracts';
 
 const host = vi.hoisted(() => ({
   appRevision: 0,
-  apps: [{ revision: 0 }, { revision: 1 }],
+  apps: [{ revision: 0, rest: vi.fn() }, { revision: 1, rest: vi.fn() }],
   context: {
     userId: 'admin-1',
     username: 'admin',
@@ -82,6 +82,33 @@ const failedTemplateJob: AiJobRecord = {
 };
 
 describe('AI generator lifecycle', () => {
+  it('restores and closes a timed-out job by observing the provider without cancelling it', async () => {
+    host.appRevision = 0;
+    let cancelled = false;
+    const rest = host.apps[0].rest.mockImplementation(async (request: { path: string }) => {
+      if (request.path === 'agents.sandbox.attempt-cancel') { cancelled = true; return { status: 'cancelled' }; }
+      return { status: cancelled ? 'cancelled' : 'running' };
+    });
+    const job = { ...inventoryJob, status: 'failed', calls: [{ callId: 'A1', stage: 'A', operationId: 'op', status: 'failed', attemptRef: 'attempt-live', provider: 'sandbox', cleanupState: 'pending' }] };
+    const api = {
+      adminAi: vi.fn(async (action: string) => {
+        if (action === 'list_sources') return { sources: [] };
+        if (action === 'list_jobs') return { jobs: [job] };
+        if (action === 'record_attempt_cleanup') return { job };
+        throw new Error('Unexpected action: ' + action);
+      }),
+    };
+    let renderer!: TestRenderer.ReactTestRenderer;
+    await act(async () => {
+      renderer = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined }));
+    });
+    await act(async () => { renderer.unmount(); });
+    expect(rest.mock.calls.some(([request]) => request.path === 'agents.sandbox.attempt-status')).toBe(true);
+    expect(rest.mock.calls.some(([request]) => request.path === 'agents.sandbox.attempt-cancel')).toBe(false);
+    expect(api.adminAi).toHaveBeenCalledWith('record_attempt_cleanup', expect.objectContaining({ state: 'unknown' }));
+    rest.mockReset();
+  });
+
   it('restores a failed job even when the host returns a new app facade during an unrelated render', async () => {
     host.appRevision = 0;
     const jobRequests: Array<ReturnType<typeof deferred<{ jobs: readonly AiJobRecord[] }>>> = [];

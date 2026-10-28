@@ -29,7 +29,7 @@ import {
   normalizeUploadedRoomFile,
   templateJsonArtifact,
 } from '../roomfiles';
-import { cancelAndConfirmAttempt, type AiCancellationOutcome } from './ai-attempt-lifecycle';
+import { cancelAndConfirmAttempt, observeAttemptTermination, type AiCancellationOutcome } from './ai-attempt-lifecycle';
 import { createSandboxAiGateway, type AiGateway } from './ai-gateway-sandbox';
 import {
   createNativeChatAiGateway,
@@ -371,7 +371,8 @@ export async function cancelRunningAiJob(
   let job = (await api.adminAi<{ job: AiJobRecord }>('cancel_job', { jobId })).job;
   let unconfirmed = 0;
   if (!confirmAttempt) return { job, unconfirmed };
-  const live = (job.calls ?? []).filter((call) => call.status === 'dispatched' && call.attemptRef);
+  const live = (job.calls ?? []).filter((call) => call.attemptRef && call.cleanupState !== 'confirmed'
+    && (call.status === 'dispatched' || call.cleanupState === 'pending' || call.cleanupState === 'unknown'));
   if (live.length > 0) onServerCancelled?.(job);
   for (const call of live) {
     let outcome: AiCancellationOutcome;
@@ -909,7 +910,7 @@ export function AiGeneratorPage({
       : createSandboxAiGateway(appRef.current, roomId);
   }, [roomId]);
 
-  const confirmAttempt = useCallback((call: AiCallRecord, signal?: AbortSignal) => {
+  const confirmAttempt = useCallback((call: AiCallRecord, signal?: AbortSignal, intent: 'observe' | 'cancel' = 'observe') => {
     const provider = attemptProvider(call);
     if (!provider || !call.attemptRef) {
       return Promise.resolve<AiCancellationOutcome>({
@@ -917,7 +918,9 @@ export function AiGeneratorPage({
         message: 'Không xác định được nhà cung cấp của tiến trình AI.',
       });
     }
-    return cancelAndConfirmAttempt(gatewayFor(provider), call.attemptRef, signal ? { signal } : {});
+    return intent === 'cancel'
+      ? cancelAndConfirmAttempt(gatewayFor(provider), call.attemptRef, signal ? { signal } : {})
+      : observeAttemptTermination(gatewayFor(provider), call.attemptRef, signal);
   }, [gatewayFor]);
 
   const mergeJobs = useCallback((updates: readonly AiJobRecord[]) => {
@@ -1291,7 +1294,7 @@ export function AiGeneratorPage({
         api,
         jobId,
         () => abortRef.current?.abort(),
-        (call) => confirmAttempt(call),
+        (call) => confirmAttempt(call, undefined, 'cancel'),
         update,
       );
       update(result.job);

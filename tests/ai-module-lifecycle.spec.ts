@@ -222,8 +222,12 @@ describe('persisted module jobs', () => {
     await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 });
     const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' });
     if (step.kind !== 'ai_call') throw new Error('No call');
-    const invalid = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab', callId: step.callId, text: '{invalid' });
-    expect(active(invalid)).toMatchObject({ lessonState: 'fallback_review', lessonVersion: 1, lessonAttempts: 1, schemaRepairs: 0 });
+    let invalid = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab', callId: step.callId, text: '{invalid' });
+    expect(active(invalid)).toMatchObject({ lessonState: 'drafting', lessonVersion: 0, lessonAttempts: 1, schemaRepairs: 1 });
+    const repair = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' });
+    if (repair.kind !== 'ai_call') throw new Error('No schema repair');
+    invalid = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab', callId: repair.callId, text: '{still-invalid' });
+    expect(active(invalid)).toMatchObject({ lessonState: 'fallback_review', lessonVersion: 1, lessonAttempts: 2, schemaRepairs: 1 });
     const retried = await service.retryModule(admin, { jobId: job.jobId, moduleLocalId: active(job).outline.moduleLocalId, target: 'lesson' });
     expect(active(retried)).toMatchObject({ lessonState: 'queued', lessonVersion: 2 });
     expect(retried.moduleRuns![1].lessonVersion).toBe(0);

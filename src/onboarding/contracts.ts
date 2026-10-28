@@ -148,6 +148,10 @@ export const AI_PROVIDERS: readonly AiProvider[] = ['sandbox', 'native_chat'];
 export type AiAttemptCleanupState = 'pending' | 'confirmed' | 'unknown';
 
 export interface AiCallRecord {
+  readonly dispatchClaimedAt?: string;
+  readonly dispatchUnknown?: boolean;
+  readonly retryKind?: 'transient' | 'schema' | 'project_busy';
+  readonly leaseHolderId?: string;
   readonly moduleLocalId?: string;
   readonly moduleTarget?: 'lesson' | 'questions';
   readonly moduleVersion?: number;
@@ -175,6 +179,9 @@ export interface AiCallRecord {
 }
 
 export interface AiJobRecord {
+  readonly nextRetryAt?: string;
+  readonly providerWaitStartedAt?: string;
+  readonly providerWaitAttempts?: number;
   readonly pipelineVersion?: AiPipelineVersion;
   readonly outline?: TemplateOutline;
   readonly outlineApprovedRevision?: number;
@@ -201,6 +208,14 @@ export interface AiJobRecord {
   readonly createdBy: string;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+export interface RoomAiLease {
+  readonly leaseKey: 'generation';
+  readonly jobId: string;
+  readonly callId: string;
+  readonly holderId: string;
+  readonly expiresAt: string;
 }
 
 export interface TemplateContentRecord {

@@ -2,6 +2,7 @@ import type { McpApp } from '@privos_ai/app-react';
 
 import {
   AiGatewayError,
+  isProjectBusyMessage,
   type AiAttemptStatus,
   type AiAttemptState,
   type AiGateway,
@@ -24,6 +25,7 @@ function payload(response: unknown): Record<string, unknown> {
     : response);
   const detail = [body.error, body.message]
     .find((candidate): candidate is string => typeof candidate === 'string');
+  if (isProjectBusyMessage(detail) || body.code === 'PROJECT_BUSY') throw new AiGatewayError('PROJECT_BUSY', detail ?? 'Another request in this project is still running');
   if (statusCode === 401 || statusCode === 403 || detail === 'OPTIONAL_PERMISSION_NOT_GRANTED') {
     throw new AiGatewayError(
       'AI_PERMISSION_DENIED',
@@ -129,6 +131,7 @@ export function createNativeChatAiGateway(
         }));
       } catch (error) {
         if (error instanceof AiGatewayError) throw error;
+        if (isProjectBusyMessage(error instanceof Error ? error.message : String(error))) throw new AiGatewayError('PROJECT_BUSY', error instanceof Error ? error.message : String(error));
         throw new AiGatewayError(
           'AI_REQUEST_FAILED',
           error instanceof Error ? error.message : 'Không thể hủy Native AI Chat.',
@@ -164,6 +167,7 @@ export function createNativeChatAiGateway(
         }
         throw new AiGatewayError('AI_REQUEST_FAILED', message || 'Không thể lưu context AI.');
       }
+      if (input.signal?.aborted) throw new AiGatewayError('DISPATCH_NOT_STARTED', 'Closed before provider dispatch.');
 
       const content = [
         'Đọc file context sau và làm đúng phần "# Instruction".',
@@ -188,6 +192,7 @@ export function createNativeChatAiGateway(
         }));
       } catch (error) {
         if (error instanceof AiGatewayError) throw error;
+        if (isProjectBusyMessage(error instanceof Error ? error.message : String(error))) throw new AiGatewayError('PROJECT_BUSY', error instanceof Error ? error.message : String(error));
         throw new AiGatewayError(
           'AI_REQUEST_FAILED',
           error instanceof Error ? error.message : 'Không thể gửi Native AI Chat.',
@@ -200,12 +205,19 @@ export function createNativeChatAiGateway(
         throw new AiGatewayError('AI_RESPONSE_INVALID', 'Native AI Chat không trả về session/message hợp lệ.');
       }
 
-      payload(await app.rest({
-        method: 'POST',
-        path: 'ai-messages.startGeneration',
-        timeoutMs: 20_000,
-        body: { messageId },
-      }));
+      try {
+        payload(await app.rest({
+          method: 'POST',
+          path: 'ai-messages.startGeneration',
+          timeoutMs: 20_000,
+          body: { messageId },
+        }));
+      } catch (error) {
+        if (error instanceof AiGatewayError && ['PROJECT_BUSY', 'AI_PERMISSION_DENIED'].includes(error.code)) throw error;
+        if (isProjectBusyMessage(error instanceof Error ? error.message : String(error))) throw new AiGatewayError('PROJECT_BUSY', error instanceof Error ? error.message : String(error));
+        // The send response already identified this exact app message. An uncertain
+        // start acknowledgement must retain that reference for observation/reconnect.
+      }
       return { attemptRef: attemptReference(sessionId, messageId) };
     },
 
@@ -265,7 +277,7 @@ export function createNativeChatAiGateway(
         state,
         ...(state === 'completed' && output ? { text: output } : {}),
         ...((state === 'failed' || state === 'cancelled')
-          ? { error: output ?? 'AI_FAILED' }
+          ? { error: output ?? 'AI_FAILED', ...(isProjectBusyMessage(output) ? { errorCode: 'PROJECT_BUSY' } : {}) }
           : {}),
       };
     },

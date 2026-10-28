@@ -14,6 +14,39 @@ function appWith(input: {
 }
 
 describe('Native AI Chat gateway', () => {
+  it('does not send a provider request when the modal closes during context upload', async () => {
+    const controller = new AbortController();
+    const rest = vi.fn<McpApp['rest']>();
+    const uploadFile = vi.fn<McpApp['uploadFile']>().mockImplementation(async () => { controller.abort(new Error('closed')); return {} as never; });
+    const gateway = createNativeChatAiGateway(appWith({ rest, uploadFile }), 'room-a');
+    await expect(gateway.dispatch({ operationId: 'op', prompt: 'p', signal: controller.signal })).rejects.toMatchObject({ code: 'DISPATCH_NOT_STARTED' });
+    expect(rest).not.toHaveBeenCalled();
+  });
+
+  it('preserves the exact created message reference when generation acknowledgement is lost', async () => {
+    const rest = vi.fn<McpApp['rest']>()
+      .mockResolvedValueOnce({ sessionId: 'session-known', aiMessage: { _id: 'message-known' } } as never)
+      .mockRejectedValueOnce(new Error('startGeneration response timed out'));
+    const gateway = createNativeChatAiGateway(appWith({ rest }), 'room-a');
+    await expect(gateway.dispatch({ operationId: 'op', prompt: 'p' })).resolves.toEqual({ attemptRef: 'native-chat:session-known:message-known' });
+    expect(rest).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['response', 'rejection', 'terminal'] as const)('classifies project busy from %s without inventing an external attempt', async (source) => {
+    const message = 'Another request in this project is still running';
+    const rest = vi.fn<McpApp['rest']>();
+    if (source === 'response') rest.mockResolvedValue({ statusCode: 409, body: { error: message } } as never);
+    else if (source === 'rejection') rest.mockRejectedValue(new Error(message));
+    else rest.mockResolvedValue({ messages: [{ _id: 'message-1', status: 'failed', content: message }] } as never);
+    const gateway = createNativeChatAiGateway(appWith({ rest }), 'room-a');
+    if (source === 'terminal') {
+      await expect(gateway.status('native-chat:session-1:message-1')).resolves.toMatchObject({ state: 'failed', errorCode: 'PROJECT_BUSY' });
+    } else {
+      await expect(gateway.dispatch({ operationId: 'op', prompt: 'p' })).rejects.toMatchObject({ code: 'PROJECT_BUSY' });
+    }
+    expect(rest).toHaveBeenCalledTimes(1);
+  });
+
   it('cancels the in-flight assistant message from its persisted attempt reference', async () => {
     const rest = vi.fn<McpApp['rest']>().mockResolvedValue({ cancelled: true } as never);
     const gateway = createNativeChatAiGateway(appWith({ rest }), 'room-a');

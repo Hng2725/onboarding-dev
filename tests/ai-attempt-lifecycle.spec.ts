@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AiAttemptStatus, AiGateway } from '../src/ui/onboarding/ai/ai-gateway-sandbox';
-import { cancelAndConfirmAttempt } from '../src/ui/onboarding/ai/ai-attempt-lifecycle';
+import { cancelAndConfirmAttempt, observeAttemptTermination } from '../src/ui/onboarding/ai/ai-attempt-lifecycle';
 
 function fakeClock() {
   let now = 0;
@@ -32,6 +32,19 @@ function gatewayWith(
 }
 
 describe('AI attempt cancellation lifecycle', () => {
+  it('observes automatic cleanup without cancelling a live attempt', async () => {
+    const gateway = gatewayWith([{ state: 'running' }]);
+    await expect(observeAttemptTermination(gateway, 'attempt-1')).resolves.toMatchObject({ state: 'unknown' });
+    expect(gateway.cancel).not.toHaveBeenCalled();
+    expect(gateway.status).toHaveBeenCalledTimes(1);
+  });
+
+  it('confirms terminal evidence during automatic cleanup without posting a cancel', async () => {
+    const gateway = gatewayWith([{ state: 'completed', text: '{}' }]);
+    await expect(observeAttemptTermination(gateway, 'attempt-1')).resolves.toEqual({ state: 'confirmed', terminalState: 'completed' });
+    expect(gateway.cancel).not.toHaveBeenCalled();
+  });
+
   it('confirms an attempt that already finished without posting a cancel', async () => {
     const clock = fakeClock();
     const gateway = gatewayWith([{ state: 'completed', text: '{}' }]);

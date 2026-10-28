@@ -32,6 +32,7 @@ import { buildFallbackLesson } from './fallback-lessons';
 import { buildModuleLessonPrompt, buildModuleQuestionPrompt, validateModuleLessonOutput, validateModuleQuestionOutput, validApprovedLesson, type ModuleLessonPromptInput } from './module-draft';
 import { createModuleRuns, reconcileModuleRuns, invalidateModule, updateLesson, approveLesson, updateQuestions, approveQuestions, retryModuleRun, lessonApproved, modulesComplete } from './module-lifecycle';
 import { parseAiJsonObject } from './parse';
+import { acquireRoomAiLease, refreshRoomAiLease, releaseRoomAiLease, isAiLeaseConflict, aiCallMayBeLive } from './room-ai-lease';
 import {
   PROMPT_VERSION,
   buildInventoryPrompt,
@@ -324,6 +325,9 @@ const MAX_CLEANUP_MESSAGE_CHARS = 500;
 // These values are what the readers below already treat as "no lease" and "no error".
 const RELEASED_LEASE = { pumpLeaseUntil: new Date(0).toISOString(), pumpedBy: '' } as const;
 const CLEARED_ERROR = { errorCode: '', errorMessage: '' } as const;
+const CLEARED_WAIT = { nextRetryAt: new Date(0).toISOString(), providerWaitStartedAt: new Date(0).toISOString(), providerWaitAttempts: 0 } as const;
+const MAX_PROVIDER_WAIT_MS = 120_000;
+const PROVIDER_RETRY_MS = 3_000;
 
 export type AiJobNextStep =
   | {
@@ -369,6 +373,9 @@ export interface ModuleInput { readonly jobId: string; readonly moduleLocalId: s
 export interface ModuleVersionInput extends ModuleInput { readonly expectedVersion: number; }
 
 interface AiJobDbData extends StoreRecord {
+  readonly nextRetryAt?: string;
+  readonly providerWaitStartedAt?: string;
+  readonly providerWaitAttempts?: number;
   readonly pipelineVersion?: AiPipelineVersion;
   readonly outline?: TemplateOutline;
   readonly outlineApprovedRevision?: number;
@@ -469,6 +476,9 @@ function sourceFrom(row: SourceDbRecord, roomId: string): SourceRecord {
 
 function jobFrom(row: AiJobDbRecord, roomId: string): AiJobRecord {
   return {
+    ...(row.nextRetryAt && Date.parse(row.nextRetryAt) > 0 ? { nextRetryAt: row.nextRetryAt } : {}),
+    ...(row.providerWaitStartedAt && Date.parse(row.providerWaitStartedAt) > 0 ? { providerWaitStartedAt: row.providerWaitStartedAt } : {}),
+    ...(row.providerWaitAttempts ? { providerWaitAttempts: row.providerWaitAttempts } : {}),
     ...(row.pipelineVersion ? { pipelineVersion: row.pipelineVersion } : {}),
     ...(row.outline ? { outline: row.outline } : {}),
     ...(row.outlineApprovedRevision === undefined ? {} : { outlineApprovedRevision: row.outlineApprovedRevision }),
@@ -815,9 +825,12 @@ export function createAiJobService(
     if (job.kind === 'template' && job.pipelineVersion === 'module_v2') {
       const run = moduleForCall(job, call);
       const input = (await moduleContext(actor, job, run)).input;
-      return call.moduleTarget === 'questions'
+      const base = call.moduleTarget === 'questions'
         ? buildModuleQuestionPrompt({ ...input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance })
         : buildModuleLessonPrompt(input);
+      if (!call.repairOf) return base;
+      const invalid = job.calls.find((item) => item.callId === call.repairOf);
+      return buildRepairPrompt(rawOutput(job.stageOutputs, call.repairOf) ?? '', invalid?.errors ?? ['Invalid module output'], base.systemContext, base.prompt);
     }
     if (job.kind === 'inventory') {
       const sources = await loadSources(actor.roomId, job.sourceIds ?? []);
@@ -1268,6 +1281,8 @@ export function createAiJobService(
     row: AiJobDbRecord,
     call: AiCallRecord,
   ): Promise<AiJobDbRecord> {
+    // Retrying persisted terminal evidence also retries a release whose response was lost.
+    await releaseCallLease(actor, row, call);
     if (row.kind === 'template' && row.pipelineVersion === 'module_v2') return processModuleOutput(actor, row, call);
     return row.kind === 'inventory'
       ? processInventory(actor, row, call)
@@ -1280,13 +1295,68 @@ export function createAiJobService(
       && Date.parse(row.pumpLeaseUntil as string) >= Date.parse(now());
   }
 
-  async function refreshLease(
-    actor: OnboardingActor,
-    row: AiJobDbRecord,
-    workerId: string,
-  ): Promise<AiJobDbRecord> {
-    const leaseUntil = new Date(Date.parse(now()) + AI_GENERATION_LIMITS.pumpLeaseMs).toISOString();
-    return updateJob(actor, row, { pumpedBy: workerId, pumpLeaseUntil: leaseUntil });
+  async function releaseCallLease(actor: OnboardingActor, row: AiJobDbRecord, call: AiCallRecord): Promise<void> {
+    const holderId = call.leaseHolderId ?? row.pumpedBy;
+    if (holderId) await releaseRoomAiLease(store, actor, { jobId: row.jobId, callId: call.callId, holderId, now: now() });
+  }
+
+  async function assertRoomLease(actor: OnboardingActor, row: AiJobDbRecord, callId: string, holderId: string): Promise<void> {
+    await refreshRoomAiLease(store, actor, { jobId: row.jobId, callId, holderId, now: now() });
+  }
+
+  async function callStep(actor: OnboardingActor, row: AiJobDbRecord, call: AiCallRecord, workerId: string, request: AiPromptRequest): Promise<AiJobNextStep> {
+    // Returning a pending call is itself a durable dispatch claim. A lost response is
+    // uncertain, so even the same tab must not receive a second dispatch permission.
+    if (!call.attemptRef && call.dispatchClaimedAt) return { kind: 'wait', job: jobFrom(row, actor.roomId) };
+    const lease = await acquireRoomAiLease(store, actor, { jobId: row.jobId, callId: call.callId, holderId: workerId, now: now() });
+    if (!lease.acquired) return { kind: 'wait', job: jobFrom(row, actor.roomId) };
+    const calls = row.calls.map((item) => item.callId === call.callId ? { ...item, leaseHolderId: workerId, ...(!item.attemptRef ? { dispatchClaimedAt: now() } : {}) } : item);
+    let moduleRuns = row.moduleRuns;
+    if (call.moduleLocalId && call.retryKind && !call.leaseHolderId) {
+      const run = moduleForCall(row, call);
+      const next = call.moduleTarget === 'lesson' ? { ...run, lessonAttempts: (run.lessonAttempts ?? 0) + 1 } : { ...run, questionAttempts: (run.questionAttempts ?? 0) + 1 };
+      moduleRuns = replaceRun(row, next);
+    }
+    row = await updateJob(actor, row, { calls, ...(moduleRuns ? { moduleRuns } : {}), pumpedBy: workerId, pumpLeaseUntil: lease.lease.expiresAt });
+    return { kind: 'ai_call', callId: call.callId, operationId: call.operationId, ...request, ...(call.attemptRef ? { attemptRef: call.attemptRef, provider: callProvider(call), startedAt: call.startedAt } : {}) };
+  }
+
+  function retryCall(row: AiJobDbRecord, call: AiCallRecord, kind: NonNullable<AiCallRecord['retryKind']>): AiCallRecord {
+    const root = rootCall(call);
+    const callId = call.moduleLocalId ? 'module-' + String(row.calls.length + 1) : root + '-retry' + String(row.calls.filter((item) => item.callId.startsWith(root + '-retry')).length + 1);
+    return {
+      callId, operationId: row.jobId + ':' + callId, stage: call.stage, status: 'pending', retryKind: kind,
+      ...(call.moduleLocalId ? { moduleLocalId: call.moduleLocalId, moduleTarget: call.moduleTarget, moduleVersion: call.moduleVersion, lessonVersion: call.lessonVersion, outlineRevision: call.outlineRevision,
+        ...(kind === 'schema' ? { repairOf: call.callId } : call.repairOf ? { repairOf: call.repairOf } : {}),
+      } : { repairOf: root }),
+    };
+  }
+
+  function clearRunWait(run: AiModuleDraftRun): AiModuleDraftRun {
+    const { nextRetryAt: _retry, providerWaitStartedAt: _wait, ...rest } = run;
+    return rest;
+  }
+
+  async function providerWaitStep(actor: OnboardingActor, row: AiJobDbRecord): Promise<AiJobNextStep | undefined> {
+    const current = row.calls.find((call) => call.status === 'pending' || call.status === 'dispatched');
+    // Waiting applies to a pending retry, never to polling an already-recorded attempt.
+    if (!current || current.attemptRef || current.dispatchClaimedAt) return undefined;
+    if (row.providerWaitStartedAt && Date.parse(row.providerWaitStartedAt) > 0
+      && Date.parse(now()) - Date.parse(row.providerWaitStartedAt) >= MAX_PROVIDER_WAIT_MS) {
+      const calls = row.calls.map((call) => call.callId === current.callId ? { ...call, status: 'failed' as const, errors: ['PROJECT_BUSY'], finishedAt: now() } : call);
+      if (row.pipelineVersion === 'module_v2' && row.kind === 'template') {
+        const run = moduleForCall(row, current);
+        const next = current.moduleTarget === 'lesson' ? await fallbackRun(actor, row, run) : { ...clearRunWait(run), questionState: 'failed' as const };
+        const updated = await updateJob(actor, row, { calls, moduleRuns: replaceRun(row, next), ...CLEARED_WAIT, ...RELEASED_LEASE });
+        await releaseCallLease(actor, row, current);
+        return { kind: 'awaiting_admin', job: jobFrom(updated, actor.roomId) };
+      }
+      const updated = await updateJob(actor, row, { calls, status: 'failed', errorCode: 'PROJECT_BUSY', errorMessage: 'The provider project remained busy.', ...CLEARED_WAIT, ...RELEASED_LEASE });
+      await releaseCallLease(actor, row, current);
+      return { kind: 'failed', job: jobFrom(updated, actor.roomId) };
+    }
+    if (row.nextRetryAt && Date.parse(row.nextRetryAt) > Date.parse(now())) return { kind: 'wait', job: jobFrom(row, actor.roomId) };
+    return undefined;
   }
 
   function replaceRun(row: AiJobDbRecord, run: AiModuleDraftRun): readonly AiModuleDraftRun[] {
@@ -1311,11 +1381,11 @@ export function createAiJobService(
   }
   function obsoleteCalls(row: AiJobDbRecord, ids: ReadonlySet<string>): readonly AiCallRecord[] {
     return row.calls.map((call) => call.moduleLocalId && ids.has(call.moduleLocalId) && (['pending', 'dispatched'].includes(call.status) || (call.status === 'completed' && row.stageOutputs['processed:' + call.callId] !== true))
-      ? { ...call, status: 'failed', errors: ['Module revision superseded.'], ...(call.attemptRef ? { cleanupState: 'pending', cleanupUpdatedAt: now() } as const : {}) }
+      ? { ...call, status: 'failed', errors: ['Module revision superseded.'], ...(aiCallMayBeLive(call) ? { cleanupState: 'pending', cleanupUpdatedAt: now() } as const : {}) }
       : call);
   }
   function leaseAfterChanges(calls: readonly AiCallRecord[]): StoreRecord {
-    return calls.some((call) => call.status === 'pending' || call.status === 'dispatched') ? {} : RELEASED_LEASE;
+    return calls.some((call) => call.status === 'pending' || call.status === 'dispatched') ? {} : { ...RELEASED_LEASE, ...CLEARED_WAIT };
   }
   async function syncModuleSources(actor: OnboardingActor, row: AiJobDbRecord): Promise<AiJobDbRecord> {
     const changed = new Set<string>();
@@ -1396,15 +1466,26 @@ export function createAiJobService(
       errors = validationMessages(error);
       next = call.moduleTarget === 'lesson' ? await fallbackRun(actor, row, run) : { ...run, questionState: 'failed' };
     }
-    return updateJob(actor, row, { moduleRuns: replaceRun(row, next), calls: row.calls.map((item) => item.callId === call.callId ? { ...item, status: errors.length ? 'invalid' : 'completed', ...(errors.length ? { errors } : {}) } : item), stageOutputs: { ...row.stageOutputs, ['processed:' + call.callId]: true }, ...RELEASED_LEASE });
+    const calls = row.calls.map((item): AiCallRecord => item.callId === call.callId ? { ...item, status: errors.length ? 'invalid' : 'completed', ...(errors.length ? { errors } : {}) } : item);
+    if (errors.length && (run.schemaRepairs ?? 0) < 1) {
+      next = { ...clearRunWait(run), schemaRepairs: (run.schemaRepairs ?? 0) + 1 };
+      calls.push(retryCall(row, call, 'schema'));
+    }
+    return updateJob(actor, row, { moduleRuns: replaceRun(row, clearRunWait(next)), calls, stageOutputs: { ...row.stageOutputs, ['processed:' + call.callId]: true }, ...CLEARED_WAIT, ...RELEASED_LEASE });
   }
   async function nextModuleStep(actor: OnboardingActor, initial: AiJobDbRecord, workerId: string): Promise<AiJobNextStep> {
     let row = await syncModuleSources(actor, initial);
     if (row.outlineApprovedRevision !== row.outline!.revision) return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
     const completed = row.calls.find((call) => call.status === 'completed' && rawOutput(row.stageOutputs, call.callId) !== undefined && row.stageOutputs['processed:' + call.callId] !== true);
-    if (completed) row = await processModuleOutput(actor, row, completed);
+    if (completed) row = await processCompleted(actor, row, completed);
+    const waiting = await providerWaitStep(actor, row);
+    if (waiting) return waiting;
     if (row.pumpLeaseUntil && Date.parse(row.pumpLeaseUntil) >= Date.parse(now()) && row.pumpedBy !== workerId) return { kind: 'wait', job: jobFrom(row, actor.roomId) };
     let call = row.calls.find((item) => item.status === 'pending' || item.status === 'dispatched');
+    const reviewRequired = row.moduleRuns!.some((run) => !run.outline.tombstoned
+      && (['review_ready', 'fallback_review', 'manual_required', 'failed'].includes(run.lessonState)
+        || ['review_ready', 'failed'].includes(run.questionState)));
+    if (reviewRequired && !call?.attemptRef && !call?.dispatchClaimedAt) return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
     if (!call) {
       for (const run of row.moduleRuns!.filter((item) => !item.outline.tombstoned).sort((a, b) => a.outline.order - b.outline.order)) {
         const target = ['queued', 'stale'].includes(run.lessonState) ? 'lesson' : lessonApproved(run) && run.questionState === 'queued' ? 'questions' : undefined;
@@ -1412,7 +1493,7 @@ export function createAiJobService(
         const context = await moduleContext(actor, row, run);
         if (!context.usable) {
           row = await updateJob(actor, row, { moduleRuns: replaceRun(row, await fallbackRun(actor, row, run)) });
-          continue;
+          return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
         }
         const callId = 'module-' + String(row.calls.length + 1);
         call = { callId, stage: row.templateKind === 'advanced' ? 'C' : 'B', status: 'pending', operationId: row.jobId + ':' + callId, moduleLocalId: run.outline.moduleLocalId, moduleTarget: target, moduleVersion: target === 'lesson' ? run.lessonVersion : run.questionVersion, lessonVersion: run.lessonVersion, outlineRevision: row.outline!.revision };
@@ -1435,8 +1516,7 @@ export function createAiJobService(
       row = await updateJob(actor, row, { calls: row.calls.map((item) => item.callId === call!.callId ? { ...item, status: 'failed', errors: validationMessages(error) } : item), moduleRuns: replaceRun(row, call.moduleTarget === 'lesson' ? await fallbackRun(actor, row, run) : { ...run, questionState: 'failed' }), ...RELEASED_LEASE });
       return nextModuleStep(actor, row, workerId);
     }
-    row = await refreshLease(actor, row, workerId);
-    return { kind: 'ai_call', callId: call.callId, operationId: call.operationId, ...request, ...(call.attemptRef ? { attemptRef: call.attemptRef, provider: callProvider(call), startedAt: call.startedAt } : {}) };
+    return callStep(actor, row, call, workerId, request);
   }
 
   return {
@@ -1563,7 +1643,7 @@ export function createAiJobService(
       const outline = applyTemplateOutlineEdits(row.outline!, input.edits, (frame) => 'outline-' + stableHash([row.jobId, row.outline!.revision + 1, frame]));
       validateOutline(row, outline);
       const runs = reconcileModuleRuns(row.moduleRuns!, outline).map((run): AiModuleDraftRun => ({ ...run, ...(run.lessonState === 'drafting' ? { lessonState: 'queued' } : {}), ...(run.questionState === 'drafting' ? { questionState: 'queued' } : {}) }));
-      return jobFrom(await updateJob(actor, row, { outline, outlineApprovedRevision: 0, moduleRuns: runs, calls: obsoleteCalls(row, new Set(row.moduleRuns!.map((run) => run.outline.moduleLocalId))), status: 'running', result: null, ...RELEASED_LEASE }), actor.roomId);
+      return jobFrom(await updateJob(actor, row, { outline, outlineApprovedRevision: 0, moduleRuns: runs, calls: obsoleteCalls(row, new Set(row.moduleRuns!.map((run) => run.outline.moduleLocalId))), status: 'running', result: null, ...RELEASED_LEASE, ...CLEARED_WAIT }), actor.roomId);
     },
     async approveOutline(actor, input) {
       const row = await requireModuleJob(actor, input.jobId);
@@ -1632,72 +1712,68 @@ export function createAiJobService(
     async nextStep(actor, input) {
       requireAdmin(actor);
       const workerId = required(input.workerId, 'Worker ID');
-      let row = await requireOwnedJob(actor, input.jobId);
-      if (row.pipelineVersion === 'module_v2' && row.kind === 'template' && !['cancelled', 'failed'].includes(row.status)) return nextModuleStep(actor, row, workerId);
-      if (row.status === 'completed' || row.status === 'cancelled') {
-        return { kind: 'done', job: jobFrom(row, actor.roomId) };
-      }
-      if (row.status === 'failed') {
-        return { kind: 'failed', job: jobFrom(row, actor.roomId) };
-      }
+      try {
+        let row = await requireOwnedJob(actor, input.jobId);
+        if (row.pipelineVersion === 'module_v2' && row.kind === 'template' && !['cancelled', 'failed'].includes(row.status)) return await nextModuleStep(actor, row, workerId);
+        if (row.status === 'completed' || row.status === 'cancelled') {
+          return { kind: 'done', job: jobFrom(row, actor.roomId) };
+        }
+        if (row.status === 'failed') {
+          return { kind: 'failed', job: jobFrom(row, actor.roomId) };
+        }
+        const waiting = await providerWaitStep(actor, row);
+        if (waiting) return waiting;
 
+        const completed = [...row.calls].reverse().find((call) =>
+          call.status === 'completed'
+          && rawOutput(row.stageOutputs, call.callId) !== undefined
+          && row.stageOutputs['processed:' + call.callId] !== true);
+        if (completed) row = await processCompleted(actor, row, completed);
+        if (row.status === 'completed') {
+          return { kind: 'done', job: jobFrom(row, actor.roomId) };
+        }
+        if (row.status === 'failed') {
+          return { kind: 'failed', job: jobFrom(row, actor.roomId) };
+        }
 
-      const completed = [...row.calls].reverse().find((call) =>
-        call.status === 'completed'
-        && rawOutput(row.stageOutputs, call.callId) !== undefined
-        && row.stageOutputs['processed:' + call.callId] !== true);
-      if (completed) row = await processCompleted(actor, row, completed);
-      if (row.status === 'completed') {
-        return { kind: 'done', job: jobFrom(row, actor.roomId) };
+        const activeLease = row.pumpLeaseUntil
+          && Date.parse(row.pumpLeaseUntil) >= Date.parse(now());
+        if (activeLease && row.pumpedBy !== workerId) {
+          return { kind: 'wait', job: jobFrom(row, actor.roomId) };
+        }
+        const call = row.calls.find((candidate) =>
+          candidate.status === 'pending' || candidate.status === 'dispatched');
+        if (!call) {
+          throw new AiJobServiceError('JOB_NOT_RUNNING', 'The AI job has no pending server-owned step.');
+        }
+        const request = await promptFor(actor, row, call);
+        return await callStep(actor, row, call, workerId, request);
+      } catch (error) {
+        if (!isAiLeaseConflict(error)) throw error;
+        return { kind: 'wait', job: jobFrom(await requireOwnedJob(actor, input.jobId), actor.roomId) };
       }
-      if (row.status === 'failed') {
-        return { kind: 'failed', job: jobFrom(row, actor.roomId) };
-      }
-
-      const activeLease = row.pumpLeaseUntil
-        && Date.parse(row.pumpLeaseUntil) >= Date.parse(now());
-      if (activeLease && row.pumpedBy !== workerId) {
-        return { kind: 'wait', job: jobFrom(row, actor.roomId) };
-      }
-      row = await refreshLease(actor, row, workerId);
-      const call = row.calls.find((candidate) =>
-        candidate.status === 'pending' || candidate.status === 'dispatched');
-      if (!call) {
-        throw new AiJobServiceError(
-          'JOB_NOT_RUNNING',
-          'The AI job has no pending server-owned step.',
-        );
-      }
-      const request = await promptFor(actor, row, call);
-      return {
-        kind: 'ai_call',
-        callId: call.callId,
-        operationId: call.operationId,
-        prompt: request.prompt,
-        ...(request.systemContext ? { systemContext: request.systemContext } : {}),
-        ...(call.attemptRef ? { attemptRef: call.attemptRef } : {}),
-        ...(call.attemptRef && callProvider(call) ? { provider: callProvider(call) } : {}),
-        ...(call.attemptRef && call.startedAt ? { startedAt: call.startedAt } : {}),
-      };
     },
 
     async recordDispatch(actor, input) {
       requireAdmin(actor);
       const row = await requireOwnedJob(actor, input.jobId);
-      if (row.status === 'cancelled') {
+      const recordedCall = row.calls.find((candidate) => candidate.callId === input.callId);
+      if (row.status === 'cancelled' || recordedCall?.dispatchUnknown || (recordedCall?.status === 'failed' && recordedCall.cleanupState === 'pending')) {
         // The dispatch raced a cancel: keep the reference so the live attempt can still be stopped.
         const late = row.calls.find((candidate) => candidate.callId === input.callId);
         const attemptRef = required(input.attemptRef, 'Attempt reference');
         if (!late || (late.attemptRef && late.attemptRef !== attemptRef)
-          || !['pending', 'dispatched'].includes(late.status)) {
+          || (!['pending', 'dispatched'].includes(late.status) && !late.dispatchUnknown && late.cleanupState !== 'pending')) {
           throw new AiJobServiceError('JOB_CALL_MISMATCH', 'The AI call is not awaiting a dispatch.');
         }
+        if (late.leaseHolderId !== input.workerId) throw new AiJobServiceError('JOB_LEASE_LOST', 'The dispatch claim belongs to another holder.');
+        await assertRoomLease(actor, row, late.callId, input.workerId);
         if (late.attemptRef) return jobFrom(row, actor.roomId);
         const timestamp = now();
         return jobFrom(await updateJob(actor, row, {
           calls: row.calls.map((candidate) => candidate.callId === late.callId ? {
             ...candidate,
-            status: 'dispatched' as const,
+            status: row.status === 'cancelled' ? 'dispatched' as const : 'failed' as const,
             attemptRef,
             provider: input.provider,
             startedAt: candidate.startedAt ?? timestamp,
@@ -1709,7 +1785,7 @@ export function createAiJobService(
       if (row.status !== 'running') {
         throw new AiJobServiceError('JOB_NOT_RUNNING', 'The AI job is not running.');
       }
-      if (!leaseOwned(row, input.workerId)) {
+      if (!(recordedCall?.leaseHolderId === input.workerId && recordedCall.dispatchClaimedAt) && !leaseOwned(row, input.workerId)) {
         throw new AiJobServiceError(
           'JOB_LEASE_LOST',
           'This browser tab no longer owns the AI job lease.',
@@ -1741,6 +1817,7 @@ export function createAiJobService(
           'The AI call already belongs to a different provider.',
         );
       }
+      await assertRoomLease(actor, row, call.callId, input.workerId);
       // Sizes come from the server-owned prompt; the browser never reports them.
       const request = await promptFor(actor, row, call);
       const calls = row.calls.map((candidate) => candidate.callId === call.callId ? {
@@ -1775,15 +1852,18 @@ export function createAiJobService(
           'The AI output does not match the pending call.',
         );
       }
+      await assertRoomLease(actor, row, current.callId, input.workerId);
       const calls = row.calls.map((candidate) => candidate.callId === current.callId ? {
         ...candidate,
         status: 'completed' as const,
+        ...(candidate.attemptRef ? { cleanupState: 'confirmed' as const, cleanupUpdatedAt: now() } : {}),
         startedAt: candidate.startedAt ?? now(),
         finishedAt: now(),
       } : candidate);
       if (row.pipelineVersion === 'module_v2' && row.kind === 'template') moduleForCall(row, current);
       row = await updateJob(actor, row, {
         calls,
+        ...CLEARED_WAIT,
         stageOutputs: {
           ...row.stageOutputs,
           ['raw:' + current.callId]: input.text,
@@ -1800,6 +1880,20 @@ export function createAiJobService(
     async reportAiFailure(actor, input) {
       requireAdmin(actor);
       const row = await requireOwnedJob(actor, input.jobId);
+      if (input.providerErrorCode === 'DISPATCH_NOT_STARTED') {
+        const call = row.calls.find((item) => item.callId === input.callId);
+        if (!call || call.leaseHolderId !== input.workerId) throw new AiJobServiceError('JOB_LEASE_LOST', 'The dispatch claim belongs to another holder.');
+        if (call.attemptRef || call.dispatchUnknown) throw new AiJobServiceError('JOB_CALL_MISMATCH', 'A started or uncertain attempt cannot be abandoned.');
+        await assertRoomLease(actor, row, call.callId, input.workerId);
+        const calls = row.calls.map((item) => {
+          if (item.callId !== call.callId) return item;
+          const { dispatchClaimedAt: _claim, leaseHolderId: _holder, cleanupState: _cleanup, cleanupUpdatedAt: _cleanupAt, ...rest } = item;
+          return rest;
+        });
+        const updated = await updateJob(actor, row, { calls, ...RELEASED_LEASE });
+        await releaseCallLease(actor, row, call);
+        return jobFrom(updated, actor.roomId);
+      }
       if (row.status !== 'running') {
         throw new AiJobServiceError('JOB_NOT_RUNNING', 'The AI job is not running.');
       }
@@ -1824,6 +1918,7 @@ export function createAiJobService(
       const providerErrorCode = sanitizeAiDiagnosticText(input.providerErrorCode);
       const providerPhase = sanitizeAiDiagnosticText(input.providerPhase);
       const diagnosticError = sanitizeAiDiagnosticText(input.diagnosticError);
+      await assertRoomLease(actor, row, current.callId, input.workerId);
       const calls = row.calls.map((candidate) => candidate.callId === current.callId ? {
         ...candidate,
         status: 'failed' as const,
@@ -1833,22 +1928,40 @@ export function createAiJobService(
         ...(diagnosticError ? { diagnosticError } : {}),
         finishedAt: now(),
         // After a timeout the provider may still be running; prove it stopped before reuse.
-        ...(input.kind === 'timeout' && candidate.attemptRef
-          ? { cleanupState: 'pending' as const, cleanupUpdatedAt: now() }
-          : {}),
+        ...(input.kind === 'dispatch_unknown' ? { dispatchUnknown: true, cleanupState: 'pending' as const, cleanupUpdatedAt: now() }
+          : input.kind === 'timeout' && candidate.attemptRef ? { cleanupState: 'pending' as const, cleanupUpdatedAt: now() }
+            : candidate.attemptRef ? { cleanupState: 'confirmed' as const, cleanupUpdatedAt: now() } : {}),
       } : candidate);
+      const isBusy = providerErrorCode === 'PROJECT_BUSY';
+      const waitStartedAt = row.providerWaitStartedAt && Date.parse(row.providerWaitStartedAt) > 0 ? row.providerWaitStartedAt : now();
+      const canWait = isBusy && Date.parse(now()) - Date.parse(waitStartedAt) < MAX_PROVIDER_WAIT_MS;
+      const busyCount = (row.providerWaitAttempts ?? 0) + 1;
+      const nextRetryAt = new Date(Math.min(Date.parse(waitStartedAt) + MAX_PROVIDER_WAIT_MS, Date.parse(now()) + Math.min(30_000, PROVIDER_RETRY_MS * (2 ** Math.min(busyCount - 1, 4))))).toISOString();
       if (row.pipelineVersion === 'module_v2' && row.kind === 'template') {
         const run = moduleForCall(row, current);
-        const next = current.moduleTarget === 'lesson' ? await fallbackRun(actor, row, run) : { ...run, questionState: 'failed' as const };
-        return jobFrom(await updateJob(actor, row, { calls, moduleRuns: replaceRun(row, next), ...RELEASED_LEASE }), actor.roomId);
+        const transient = !isBusy && input.kind === 'failed' && (run.transientRetries ?? 0) < 1
+          && /(?:TRANSIENT|UNAVAILABLE|OVERLOADED|RATE_LIMIT|SERVER_ERROR)/.test(providerErrorCode ?? '');
+        const next = canWait ? { ...run, providerWaitStartedAt: waitStartedAt, nextRetryAt }
+          : transient ? { ...clearRunWait(run), transientRetries: (run.transientRetries ?? 0) + 1, nextRetryAt: new Date(Date.parse(now()) + PROVIDER_RETRY_MS).toISOString() }
+            : current.moduleTarget === 'lesson' ? await fallbackRun(actor, row, run) : { ...clearRunWait(run), questionState: 'failed' as const };
+        const updated = await updateJob(actor, row, {
+          calls: canWait || transient ? [...calls, retryCall(row, current, canWait ? 'project_busy' : 'transient')] : calls,
+          moduleRuns: replaceRun(row, next), ...RELEASED_LEASE,
+          ...(canWait ? { providerWaitStartedAt: waitStartedAt, nextRetryAt, providerWaitAttempts: busyCount } : { ...CLEARED_WAIT, ...(transient ? { nextRetryAt: next.nextRetryAt } : {}) }),
+        });
+        if (!aiCallMayBeLive(calls.find((call) => call.callId === current.callId)!)) await releaseCallLease(actor, row, current);
+        return jobFrom(updated, actor.roomId);
       }
-      return jobFrom(await updateJob(actor, row, {
-        calls,
-        status: 'failed',
+      const updated = await updateJob(actor, row, {
+        calls: canWait ? [...calls, retryCall(row, current, 'project_busy')] : calls,
+        status: canWait ? 'running' : 'failed',
         errorCode: code,
         errorMessage: message,
         ...RELEASED_LEASE,
-      }), actor.roomId);
+        ...(canWait ? { providerWaitStartedAt: waitStartedAt, nextRetryAt, providerWaitAttempts: busyCount } : CLEARED_WAIT),
+      });
+      if (!aiCallMayBeLive(calls.find((call) => call.callId === current.callId)!)) await releaseCallLease(actor, row, current);
+      return jobFrom(updated, actor.roomId);
     },
 
     async retryJob(actor, jobId) {
@@ -1935,14 +2048,17 @@ export function createAiJobService(
       if (row.status === 'cancelled') return jobFrom(row, actor.roomId);
       const timestamp = now();
       // A cancelled server job says nothing about the provider; each live attempt awaits proof.
-      const calls = row.calls.map((call) => call.status === 'dispatched' && call.attemptRef
+      const calls = row.calls.map((call) => aiCallMayBeLive(call)
         ? { ...call, cleanupState: 'pending' as const, cleanupUpdatedAt: timestamp }
         : call);
-      return jobFrom(await updateJob(actor, row, {
+      const updated = await updateJob(actor, row, {
         calls,
         status: 'cancelled',
         ...RELEASED_LEASE,
-      }), actor.roomId);
+        ...CLEARED_WAIT,
+      });
+      for (const call of calls) if (!aiCallMayBeLive(call)) await releaseCallLease(actor, row, call);
+      return jobFrom(updated, actor.roomId);
     },
 
     async recordAttemptCleanup(actor, input) {
@@ -1956,7 +2072,10 @@ export function createAiJobService(
         );
       }
       // Confirmed is terminal evidence; a later or repeated report cannot weaken it.
-      if (call.cleanupState === 'confirmed') return jobFrom(row, actor.roomId);
+      if (call.cleanupState === 'confirmed') {
+        await releaseCallLease(actor, row, call);
+        return jobFrom(row, actor.roomId);
+      }
       const message = input.state === 'unknown'
         ? (input.message?.trim() || 'Provider termination was not confirmed.')
           .slice(0, MAX_CLEANUP_MESSAGE_CHARS)
@@ -1974,7 +2093,9 @@ export function createAiJobService(
           cleanupUpdatedAt: now(),
         };
       });
-      return jobFrom(await updateJob(actor, row, { calls }), actor.roomId);
+      const updated = await updateJob(actor, row, { calls });
+      if (input.state === 'confirmed') await releaseCallLease(actor, row, call);
+      return jobFrom(updated, actor.roomId);
     },
   };
 }
