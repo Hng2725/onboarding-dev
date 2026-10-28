@@ -523,3 +523,29 @@ export interface LearnerAttemptResultDto {
   readonly essayFeedback: readonly EssayFeedbackRecord[];
   readonly evaluation?: Omit<EvaluationRecord, 'roomId' | 'operationId'>;
 }
+
+export interface TemplateOutlineModule {
+  readonly moduleLocalId: string;
+  readonly frameKey: string;
+  readonly order: number;
+  readonly title: string;
+  readonly description: string;
+  readonly estimatedMinutes: number;
+  readonly objectives: readonly string[];
+  readonly featureIds: readonly string[];
+  readonly sourceSectionIds: readonly string[];
+  readonly responsibilityIndexes: readonly number[];
+  readonly tombstoned?: boolean;
+}
+
+export interface TemplateOutline {
+  readonly revision: number;
+  readonly modules: readonly TemplateOutlineModule[];
+  readonly taskCoverage: readonly import('./ai/validate').GeneratedTaskCoverage[];
+  readonly flags: readonly import('./ai/validate').GeneratedFlag[];
+}
+
+export type OutlineEdit =
+  | { readonly type: 'reorder'; readonly moduleLocalId: string; readonly order: number }
+  | { readonly type: 'delete'; readonly moduleLocalId: string }
+  | { readonly type: 'add'; readonly module: Omit<TemplateOutlineModule, 'moduleLocalId' | 'tombstoned'> };
