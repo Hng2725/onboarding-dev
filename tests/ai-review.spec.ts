@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { OnboardingActor } from '../src/onboarding/auth';
 import type { TemplateResource } from '../src/onboarding/contracts';
@@ -12,6 +12,84 @@ import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template
 const admin: OnboardingActor = { userId: 'admin-1', roomId: 'room-a', access: 'admin' };
 
 describe('module publication gate', () => {
+  it('replaces an edited pending target after an interrupted overlap without exposing its projected predecessor', async () => {
+    const { store, templates, review, draft } = await setup();
+    const job = approvedModuleJob('advanced');
+    const jobRow = await store.create(admin.roomId, 'onboarding_ai_jobs', { ...job });
+    const advanced = await materializeModuleTemplate(store, templates, admin, job.jobId);
+    const both = await review.beginPublication(admin, { targets: [draft, advanced].map((item) => ({ kind: item.employeeType, templateId: item.id, version: 1 })) });
+    await store.update(admin.roomId, 'onboarding_ai_jobs', String(jobRow.id), { moduleRuns: job.moduleRuns!.map((run) => ({ ...run,
+      lessonVersion: 3, approvedLessonVersion: 3, questionVersion: 4, approvedQuestionVersion: 4, questionLessonVersion: 3,
+      lessonDraft: { ...run.lessonDraft!, title: 'Reapproved lesson' },
+    })) });
+    await materializeModuleTemplate(store, templates, admin, job.jobId);
+    const batchRow = (await store.query(admin.roomId, 'onboarding_ai_publications', { filter: { batchId: both.batchId } })).records[0];
+    const update = store.update.bind(store);
+    const spy = vi.spyOn(store, 'update').mockImplementation(async (roomId, collection, id, data, options) => {
+      if (collection === 'onboarding_ai_publications' && id === batchRow.id
+        && data.batchId && data.batchId !== both.batchId) throw new Error('Retirement interrupted');
+      return update(roomId, collection, id, data, options);
+    });
+    await expect(review.beginPublication(admin, { targets: [{ kind: 'advanced', templateId: advanced.id, version: 1 }] })).rejects.toThrow('Retirement interrupted');
+    spy.mockRestore();
+    const before = await review.listIncompletePublications(admin);
+    const projected = before.find((batch) => batch.targets.some((target) => target.templateId === draft.id))!;
+    const changed = await review.updateReview(admin, { templateId: draft.id, version: 1, expectedUpdatedAt: draft.updatedAt,
+      ops: [{ kind: 'update_block', moduleId: draft.modules[0].id, blockId: draft.content!.modules[0].blocks[0].id, body: 'Revised pending lesson' }] });
+    const request = { targets: [{ kind: 'normal' as const, templateId: changed.id, version: 1 }] };
+    const replacement = await review.beginPublication(admin, request);
+    const recreated = createAiReviewService(store, createTemplateService(store));
+    const recovered = await recreated.listIncompletePublications(admin);
+    expect(recovered.map((batch) => batch.batchId).sort()).toEqual([
+      before.find((batch) => batch.targets[0].kind === 'advanced')!.batchId, replacement.batchId,
+    ].sort());
+    expect((await recreated.beginPublication(admin, request)).batchId).toBe(replacement.batchId);
+    await expect(recreated.beginPublication(admin, { batchId: projected.batchId, targets: projected.targets })).rejects.toMatchObject({ code: 'REVIEW_CONFLICT' });
+    await expect(recreated.beginPublication(admin, { batchId: both.batchId, targets: both.targets })).rejects.toMatchObject({ code: 'REVIEW_CONFLICT' });
+    expect(await store.get(admin.roomId, 'onboarding_ai_publications', String(batchRow.id))).toHaveProperty('retiredAt');
+  });
+
+  it.each([false, true])('preserves unaffected pending targets when an overlapping replacement retires Both (interrupted: %s)', async (interrupt) => {
+    const { store, templates, review, draft } = await setup();
+    const job = approvedModuleJob('advanced');
+    const jobRow = await store.create(admin.roomId, 'onboarding_ai_jobs', { ...job });
+    const advanced = await materializeModuleTemplate(store, templates, admin, job.jobId);
+    const both = await review.beginPublication(admin, { targets: [draft, advanced].map((item) => ({ kind: item.employeeType, templateId: item.id, version: 1 })) });
+    const unrelated = await materializeAiTemplate(store, templates, admin, { jobId: 'unrelated', templateKind: 'normal', generated: generatedTemplate, sources: [aiSource] });
+    const unrelatedBatch = await review.beginPublication(admin, { targets: [{ kind: 'normal', templateId: unrelated.id, version: 1 }] });
+    await store.update(admin.roomId, 'onboarding_ai_jobs', String(jobRow.id), { moduleRuns: job.moduleRuns!.map((run) => ({ ...run,
+      lessonVersion: 3, approvedLessonVersion: 3, questionVersion: 4, approvedQuestionVersion: 4, questionLessonVersion: 3,
+      lessonDraft: { ...run.lessonDraft!, title: 'Reapproved lesson' },
+    })) });
+    const updated = await materializeModuleTemplate(store, templates, admin, job.jobId);
+    const request = { targets: [{ kind: 'advanced' as const, templateId: updated.id, version: updated.version }] };
+    const batchRow = (await store.query(admin.roomId, 'onboarding_ai_publications', { filter: { batchId: both.batchId } })).records[0];
+    const update = store.update.bind(store);
+    const spy = vi.spyOn(store, 'update').mockImplementation(async (roomId, collection, id, data, options) => {
+      if (interrupt && collection === 'onboarding_ai_publications' && id === batchRow.id
+        && (data.retiredAt || (data.batchId && data.batchId !== both.batchId))) throw new Error('Retirement interrupted');
+      return update(roomId, collection, id, data, options);
+    });
+    if (interrupt) await expect(review.beginPublication(admin, request)).rejects.toThrow('Retirement interrupted');
+    else await review.beginPublication(admin, request);
+    spy.mockRestore();
+    const recovered = await createAiReviewService(store, createTemplateService(store)).listIncompletePublications(admin);
+    expect(recovered.some((batch) => batch.batchId === both.batchId)).toBe(false);
+    expect(recovered.filter((batch) => batch.targets.some((target) => target.templateId === draft.id))).toHaveLength(1);
+    expect(recovered.some((batch) => batch.batchId === unrelatedBatch.batchId)).toBe(true);
+    const retained = recovered.find((batch) => batch.targets.some((target) => target.templateId === draft.id))!;
+    expect(retained.targets).toEqual([both.targets[0]]);
+    if (interrupt) {
+      expect(await store.get(admin.roomId, 'onboarding_ai_publications', String(batchRow.id))).toMatchObject({ batchId: both.batchId });
+      await expect(review.beginPublication(admin, { batchId: retained.batchId, targets: request.targets })).rejects.toMatchObject({ code: 'REVIEW_CONFLICT' });
+    }
+    const replacement = recovered.find((batch) => batch.targets.some((target) => target.templateId === advanced.id))!;
+    expect((await review.beginPublication(admin, request)).batchId).toBe(replacement.batchId);
+    expect((await review.beginPublication(admin, { batchId: retained.batchId, targets: retained.targets })).batchId).toBe(retained.batchId);
+    expect((await review.listIncompletePublications(admin)).map((batch) => batch.batchId).sort()).toEqual(recovered.map((batch) => batch.batchId).sort());
+    await expect(review.beginPublication(admin, { batchId: both.batchId, targets: both.targets })).rejects.toMatchObject({ code: 'REVIEW_CONFLICT' });
+    expect(await templates.getAdminDetail(admin, draft.id, 1)).toEqual(draft);
+  });
   it('starts a fresh batch when an admin restores retired content without reviving another owner or old batch', async () => {
     const { review, draft, store } = await setup();
     const target = { kind: 'normal' as const, templateId: draft.id, version: 1 };

@@ -119,6 +119,7 @@ interface PublicationDbRecord extends StoreRecord, AiPublicationBatch {
   readonly retiredAt?: string;
   readonly retirementReason?: 'superseded' | 'missing_target';
   readonly supersededBy?: string;
+  readonly supersedesBatchIds?: readonly string[];
 }
 
 function publicationBatch(row: PublicationDbRecord): AiPublicationBatch {
@@ -845,6 +846,66 @@ export function createAiReviewService(
     }, { expectedUpdatedAt: row.updatedAt });
   }
 
+  async function publicationTargetCompleted(actor: OnboardingActor, target: AiPublicationTarget): Promise<boolean> {
+    const detail = await templates.getAdminDetail(actor, target.templateId, target.version);
+    return detail.status === 'published' && Boolean(detail.content?.publication?.jsonFileId)
+      && materializedModuleFingerprint(detail) === target.materializedFingerprint
+      && (!target.settings || JSON.stringify(publicationSettings(detail)) === JSON.stringify({
+        passingScore: target.settings.passingScore, learningMode: target.settings.learningMode,
+        maxAttemptsPerModule: target.settings.maxAttemptsPerModule,
+      }));
+  }
+
+  function targetOverlaps(left: AiPublicationTarget, right: AiPublicationTarget): boolean {
+    return left.kind === right.kind && left.templateId === right.templateId;
+  }
+
+  // A durable claim hides its predecessor immediately. Until its CAS transition succeeds,
+  // project the unaffected pending selection from that predecessor's existing record.
+  async function effectivePublications(actor: OnboardingActor, rows: readonly PublicationDbRecord[]): Promise<readonly PublicationDbRecord[]> {
+    const effective: PublicationDbRecord[] = [];
+    for (const row of rows) {
+      if (row.retiredAt) continue;
+      const successors = rows.filter((other) => other.supersedesBatchIds?.includes(row.batchId));
+      if (!successors.length) { effective.push(row); continue; }
+      const targets: AiPublicationTarget[] = [];
+      for (const target of row.targets) {
+        if (successors.some((successor) => successor.targets.some((replacement) => targetOverlaps(target, replacement)))) continue;
+        try { if (!await publicationTargetCompleted(actor, target)) targets.push(target); }
+        catch (error) { if (!(error instanceof TemplateServiceError) || error.code !== 'TEMPLATE_NOT_FOUND') throw error; }
+      }
+      if (targets.length) {
+        const requestFingerprint = publicationRequestFingerprint(actor, targets);
+        effective.push({ ...row, targets, requestFingerprint,
+          batchId: revisionId('ai-publication', row.batchId, 1, requestFingerprint),
+          supersedesBatchIds: [...new Set([...(row.supersedesBatchIds ?? []), row.batchId])],
+        });
+      }
+    }
+    return effective;
+  }
+
+  async function persistPublicationProjection(actor: OnboardingActor, projected: PublicationDbRecord,
+    rows: readonly PublicationDbRecord[]): Promise<PublicationDbRecord> {
+    const original = rows.find((row) => row.id === projected.id)!;
+    if (original.batchId === projected.batchId) return projected;
+    return store.update<PublicationDbRecord>(actor.roomId, 'onboarding_ai_publications', original.id, {
+      batchId: projected.batchId, targets: projected.targets, requestFingerprint: projected.requestFingerprint,
+      supersedesBatchIds: projected.supersedesBatchIds, updatedAt: now(),
+    }, { expectedUpdatedAt: original.updatedAt });
+  }
+
+  async function reconcilePredecessors(actor: OnboardingActor, successor: PublicationDbRecord): Promise<void> {
+    const rows = await ownedPublications(actor);
+    const effective = await effectivePublications(actor, rows);
+    for (const predecessor of rows) {
+      if (predecessor.retiredAt || !successor.supersedesBatchIds?.includes(predecessor.batchId)) continue;
+      const remaining = effective.find((row) => row.id === predecessor.id);
+      if (remaining) await persistPublicationProjection(actor, remaining, rows);
+      else await retirePublication(actor, predecessor, 'superseded', successor.batchId);
+    }
+  }
+
   const service: AiReviewService = {
     async beginPublication(actor, input) {
       requireAdmin(actor);
@@ -853,14 +914,24 @@ export function createAiReviewService(
         throw new AiReviewServiceError('REVIEW_INVALID', 'Select one target of each template kind.');
       }
       const ordered = [...input.targets].sort((a, b) => a.kind === b.kind ? 0 : a.kind === 'normal' ? -1 : 1);
+      const previous = await ownedPublications(actor);
+      const effective = await effectivePublications(actor, previous);
       let row: PublicationDbRecord | undefined = input.batchId
         ? (await store.query<PublicationDbRecord>(actor.roomId, 'onboarding_ai_publications', { filter: { batchId: input.batchId }, limit: 1 })).records[0]
         : undefined;
       if (row && (row.createdBy !== actor.userId || !samePublicationSelection(row.targets, ordered))) {
         throw new AiReviewServiceError('REVIEW_CONFLICT', 'This publication belongs to a different selection.');
       }
+      if (input.batchId && previous.some((batch) => batch.supersedesBatchIds?.includes(input.batchId!))) {
+        throw new AiReviewServiceError('REVIEW_CONFLICT', 'This publication is no longer active. Review the current draft first.');
+      }
+      if (input.batchId && !row) row = effective.find((batch) => batch.batchId === input.batchId);
       if (input.batchId && !row) throw new AiReviewServiceError('REVIEW_NOT_FOUND', 'Publication batch not found.');
+      if (row && !samePublicationSelection(row.targets, ordered)) {
+        throw new AiReviewServiceError('REVIEW_CONFLICT', 'This publication belongs to a different selection.');
+      }
       if (row?.retiredAt) throw new AiReviewServiceError('REVIEW_CONFLICT', 'This publication is no longer active. Review the current draft first.');
+      let claimsToAdd: readonly string[] = [];
       if (!row) {
         const targets: AiPublicationTarget[] = [];
         for (const target of ordered) {
@@ -876,23 +947,40 @@ export function createAiReviewService(
             materializedFingerprint: materializedModuleFingerprint(detail), settings });
         }
         const requestFingerprint = publicationRequestFingerprint(actor, targets);
-        const previous = await ownedPublications(actor);
         const identical = previous.filter((batch) =>
           (batch.requestFingerprint ?? publicationRequestFingerprint(actor, batch.targets)) === requestFingerprint);
-        row = identical.find((batch) => !batch.retiredAt);
+        row = effective.find((batch) =>
+          (batch.requestFingerprint ?? publicationRequestFingerprint(actor, batch.targets)) === requestFingerprint);
+        const obsolete = effective.filter((batch) => batch.batchId !== row?.batchId
+          && (samePublicationSelection(batch.targets, targets) || batch.targets.some((target) => targets.some((replacement) =>
+            targetOverlaps(target, replacement)
+            && publicationRequestFingerprint(actor, [target]) !== publicationRequestFingerprint(actor, [replacement])))));
+        // Carry the original claim when replacing a residual that has not been persisted yet.
+        const supersedesBatchIds = [...new Set(obsolete.flatMap((batch) => [batch.batchId, ...(batch.supersedesBatchIds ?? [])]))];
         if (!row) {
           // Retired content can be explicitly selected again without resurrecting an old batch.
-          const batchId = 'ai-publication-' + requestFingerprint + (identical.length ? ':' + identical.length : '');
+          let ordinal = identical.length;
+          let batchId = 'ai-publication-' + requestFingerprint + (ordinal ? ':' + ordinal : '');
+          while (previous.some((batch) => batch.batchId === batchId || batch.supersedesBatchIds?.includes(batchId))) {
+            batchId = 'ai-publication-' + requestFingerprint + ':' + (++ordinal);
+          }
           const timestamp = now();
           row = await store.create<PublicationDbRecord>(actor.roomId, 'onboarding_ai_publications', {
             batchId, requestFingerprint, createdBy: actor.userId, targets, createdAt: timestamp, updatedAt: timestamp,
+            supersedesBatchIds,
           }, batchId);
+        } else if (supersedesBatchIds.some((id) => !row!.supersedesBatchIds?.includes(id))) {
+          claimsToAdd = supersedesBatchIds;
         }
-        for (const obsolete of previous) {
-          if (obsolete.batchId !== row.batchId && !obsolete.retiredAt && samePublicationSelection(obsolete.targets, targets)) {
-            await retirePublication(actor, obsolete, 'superseded', row.batchId);
-          }
-        }
+      }
+      const selectedRow = row;
+      if (previous.some((batch) => batch.id === selectedRow.id && batch.batchId !== selectedRow.batchId)) {
+        row = await persistPublicationProjection(actor, row, previous);
+      }
+      if (claimsToAdd.length) {
+        row = await store.update<PublicationDbRecord>(actor.roomId, 'onboarding_ai_publications', row.id, {
+          supersedesBatchIds: [...new Set([...(row.supersedesBatchIds ?? []), ...claimsToAdd])], updatedAt: now(),
+        }, { expectedUpdatedAt: row.updatedAt });
       }
       // Persist the complete selection before any revision or external artifact work.
       // If interrupted, replaying a settings operation reuses its valid revision.
@@ -912,24 +1000,17 @@ export function createAiReviewService(
             { targets, updatedAt: now() }, { expectedUpdatedAt: row.updatedAt });
         }
       }
+      await reconcilePredecessors(actor, row);
       return publicationBatch(row);
     },
 
     async listIncompletePublications(actor) {
       requireAdmin(actor);
       const batches: AiPublicationBatch[] = [];
-      for (const row of await ownedPublications(actor)) {
+      for (const row of await effectivePublications(actor, await ownedPublications(actor))) {
         if (row.retiredAt) continue;
         try {
-          const completed = await Promise.all(row.targets.map(async (target) => {
-            const detail = await templates.getAdminDetail(actor, target.templateId, target.version);
-            return detail.status === 'published' && Boolean(detail.content?.publication?.jsonFileId)
-              && materializedModuleFingerprint(detail) === target.materializedFingerprint
-              && (!target.settings || JSON.stringify(publicationSettings(detail)) === JSON.stringify({
-                passingScore: target.settings.passingScore, learningMode: target.settings.learningMode,
-                maxAttemptsPerModule: target.settings.maxAttemptsPerModule,
-              }));
-          }));
+          const completed = await Promise.all(row.targets.map((target) => publicationTargetCompleted(actor, target)));
           if (!completed.every(Boolean)) batches.push(publicationBatch(row));
         } catch (error) {
           if (!(error instanceof TemplateServiceError) || error.code !== 'TEMPLATE_NOT_FOUND') throw error;

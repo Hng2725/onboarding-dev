@@ -86,6 +86,62 @@ const publishReview: AdminTemplateDetail = {
   updatedAt: 'draft-at',
 };
 describe('Admin AI template UI model', () => {
+  it('finishes reapproved Template 2 individually after Both while reusing every completed Template 1 artifact', async () => {
+    const actor = { roomId: 'room-a', userId: 'admin-1', access: 'admin' as const };
+    const otherActor = { ...actor, userId: 'admin-2' };
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    const templates = createTemplateService(store);
+    const reviews = createAiReviewService(store, templates);
+    const drafts: AdminTemplateDetail[] = [];
+    for (const kind of ['normal', 'advanced'] as const) {
+      const job = approvedModuleJob(kind);
+      await store.create(actor.roomId, 'onboarding_ai_jobs', { ...job });
+      drafts.push(await materializeModuleTemplate(store, templates, actor, job.jobId));
+    }
+    const selection = drafts.map((review) => ({ kind: review.employeeType, templateId: review.id, version: review.version }));
+    const both = await reviews.beginPublication(actor, { targets: selection });
+    const otherBatch = await reviews.beginPublication(otherActor, { targets: selection });
+    const otherBefore = (await store.query(actor.roomId, 'onboarding_ai_publications', { filter: { batchId: otherBatch.batchId } })).records[0];
+    const uploads: string[] = [];
+    const dependencies = createAiPublishDependencies({ roomId: actor.roomId,
+      app: { uploadFile: async (file: { fileName: string }) => { uploads.push(file.fileName); return { fileId: file.fileName }; } } as never,
+      api: {
+        adminAi: async (action: string, args: Record<string, unknown>) => action === 'begin_publication'
+          ? { batch: await reviews.beginPublication(actor, args as unknown as Parameters<AiReviewService['beginPublication']>[1]) }
+          : { review: action === 'get_review' ? await reviews.getReview(actor, String(args.templateId), Number(args.version))
+            : await reviews.updateReview(actor, args as unknown as UpdateAiReviewInput) },
+        adminTemplates: async (_action: string, args: Record<string, unknown>) => ({ template: await templates.publish(actor, String(args.templateId), Number(args.version), String(args.expectedUpdatedAt)) }),
+      } as never,
+      ensureTemplateFolder: async () => ({ rootId: 'root', documentsId: 'documents', templatesId: 'templates', templateFolderId: 'folder' }),
+      createLessonPdf: async (review, id) => ({ fileName: `${review.employeeType}-${id}.pdf`, mimeType: 'application/pdf', blob: new Blob(['pdf']) }),
+      encodeBlob: async () => ({ dataUrl: 'data:application/pdf;base64,YQ==', base64: 'YQ==' }),
+    });
+    await publishAiTemplateBatch([restoreAiPublishTarget(drafts[0])], dependencies);
+    const normal = await reviews.getReview(actor, drafts[0].id, 1);
+    expect(uploads).toHaveLength(5);
+    const job = approvedModuleJob('advanced');
+    const row = (await store.query(actor.roomId, 'onboarding_ai_jobs', { filter: { jobId: job.jobId } })).records[0];
+    await store.update(actor.roomId, 'onboarding_ai_jobs', String(row.id), { moduleRuns: job.moduleRuns!.map((run) => ({ ...run,
+      lessonVersion: 3, approvedLessonVersion: 3, questionVersion: 4, approvedQuestionVersion: 4, questionLessonVersion: 3,
+      lessonDraft: { ...run.lessonDraft!, title: 'Reapproved lesson' },
+    })) });
+    const advanced = await materializeModuleTemplate(store, templates, actor, job.jobId);
+    expect(advanced.version).toBe(1);
+    const completed = await publishAiTemplateBatch([restoreAiPublishTarget(advanced)], dependencies);
+    expect(completed[0].phase).toBe('completed');
+    expect(await reviews.listIncompletePublications(actor)).toEqual([]);
+    await expect(reviews.beginPublication(actor, { batchId: both.batchId, targets: both.targets })).rejects.toMatchObject({ code: 'REVIEW_CONFLICT' });
+    const retry = await publishAiTemplateBatch([restoreAiPublishTarget(advanced)], dependencies);
+    expect(retry[0].batchId).toBe(completed[0].batchId);
+    await publishAiTemplateBatch([restoreAiPublishTarget(normal)], dependencies);
+    expect(uploads).toHaveLength(11);
+    expect(new Set(uploads).size).toBe(11);
+    expect(await reviews.getReview(actor, normal.id, 1)).toEqual(normal);
+    expect(await store.count(actor.roomId, 'onboarding_templates')).toBe(2);
+    expect(await store.count(actor.roomId, 'onboarding_resources')).toBe(9);
+    expect((await store.query(actor.roomId, 'onboarding_ai_publications', { filter: { batchId: otherBatch.batchId } })).records[0]).toEqual(otherBefore);
+  });
   it('applies changed settings to a published review before deciding to reuse it', async () => {
     const published: AdminTemplateDetail = { ...publishReview, status: 'published', passingScore: 70 };
     const revision: AdminTemplateDetail = { ...published, status: 'draft', version: 2, passingScore: 85 };

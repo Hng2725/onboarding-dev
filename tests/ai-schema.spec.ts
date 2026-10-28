@@ -13,7 +13,7 @@ const AI_COLLECTIONS = [
 describe('AI onboarding collections', () => {
   it('keeps batch identity and retirement fields optional for existing publications', () => {
     const fields = ONBOARDING_COLLECTIONS.find((definition) => definition.collection === 'onboarding_ai_publications')!.fields;
-    for (const name of ['requestFingerprint', 'retiredAt', 'retirementReason', 'supersededBy']) {
+    for (const name of ['requestFingerprint', 'retiredAt', 'retirementReason', 'supersededBy', 'supersedesBatchIds']) {
       expect(fields.find((field) => field.name === name)).toBeDefined();
       expect(fields.find((field) => field.name === name)?.required).not.toBe(true);
     }
