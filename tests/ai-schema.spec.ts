@@ -11,6 +11,13 @@ const AI_COLLECTIONS = [
 ] as const;
 
 describe('AI onboarding collections', () => {
+  it('persists optional module lifecycle fields without migrating legacy rows', () => {
+    const fields = ONBOARDING_COLLECTIONS.find((d) => d.collection === 'onboarding_ai_jobs')!.fields;
+    for (const name of ['pipelineVersion', 'outline', 'outlineApprovedRevision', 'moduleRuns']) {
+      expect(fields.find((f) => f.name === name)).toBeDefined();
+      expect(fields.find((f) => f.name === name)?.required).not.toBe(true);
+    }
+  });
   it('defines all five room-scoped collections and their stable identity indexes', () => {
     const byName = new Map(ONBOARDING_COLLECTIONS.map((definition) => [definition.collection, definition]));
 

@@ -148,6 +148,11 @@ export const AI_PROVIDERS: readonly AiProvider[] = ['sandbox', 'native_chat'];
 export type AiAttemptCleanupState = 'pending' | 'confirmed' | 'unknown';
 
 export interface AiCallRecord {
+  readonly moduleLocalId?: string;
+  readonly moduleTarget?: 'lesson' | 'questions';
+  readonly moduleVersion?: number;
+  readonly lessonVersion?: number;
+  readonly outlineRevision?: number;
   readonly callId: string;
   readonly stage: 'A' | 'B' | 'C' | 'D';
   readonly repairOf?: string;
@@ -170,6 +175,10 @@ export interface AiCallRecord {
 }
 
 export interface AiJobRecord {
+  readonly pipelineVersion?: AiPipelineVersion;
+  readonly outline?: TemplateOutline;
+  readonly outlineApprovedRevision?: number;
+  readonly moduleRuns?: readonly AiModuleDraftRun[];
   readonly id: string;
   readonly roomId: string;
   readonly jobId: string;
@@ -546,6 +555,34 @@ export interface TemplateOutline {
 }
 
 export type OutlineEdit =
+  | { readonly type: 'update'; readonly moduleLocalId: string; readonly patch: Partial<Pick<TemplateOutlineModule, 'title' | 'description' | 'estimatedMinutes' | 'objectives' | 'featureIds' | 'sourceSectionIds' | 'responsibilityIndexes'>> }
   | { readonly type: 'reorder'; readonly moduleLocalId: string; readonly order: number }
   | { readonly type: 'delete'; readonly moduleLocalId: string }
   | { readonly type: 'add'; readonly module: Omit<TemplateOutlineModule, 'moduleLocalId' | 'tombstoned'> };
+
+export type AiPipelineVersion = 'legacy' | 'module_v2';
+export type LessonState = 'queued' | 'drafting' | 'validating' | 'review_ready' | 'fallback_review' | 'approved' | 'stale' | 'failed' | 'manual_required';
+export type QuestionState = 'blocked' | 'queued' | 'drafting' | 'review_ready' | 'approved' | 'stale' | 'failed';
+export interface AiModuleDraftRun {
+  readonly outline: TemplateOutlineModule;
+  readonly outlineRevision: number;
+  readonly sourceFingerprint?: string;
+  readonly lessonState: LessonState;
+  readonly lessonVersion: number;
+  readonly approvedLessonVersion?: number;
+  readonly lessonDraft?: import('./ai/validate').GeneratedModule;
+  readonly lessonProvenance?: 'ai' | 'fallback' | 'manual';
+  readonly lessonFlags?: readonly import('./ai/validate').GeneratedFlag[];
+  readonly questionState: QuestionState;
+  readonly questionVersion: number;
+  readonly approvedQuestionVersion?: number;
+  readonly questionLessonVersion?: number;
+  readonly questionDraft?: readonly import('./ai/validate').GeneratedQuestion[];
+  readonly questionFlags?: readonly import('./ai/validate').GeneratedFlag[];
+  readonly nextRetryAt?: string;
+  readonly providerWaitStartedAt?: string;
+  readonly lessonAttempts?: number;
+  readonly questionAttempts?: number;
+  readonly schemaRepairs?: number;
+  readonly transientRetries?: number;
+}

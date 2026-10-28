@@ -2,6 +2,7 @@ import type { EmployeeType, SourceSection, TemplateOutlineModule } from '../cont
 import type { InventoryFeature } from './inventory';
 import { normalizeForMatch, type RawSourceRef } from './grounding';
 import { AI_GENERATION_LIMITS } from './limits';
+import { buildFallbackLesson } from './fallback-lessons';
 import { bounded, escapeXml, jsonLines, type AiPromptRequest } from './prompts';
 import { add, fields, isRecord, parseBlocks, parseFlags, parseQuestions, stringArray, text, type GeneratedFlag, type GeneratedModule, type GeneratedQuestion, type ValidationError } from './validate';
 
@@ -13,7 +14,7 @@ export interface ModuleLessonPromptInput {
   readonly templateKind: EmployeeType;
 }
 export type ModuleLessonValidationInput = ModuleLessonPromptInput;
-export interface ModuleQuestionPromptInput extends ModuleLessonPromptInput { readonly lesson: GeneratedModule; readonly lessonVersion: number; }
+export interface ModuleQuestionPromptInput extends ModuleLessonPromptInput { readonly lesson: GeneratedModule; readonly lessonVersion: number; readonly lessonProvenance?: 'ai' | 'fallback' | 'manual'; }
 export type ModuleQuestionValidationInput = ModuleQuestionPromptInput;
 export interface ModuleLessonRepairPromptInput extends ModuleLessonPromptInput { readonly previous: unknown; readonly errors: readonly string[]; }
 type Result<T> = { readonly ok: true; readonly value: T; readonly errors: readonly [] } | { readonly ok: false; readonly errors: readonly ValidationError[] };
@@ -36,7 +37,24 @@ export function buildModuleLessonPrompt(input: ModuleLessonPromptInput): AiPromp
   return bounded(lessonRules + (input.templateKind === 'advanced' ? ' Include a scenario block.' : ''), context(input));
 }
 function verifyLesson(input: ModuleQuestionPromptInput): void {
-  if (input.lesson.localId !== input.module.moduleLocalId || input.lesson.frameKey !== input.module.frameKey || JSON.stringify(input.lesson.featureIds) !== JSON.stringify(input.module.featureIds) || !Number.isSafeInteger(input.lessonVersion) || input.lessonVersion < 1 || !validateModuleLessonOutput({ title: input.lesson.title, description: input.lesson.description, estimatedMinutes: input.lesson.estimatedMinutes, objectives: input.lesson.objectives, blocks: input.lesson.blocks, flags: [] }, input).ok) throw new Error('Approved lesson and version must match the module.');
+  if (!Number.isSafeInteger(input.lessonVersion) || input.lessonVersion < 1 || !validApprovedLesson(input.lesson, input, input.lessonProvenance ?? 'ai')) throw new Error('Approved lesson and version must match the module.');
+}
+/** Fallback remains the exact source-only server draft; any admin edit uses manual validation. */
+export function validApprovedLesson(lesson: GeneratedModule, input: ModuleLessonPromptInput, provenance: 'ai' | 'fallback' | 'manual'): boolean {
+  try { verifyInput(input); } catch { return false; }
+  if (lesson.localId !== input.module.moduleLocalId || lesson.frameKey !== input.module.frameKey || JSON.stringify(lesson.featureIds) !== JSON.stringify(input.module.featureIds)) return false;
+  if (provenance === 'fallback') {
+    const fallback = buildFallbackLesson({ outline: input.module, sections: input.sections });
+    const errors: ValidationError[] = [];
+    text(lesson.title, 'root.title', errors, 80);
+    if (typeof lesson.description !== 'string' || lesson.description.length > 500) return false;
+    if (!Number.isFinite(lesson.estimatedMinutes) || lesson.estimatedMinutes <= 0) return false;
+    const objectives = stringArray(lesson.objectives, 'root.objectives', errors);
+    if (objectives.length > 4) return false;
+    parseBlocks(lesson.blocks, 'root', errors, new Set([input.module.moduleLocalId]));
+    return !errors.length && fallback.kind === 'draft' && JSON.stringify(lesson) === JSON.stringify(fallback.module);
+  }
+  return validateModuleLessonOutput({ title: lesson.title, description: lesson.description, estimatedMinutes: lesson.estimatedMinutes, objectives: lesson.objectives, blocks: lesson.blocks, flags: [] }, input).ok;
 }
 export function buildModuleQuestionPrompt(input: ModuleQuestionPromptInput): AiPromptRequest {
   verifyLesson(input);

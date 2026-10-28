@@ -3,6 +3,10 @@ import { createHash } from 'node:crypto';
 import type { OnboardingActor } from '../auth';
 import type {
   AiCallRecord,
+  AiModuleDraftRun,
+  AiPipelineVersion,
+  OutlineEdit,
+  TemplateOutline,
   AiJobRecord,
   AiProvider,
   EmployeeType,
@@ -12,16 +16,21 @@ import type {
 } from '../contracts';
 import type { OnboardingStore, StoreRecord } from '../store';
 import { createTemplateService } from '../templates';
-import { groundSourceRef, type RawSourceRef } from './grounding';
+import { groundSourceRef, normalizeForMatch, type RawSourceRef } from './grounding';
 import {
   mergeInventoryChunks,
   validateInventoryChunk,
   validateRoleProfile,
   type InventoryChunk,
+  type FeatureInventory,
 } from './inventory';
 import { AI_GENERATION_LIMITS } from './limits';
 import { sanitizeAiDiagnosticText } from './diagnostics';
 import { materializeAiTemplate } from './materialize';
+import { buildTemplateOutline, applyTemplateOutlineEdits, validateTemplateOutline } from './outline';
+import { buildFallbackLesson } from './fallback-lessons';
+import { buildModuleLessonPrompt, buildModuleQuestionPrompt, validateModuleLessonOutput, validateModuleQuestionOutput, validApprovedLesson, type ModuleLessonPromptInput } from './module-draft';
+import { createModuleRuns, reconcileModuleRuns, invalidateModule, updateLesson, approveLesson, updateQuestions, approveQuestions, retryModuleRun, lessonApproved, modulesComplete } from './module-lifecycle';
 import { parseAiJsonObject } from './parse';
 import {
   PROMPT_VERSION,
@@ -35,9 +44,13 @@ import {
   type AiPromptRequest,
 } from './prompts';
 import {
+  NORMAL_FRAMES,
+  ADVANCED_FRAMES,
   removeQuestionsBlockedByFlags,
   validateGeneratedTemplate,
   type GeneratedTemplate,
+  type GeneratedModule,
+  type GeneratedQuestion,
   type GeneratedTemplateValidation,
   type ValidationError,
 } from './validate';
@@ -324,10 +337,18 @@ export type AiJobNextStep =
     readonly startedAt?: string;
   }
   | { readonly kind: 'wait'; readonly job: AiJobRecord }
+  | { readonly kind: 'awaiting_admin'; readonly job: AiJobRecord }
   | { readonly kind: 'done'; readonly job: AiJobRecord }
   | { readonly kind: 'failed'; readonly job: AiJobRecord };
 
 export interface AiJobService {
+  updateOutline(actor: OnboardingActor, input: OutlineVersionInput & { readonly edits: readonly OutlineEdit[] }): Promise<AiJobRecord>;
+  approveOutline(actor: OnboardingActor, input: OutlineVersionInput): Promise<AiJobRecord>;
+  updateModuleLesson(actor: OnboardingActor, input: ModuleVersionInput & { readonly module: GeneratedModule }): Promise<AiJobRecord>;
+  approveModuleLesson(actor: OnboardingActor, input: ModuleVersionInput): Promise<AiJobRecord>;
+  updateModuleQuestions(actor: OnboardingActor, input: ModuleVersionInput & { readonly questions: readonly GeneratedQuestion[] }): Promise<AiJobRecord>;
+  approveModuleQuestions(actor: OnboardingActor, input: ModuleVersionInput): Promise<AiJobRecord>;
+  retryModule(actor: OnboardingActor, input: ModuleInput & { readonly target: 'lesson' | 'questions' }): Promise<AiJobRecord>;
   startJob(actor: OnboardingActor, input: StartAiJobInput): Promise<AiJobRecord>;
   listJobs(actor: OnboardingActor): Promise<readonly AiJobRecord[]>;
   getJob(actor: OnboardingActor, jobId: string): Promise<AiJobRecord>;
@@ -343,7 +364,15 @@ export interface AiJobService {
   ): Promise<AiJobRecord>;
 }
 
+export interface OutlineVersionInput { readonly jobId: string; readonly expectedRevision: number; }
+export interface ModuleInput { readonly jobId: string; readonly moduleLocalId: string; }
+export interface ModuleVersionInput extends ModuleInput { readonly expectedVersion: number; }
+
 interface AiJobDbData extends StoreRecord {
+  readonly pipelineVersion?: AiPipelineVersion;
+  readonly outline?: TemplateOutline;
+  readonly outlineApprovedRevision?: number;
+  readonly moduleRuns?: readonly AiModuleDraftRun[];
   readonly jobId: string;
   readonly kind: 'inventory' | 'template';
   readonly status: 'running' | 'completed' | 'failed' | 'cancelled';
@@ -440,6 +469,10 @@ function sourceFrom(row: SourceDbRecord, roomId: string): SourceRecord {
 
 function jobFrom(row: AiJobDbRecord, roomId: string): AiJobRecord {
   return {
+    ...(row.pipelineVersion ? { pipelineVersion: row.pipelineVersion } : {}),
+    ...(row.outline ? { outline: row.outline } : {}),
+    ...(row.outlineApprovedRevision === undefined ? {} : { outlineApprovedRevision: row.outlineApprovedRevision }),
+    ...(row.moduleRuns ? { moduleRuns: row.moduleRuns } : {}),
     id: row.id,
     roomId,
     jobId: row.jobId,
@@ -754,7 +787,7 @@ export function createAiJobService(
       actor.roomId,
       'onboarding_ai_jobs',
       row.id,
-      { ...data, updatedAt: now() },
+      { ...data, updatedAt: new Date(Math.max(Date.parse(now()), Date.parse(row.updatedAt) + 1)).toISOString() },
       { expectedUpdatedAt: row.updatedAt },
     );
   }
@@ -779,6 +812,13 @@ export function createAiJobService(
     job: AiJobDbRecord,
     call: AiCallRecord,
   ): Promise<AiPromptRequest> {
+    if (job.kind === 'template' && job.pipelineVersion === 'module_v2') {
+      const run = moduleForCall(job, call);
+      const input = (await moduleContext(actor, job, run)).input;
+      return call.moduleTarget === 'questions'
+        ? buildModuleQuestionPrompt({ ...input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance })
+        : buildModuleLessonPrompt(input);
+    }
     if (job.kind === 'inventory') {
       const sources = await loadSources(actor.roomId, job.sourceIds ?? []);
       const plan = job.stageOutputs.__plan as {
@@ -1228,6 +1268,7 @@ export function createAiJobService(
     row: AiJobDbRecord,
     call: AiCallRecord,
   ): Promise<AiJobDbRecord> {
+    if (row.kind === 'template' && row.pipelineVersion === 'module_v2') return processModuleOutput(actor, row, call);
     return row.kind === 'inventory'
       ? processInventory(actor, row, call)
       : processTemplate(actor, row, call);
@@ -1246,6 +1287,156 @@ export function createAiJobService(
   ): Promise<AiJobDbRecord> {
     const leaseUntil = new Date(Date.parse(now()) + AI_GENERATION_LIMITS.pumpLeaseMs).toISOString();
     return updateJob(actor, row, { pumpedBy: workerId, pumpLeaseUntil: leaseUntil });
+  }
+
+  function replaceRun(row: AiJobDbRecord, run: AiModuleDraftRun): readonly AiModuleDraftRun[] {
+    return row.moduleRuns!.map((item) => item.outline.moduleLocalId === run.outline.moduleLocalId ? run : item);
+  }
+  function moduleForCall(row: AiJobDbRecord, call: AiCallRecord): AiModuleDraftRun {
+    const run = row.moduleRuns?.find((item) => item.outline.moduleLocalId === call.moduleLocalId && !item.outline.tombstoned);
+    if (!run || !row.outline || row.outlineApprovedRevision !== row.outline.revision || call.outlineRevision !== row.outline.revision || call.moduleVersion !== (call.moduleTarget === 'lesson' ? run.lessonVersion : run.questionVersion) || (call.moduleTarget === 'questions' && (!lessonApproved(run) || call.lessonVersion !== run.lessonVersion))) {
+      throw new AiJobServiceError('JOB_CALL_MISMATCH', 'The module call no longer matches the approved revision.');
+    }
+    return run;
+  }
+  async function moduleContext(actor: OnboardingActor, row: AiJobDbRecord, run: AiModuleDraftRun): Promise<{ input: ModuleLessonPromptInput; fingerprint: string; usable: boolean }> {
+    const sources = await Promise.all((row.sourceIds ?? []).map((id) => sourceById(actor.roomId, id)));
+    const records = sources.filter((s): s is SourceRecord => !!s && s.status === 'ready' && !s.deletedAt);
+    const ids = run.outline.sourceSectionIds;
+    const matches = ids.map((id) => records.flatMap((source) => (source.sections ?? []).filter((s) => s.id === id).map((section) => ({ section, checksum: source.checksum, sourceId: source.sourceId }))));
+    const usable = ids.length > 0 && ids.every((id) => id.trim()) && new Set(ids).size === ids.length && matches.every((items) => items.length === 1 && items[0].section.text.trim().length >= AI_GENERATION_LIMITS.minQuoteChars && /[\p{L}\p{N}]/u.test(normalizeForMatch(items[0].section.text)));
+    const sections = usable ? matches.map((items) => items[0].section) : [];
+    const inventory = row.stageOutputs.__inventory as FeatureInventory;
+    return { input: { module: run.outline, sections, features: inventory.features, responsibilities: row.roleProfile?.responsibilities ?? [], templateKind: row.templateKind ?? 'normal' }, fingerprint: stableHash(matches), usable };
+  }
+  function obsoleteCalls(row: AiJobDbRecord, ids: ReadonlySet<string>): readonly AiCallRecord[] {
+    return row.calls.map((call) => call.moduleLocalId && ids.has(call.moduleLocalId) && (['pending', 'dispatched'].includes(call.status) || (call.status === 'completed' && row.stageOutputs['processed:' + call.callId] !== true))
+      ? { ...call, status: 'failed', errors: ['Module revision superseded.'], ...(call.attemptRef ? { cleanupState: 'pending', cleanupUpdatedAt: now() } as const : {}) }
+      : call);
+  }
+  function leaseAfterChanges(calls: readonly AiCallRecord[]): StoreRecord {
+    return calls.some((call) => call.status === 'pending' || call.status === 'dispatched') ? {} : RELEASED_LEASE;
+  }
+  async function syncModuleSources(actor: OnboardingActor, row: AiJobDbRecord): Promise<AiJobDbRecord> {
+    const changed = new Set<string>();
+    const runs = await Promise.all(row.moduleRuns!.map(async (run) => {
+      if (run.outline.tombstoned) return run;
+      const { fingerprint } = await moduleContext(actor, row, run);
+      if (run.sourceFingerprint === fingerprint) return run;
+      if (run.sourceFingerprint !== undefined) changed.add(run.outline.moduleLocalId);
+      return { ...(run.sourceFingerprint === undefined ? run : invalidateModule(run)), sourceFingerprint: fingerprint };
+    }));
+    if (JSON.stringify(runs) === JSON.stringify(row.moduleRuns)) return row;
+    const calls = obsoleteCalls(row, changed);
+    return updateJob(actor, row, { moduleRuns: runs, ...(changed.size ? { calls, status: 'running', result: null, ...leaseAfterChanges(calls) } : {}) });
+  }
+  async function requireModuleJob(actor: OnboardingActor, jobId: string): Promise<AiJobDbRecord> {
+    requireAdmin(actor);
+    const row = await requireOwnedJob(actor, jobId);
+    if (row.pipelineVersion !== 'module_v2' || row.kind !== 'template' || !row.outline || !row.moduleRuns || row.status === 'cancelled' || row.status === 'failed') throw new AiJobServiceError('JOB_NOT_RUNNING', 'A current module job is required.');
+    return syncModuleSources(actor, row);
+  }
+  function requireRun(row: AiJobDbRecord, moduleLocalId: string): AiModuleDraftRun {
+    const run = row.moduleRuns!.find((r) => r.outline.moduleLocalId === moduleLocalId && !r.outline.tombstoned);
+    if (!run) throw new AiJobServiceError('OPERATION_CONFLICT', 'Active module not found.');
+    if (row.outlineApprovedRevision !== row.outline!.revision) throw new AiJobServiceError('OPERATION_CONFLICT', 'Approve the current outline first.');
+    return run;
+  }
+  async function saveRun(actor: OnboardingActor, row: AiJobDbRecord, run: AiModuleDraftRun, audit?: StoreRecord): Promise<AiJobRecord> {
+    const history = (row.stageOutputs.__moduleAudit ?? []) as readonly StoreRecord[];
+    const calls = obsoleteCalls(row, new Set([run.outline.moduleLocalId]));
+    return jobFrom(await updateJob(actor, row, { moduleRuns: replaceRun(row, run), calls, status: 'running', result: null,
+      ...(audit ? { stageOutputs: { ...row.stageOutputs, __moduleAudit: [...history, { ...audit, moduleLocalId: run.outline.moduleLocalId, outlineRevision: run.outlineRevision, sourceFingerprint: run.sourceFingerprint, approvedBy: actor.userId, approvedAt: now() }] } } : {}), ...leaseAfterChanges(calls) }), actor.roomId);
+  }
+  function assertOutlineRevision(row: AiJobDbRecord, revision: number): void {
+    if (row.outline!.revision !== revision || !Number.isSafeInteger(revision)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Outline revision conflict.');
+  }
+  function validateOutline(row: AiJobDbRecord, outline: TemplateOutline): void {
+    // Admin reorder is explicit; IDs, frames and contiguous order remain server owned.
+    const frames: readonly string[] = row.templateKind === 'advanced' ? ADVANCED_FRAMES : NORMAL_FRAMES;
+    if (outline.modules.filter((module) => !module.tombstoned).some((module, order) => !frames.includes(module.frameKey) || module.order !== order)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Outline frames and order must be server owned.');
+    const strings = (value: unknown): value is readonly string[] => Array.isArray(value) && value.every((item) => typeof item === 'string');
+    if (outline.modules.some((module) =>
+      typeof module.title !== 'string' || !module.title.trim() || module.title.length > 80
+      || typeof module.description !== 'string' || module.description.length > 500
+      || !Number.isFinite(module.estimatedMinutes) || module.estimatedMinutes <= 0
+      || !strings(module.objectives) || module.objectives.length > 4 || module.objectives.some((item) => !item.trim())
+      || !strings(module.featureIds) || module.featureIds.some((id) => !id.trim())
+      || !strings(module.sourceSectionIds) || !Array.isArray(module.responsibilityIndexes))) {
+      throw new AiJobServiceError('OPERATION_CONFLICT', 'Outline metadata is invalid.');
+    }
+    const errors = validateTemplateOutline(outline, { templateKind: row.templateKind ?? 'normal', responsibilities: row.roleProfile?.responsibilities ?? [] }).filter((error) => error.code !== 'FRAME_ORDER');
+    if (errors.length) throw new AiJobServiceError('OPERATION_CONFLICT', errors.map((error) => error.message).join(' '));
+  }
+  async function fallbackRun(actor: OnboardingActor, row: AiJobDbRecord, run: AiModuleDraftRun): Promise<AiModuleDraftRun> {
+    const context = await moduleContext(actor, row, run);
+    const fallback = buildFallbackLesson({ outline: run.outline, sections: context.usable ? context.input.sections : [] });
+    return fallback.kind === 'draft'
+      ? updateLesson(run, run.lessonVersion, fallback.module, 'fallback')
+      : { ...invalidateModule(run), lessonState: 'manual_required', questionState: 'blocked', lessonDraft: undefined, lessonProvenance: undefined };
+  }
+  async function processModuleOutput(actor: OnboardingActor, row: AiJobDbRecord, call: AiCallRecord): Promise<AiJobDbRecord> {
+    const run = moduleForCall(row, call);
+    const context = await moduleContext(actor, row, run);
+    if (context.fingerprint !== run.sourceFingerprint) return syncModuleSources(actor, row);
+    let next: AiModuleDraftRun;
+    let errors: readonly string[] = [];
+    try {
+      const raw = parseAiJsonObject(rawOutput(row.stageOutputs, call.callId) ?? '');
+      if (call.moduleTarget === 'lesson') {
+        const validated = validateModuleLessonOutput(raw, context.input);
+        if (!validated.ok) throw validated;
+        next = { ...updateLesson(run, run.lessonVersion, validated.value.module, 'ai'), lessonFlags: validated.value.flags };
+      } else {
+        const validated = validateModuleQuestionOutput(raw, { ...context.input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance });
+        if (!validated.ok) throw validated;
+        next = { ...updateQuestions(run, run.questionVersion, validated.value.questions), questionFlags: validated.value.flags };
+      }
+    } catch (error) {
+      errors = validationMessages(error);
+      next = call.moduleTarget === 'lesson' ? await fallbackRun(actor, row, run) : { ...run, questionState: 'failed' };
+    }
+    return updateJob(actor, row, { moduleRuns: replaceRun(row, next), calls: row.calls.map((item) => item.callId === call.callId ? { ...item, status: errors.length ? 'invalid' : 'completed', ...(errors.length ? { errors } : {}) } : item), stageOutputs: { ...row.stageOutputs, ['processed:' + call.callId]: true }, ...RELEASED_LEASE });
+  }
+  async function nextModuleStep(actor: OnboardingActor, initial: AiJobDbRecord, workerId: string): Promise<AiJobNextStep> {
+    let row = await syncModuleSources(actor, initial);
+    if (row.outlineApprovedRevision !== row.outline!.revision) return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
+    const completed = row.calls.find((call) => call.status === 'completed' && rawOutput(row.stageOutputs, call.callId) !== undefined && row.stageOutputs['processed:' + call.callId] !== true);
+    if (completed) row = await processModuleOutput(actor, row, completed);
+    if (row.pumpLeaseUntil && Date.parse(row.pumpLeaseUntil) >= Date.parse(now()) && row.pumpedBy !== workerId) return { kind: 'wait', job: jobFrom(row, actor.roomId) };
+    let call = row.calls.find((item) => item.status === 'pending' || item.status === 'dispatched');
+    if (!call) {
+      for (const run of row.moduleRuns!.filter((item) => !item.outline.tombstoned).sort((a, b) => a.outline.order - b.outline.order)) {
+        const target = ['queued', 'stale'].includes(run.lessonState) ? 'lesson' : lessonApproved(run) && run.questionState === 'queued' ? 'questions' : undefined;
+        if (!target) continue;
+        const context = await moduleContext(actor, row, run);
+        if (!context.usable) {
+          row = await updateJob(actor, row, { moduleRuns: replaceRun(row, await fallbackRun(actor, row, run)) });
+          continue;
+        }
+        const callId = 'module-' + String(row.calls.length + 1);
+        call = { callId, stage: row.templateKind === 'advanced' ? 'C' : 'B', status: 'pending', operationId: row.jobId + ':' + callId, moduleLocalId: run.outline.moduleLocalId, moduleTarget: target, moduleVersion: target === 'lesson' ? run.lessonVersion : run.questionVersion, lessonVersion: run.lessonVersion, outlineRevision: row.outline!.revision };
+        const next: AiModuleDraftRun = target === 'lesson' ? { ...run, lessonState: 'drafting', lessonAttempts: (run.lessonAttempts ?? 0) + 1 } : { ...run, questionState: 'drafting', questionAttempts: (run.questionAttempts ?? 0) + 1 };
+        row = await updateJob(actor, row, { calls: [...row.calls, call], moduleRuns: replaceRun(row, next) });
+        break;
+      }
+    }
+    if (!call) {
+      if (modulesComplete(row.moduleRuns!)) {
+        if (row.status !== 'completed') row = await updateJob(actor, row, { status: 'completed', ...RELEASED_LEASE });
+        return { kind: 'done', job: jobFrom(row, actor.roomId) };
+      }
+      return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
+    }
+    let request: AiPromptRequest;
+    try { request = await promptFor(actor, row, call); }
+    catch (error) {
+      const run = moduleForCall(row, call);
+      row = await updateJob(actor, row, { calls: row.calls.map((item) => item.callId === call!.callId ? { ...item, status: 'failed', errors: validationMessages(error) } : item), moduleRuns: replaceRun(row, call.moduleTarget === 'lesson' ? await fallbackRun(actor, row, run) : { ...run, questionState: 'failed' }), ...RELEASED_LEASE });
+      return nextModuleStep(actor, row, workerId);
+    }
+    row = await refreshLease(actor, row, workerId);
+    return { kind: 'ai_call', callId: call.callId, operationId: call.operationId, ...request, ...(call.attemptRef ? { attemptRef: call.attemptRef, provider: callProvider(call), startedAt: call.startedAt } : {}) };
   }
 
   return {
@@ -1286,6 +1477,7 @@ export function createAiJobService(
           };
         });
         data = {
+          pipelineVersion: 'module_v2',
           jobId,
           kind: 'inventory',
           status: 'running',
@@ -1319,9 +1511,9 @@ export function createAiJobService(
         ) {
           throw new AiJobServiceError('ROLE_PROFILE_INVALID', 'Advanced role profile is invalid.');
         }
-        const prefix = input.templateKind === 'advanced' ? 'C' : 'B';
-        const callId = prefix + '-lessons';
+        const outline = buildTemplateOutline({ jobId, templateKind: input.templateKind, inventory: inventoryJob.result as FeatureInventory, responsibilities: input.roleProfile?.responsibilities ?? [] });
         data = {
+          pipelineVersion: 'module_v2', outline, moduleRuns: createModuleRuns(outline),
           jobId,
           kind: 'template',
           status: 'running',
@@ -1331,16 +1523,10 @@ export function createAiJobService(
           sourceIds: inventoryJob.sourceIds,
           inventoryJobId: inventoryJob.jobId,
           promptVersion: PROMPT_VERSION,
-          calls: [{
-            callId,
-            stage: input.templateKind === 'advanced' ? 'C' : 'B',
-            operationId: jobId + ':' + callId,
-            status: 'pending',
-          }],
+          calls: [],
           stageOutputs: {
             __requestHash: requestHash,
             __inventory: inventoryJob.result,
-            __repairMode: MODULE_REPAIR_MODE,
           },
           operationId,
           createdBy: actor.userId,
@@ -1370,6 +1556,58 @@ export function createAiJobService(
       }
     },
 
+    async updateOutline(actor, input) {
+      const row = await requireModuleJob(actor, input.jobId);
+      assertOutlineRevision(row, input.expectedRevision);
+      if (!Array.isArray(input.edits) || input.edits.some((edit) => !edit || !['add', 'delete', 'reorder', 'update'].includes(edit.type))) throw new AiJobServiceError('OPERATION_CONFLICT', 'Outline edit type is invalid.');
+      const outline = applyTemplateOutlineEdits(row.outline!, input.edits, (frame) => 'outline-' + stableHash([row.jobId, row.outline!.revision + 1, frame]));
+      validateOutline(row, outline);
+      const runs = reconcileModuleRuns(row.moduleRuns!, outline).map((run): AiModuleDraftRun => ({ ...run, ...(run.lessonState === 'drafting' ? { lessonState: 'queued' } : {}), ...(run.questionState === 'drafting' ? { questionState: 'queued' } : {}) }));
+      return jobFrom(await updateJob(actor, row, { outline, outlineApprovedRevision: 0, moduleRuns: runs, calls: obsoleteCalls(row, new Set(row.moduleRuns!.map((run) => run.outline.moduleLocalId))), status: 'running', result: null, ...RELEASED_LEASE }), actor.roomId);
+    },
+    async approveOutline(actor, input) {
+      const row = await requireModuleJob(actor, input.jobId);
+      assertOutlineRevision(row, input.expectedRevision);
+      validateOutline(row, row.outline!);
+      const history = (row.stageOutputs.__outlineAudit ?? []) as readonly unknown[];
+      return jobFrom(await updateJob(actor, row, { outlineApprovedRevision: input.expectedRevision, stageOutputs: { ...row.stageOutputs, __outlineAudit: [...history, { outline: row.outline, approvedBy: actor.userId, approvedAt: now() }] } }), actor.roomId);
+    },
+    async updateModuleLesson(actor, input) {
+      const row = await requireModuleJob(actor, input.jobId);
+      const run = requireRun(row, input.moduleLocalId);
+      const context = await moduleContext(actor, row, run);
+      if (!validApprovedLesson(input.module, context.input, 'manual')) throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Manual lesson is invalid or ungrounded.');
+      return saveRun(actor, row, updateLesson(run, input.expectedVersion, input.module, 'manual'));
+    },
+    async approveModuleLesson(actor, input) {
+      const row = await requireModuleJob(actor, input.jobId);
+      const run = requireRun(row, input.moduleLocalId);
+      const next = approveLesson(run, input.expectedVersion);
+      if (!validApprovedLesson(next.lessonDraft!, (await moduleContext(actor, row, run)).input, next.lessonProvenance!)) throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Lesson is invalid or ungrounded.');
+      return saveRun(actor, row, next, { target: 'lesson', version: next.lessonVersion, module: next.lessonDraft, provenance: next.lessonProvenance, flags: next.lessonFlags ?? [] });
+    },
+    async updateModuleQuestions(actor, input) {
+      const row = await requireModuleJob(actor, input.jobId);
+      const run = requireRun(row, input.moduleLocalId);
+      const next = updateQuestions(run, input.expectedVersion, input.questions);
+      const validation = validateModuleQuestionOutput({ questions: input.questions, flags: [] }, { ...(await moduleContext(actor, row, run)).input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance });
+      if (!validation.ok) throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Questions are invalid or ungrounded.');
+      return saveRun(actor, row, next);
+    },
+    async approveModuleQuestions(actor, input) {
+      const row = await requireModuleJob(actor, input.jobId);
+      const run = requireRun(row, input.moduleLocalId);
+      const next = approveQuestions(run, input.expectedVersion);
+      const validation = validateModuleQuestionOutput({ questions: next.questionDraft, flags: next.questionFlags ?? [] }, { ...(await moduleContext(actor, row, run)).input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance });
+      if (!validation.ok) throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Questions are invalid or ungrounded.');
+      return saveRun(actor, row, next, { target: 'questions', version: next.questionVersion, lessonVersion: next.lessonVersion, questions: next.questionDraft, flags: next.questionFlags ?? [] });
+    },
+    async retryModule(actor, input) {
+      const row = await requireModuleJob(actor, input.jobId);
+      if (input.target !== 'lesson' && input.target !== 'questions') throw new AiJobServiceError('OPERATION_CONFLICT', 'Retry target is invalid.');
+      return saveRun(actor, row, retryModuleRun(requireRun(row, input.moduleLocalId), input.target));
+    },
+
     async getJob(actor, jobId) {
       requireAdmin(actor);
       return jobFrom(await requireJob(actor, jobId), actor.roomId);
@@ -1395,12 +1633,14 @@ export function createAiJobService(
       requireAdmin(actor);
       const workerId = required(input.workerId, 'Worker ID');
       let row = await requireOwnedJob(actor, input.jobId);
+      if (row.pipelineVersion === 'module_v2' && row.kind === 'template' && !['cancelled', 'failed'].includes(row.status)) return nextModuleStep(actor, row, workerId);
       if (row.status === 'completed' || row.status === 'cancelled') {
         return { kind: 'done', job: jobFrom(row, actor.roomId) };
       }
       if (row.status === 'failed') {
         return { kind: 'failed', job: jobFrom(row, actor.roomId) };
       }
+
 
       const completed = [...row.calls].reverse().find((call) =>
         call.status === 'completed'
@@ -1541,6 +1781,7 @@ export function createAiJobService(
         startedAt: candidate.startedAt ?? now(),
         finishedAt: now(),
       } : candidate);
+      if (row.pipelineVersion === 'module_v2' && row.kind === 'template') moduleForCall(row, current);
       row = await updateJob(actor, row, {
         calls,
         stageOutputs: {
@@ -1596,6 +1837,11 @@ export function createAiJobService(
           ? { cleanupState: 'pending' as const, cleanupUpdatedAt: now() }
           : {}),
       } : candidate);
+      if (row.pipelineVersion === 'module_v2' && row.kind === 'template') {
+        const run = moduleForCall(row, current);
+        const next = current.moduleTarget === 'lesson' ? await fallbackRun(actor, row, run) : { ...run, questionState: 'failed' as const };
+        return jobFrom(await updateJob(actor, row, { calls, moduleRuns: replaceRun(row, next), ...RELEASED_LEASE }), actor.roomId);
+      }
       return jobFrom(await updateJob(actor, row, {
         calls,
         status: 'failed',

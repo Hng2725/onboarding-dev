@@ -3,6 +3,15 @@ import { describe, expect, it } from 'vitest';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 
 describe('AI in-memory store parity', () => {
+  it('rejects stale atomic updates and deeply round-trips module snapshots as JSON', async () => {
+    const store = new MemoryOnboardingStore();
+    const data = { updatedAt: 'v1', moduleRuns: [{ lessonVersion: 1 }] };
+    const row = await store.create('room-a', 'onboarding_ai_jobs', data);
+    data.moduleRuns[0].lessonVersion = 99;
+    expect((await store.get('room-a', 'onboarding_ai_jobs', String(row.id)))?.moduleRuns).toEqual([{ lessonVersion: 1 }]);
+    await store.update('room-a', 'onboarding_ai_jobs', String(row.id), { updatedAt: 'v2' }, { expectedUpdatedAt: 'v1' });
+    await expect(store.update('room-a', 'onboarding_ai_jobs', String(row.id), { updatedAt: 'v3' }, { expectedUpdatedAt: 'v1' })).rejects.toThrow();
+  });
   it('isolates new collection rows by room', async () => {
     const store = new MemoryOnboardingStore();
     await store.create('room-a', 'onboarding_sources', { sourceId: 'source-1', checksum: 'a' });

@@ -11,7 +11,9 @@ import {
   type EmployeeType,
   type FinalConclusion,
   type ModuleQuizAnswerInput,
+  type OutlineEdit,
 } from './contracts';
+import type { GeneratedModule, GeneratedQuestion } from './ai/validate';
 import {
   createAiJobService,
   type AiJobService,
@@ -55,6 +57,7 @@ const ACTIONS: Readonly<Record<OnboardingDataToolName, readonly string[]>> = {
   onboarding_bootstrap: ['load'],
   onboarding_admin_templates: ['list', 'get', 'update', 'publish', 'archive', 'delete'],
   onboarding_admin_ai: [
+    'update_outline', 'approve_outline', 'update_module_lesson', 'approve_module_lesson', 'update_module_questions', 'approve_module_questions', 'retry_module',
     'list_sources', 'ingest_source', 'add_admin_note', 'delete_source', 'get_source_section',
     'start_job', 'list_jobs', 'get_job', 'next_step', 'record_dispatch', 'submit_ai_output',
     'report_ai_failure', 'retry_job', 'cancel_job', 'record_attempt_cleanup',
@@ -479,6 +482,29 @@ async function dispatchAdminAi(
       return { job: await services.aiJobs.startJob(actor, input as StartAiJobInput) };
     }
     case 'list_jobs': return { jobs: await services.aiJobs.listJobs(actor) };
+    case 'update_outline': return { job: await services.aiJobs.updateOutline(actor, {
+      jobId: requiredString(args, 'jobId'), expectedRevision: requiredNumber(args, 'expectedRevision'), edits: requiredArray<OutlineEdit>(args, 'edits'),
+    }) };
+    case 'approve_outline': return { job: await services.aiJobs.approveOutline(actor, {
+      jobId: requiredString(args, 'jobId'), expectedRevision: requiredNumber(args, 'expectedRevision'),
+    }) };
+    case 'update_module_lesson': return { job: await services.aiJobs.updateModuleLesson(actor, {
+      jobId: requiredString(args, 'jobId'), moduleLocalId: requiredString(args, 'moduleLocalId'), expectedVersion: requiredNumber(args, 'expectedVersion'), module: requiredObject<GeneratedModule>(args, 'module'),
+    }) };
+    case 'approve_module_lesson': return { job: await services.aiJobs.approveModuleLesson(actor, {
+      jobId: requiredString(args, 'jobId'), moduleLocalId: requiredString(args, 'moduleLocalId'), expectedVersion: requiredNumber(args, 'expectedVersion'),
+    }) };
+    case 'update_module_questions': return { job: await services.aiJobs.updateModuleQuestions(actor, {
+      jobId: requiredString(args, 'jobId'), moduleLocalId: requiredString(args, 'moduleLocalId'), expectedVersion: requiredNumber(args, 'expectedVersion'), questions: requiredArray<GeneratedQuestion>(args, 'questions'),
+    }) };
+    case 'approve_module_questions': return { job: await services.aiJobs.approveModuleQuestions(actor, {
+      jobId: requiredString(args, 'jobId'), moduleLocalId: requiredString(args, 'moduleLocalId'), expectedVersion: requiredNumber(args, 'expectedVersion'),
+    }) };
+    case 'retry_module': {
+      const target = requiredString(args, 'target');
+      if (target !== 'lesson' && target !== 'questions') throw toolError('ARGUMENT_INVALID', 'target must be lesson or questions.');
+      return { job: await services.aiJobs.retryModule(actor, { jobId: requiredString(args, 'jobId'), moduleLocalId: requiredString(args, 'moduleLocalId'), target }) };
+    }
     case 'get_job': return { job: await services.aiJobs.getJob(actor, requiredString(args, 'jobId')) };
     case 'next_step': return services.aiJobs.nextStep(actor, {
       jobId: requiredString(args, 'jobId'),

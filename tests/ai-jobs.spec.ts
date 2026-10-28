@@ -6,6 +6,8 @@ import {
   buildVerificationClaims,
   createAiJobService,
   parseVerificationVerdicts,
+  type AiJobService,
+  type StartTemplateJobInput,
 } from '../src/onboarding/ai/jobs';
 import { AI_GENERATION_LIMITS } from '../src/onboarding/ai/limits';
 import { createTemplateService } from '../src/onboarding/templates';
@@ -15,6 +17,23 @@ import { generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
 const admin: OnboardingActor = { userId: 'admin-1', roomId: 'room-a', access: 'admin' };
 const otherAdmin: OnboardingActor = { userId: 'admin-2', roomId: 'room-b', access: 'admin' };
 const learner: OnboardingActor = { userId: 'member-1', roomId: 'room-a', access: 'learner' };
+
+/** Existing persisted jobs exercise the legacy pipeline; new starts are always module_v2. */
+async function seedLegacyTemplate(store: MemoryOnboardingStore, service: AiJobService, input: StartTemplateJobInput) {
+  const inventory = await service.getJob(admin, input.inventoryJobId);
+  const jobId = 'legacy-' + input.operationId;
+  const callId = input.templateKind === 'advanced' ? 'C-lessons' : 'B-lessons';
+  await store.create(admin.roomId, 'onboarding_ai_jobs', {
+    ...input, jobId, status: 'running', sourceIds: inventory.sourceIds,
+    promptVersion: '2026-10-23.1', calls: [{ callId, stage: input.templateKind === 'advanced' ? 'C' : 'B', operationId: jobId + ':' + callId, status: 'pending' }],
+    stageOutputs: { __inventory: inventory.result, __repairMode: 'module' }, createdBy: admin.userId,
+    createdAt: '2026-10-23T08:00:00.000Z', updatedAt: '2026-10-23T08:00:00.000Z',
+  });
+  const job = await service.getJob(admin, jobId);
+  expect(job.pipelineVersion).toBeUndefined();
+  expect(job.moduleRuns).toBeUndefined();
+  return job;
+}
 
 const inventoryOutput = JSON.stringify({
   systemSummary: {
@@ -164,6 +183,7 @@ describe('AI job service', () => {
     });
 
     expect(replay).toEqual(first);
+    expect(first.pipelineVersion).toBe('module_v2');
     await expect(service.getJob(otherAdmin, first.jobId)).rejects.toMatchObject({
       code: 'JOB_NOT_FOUND',
     });
@@ -700,7 +720,7 @@ describe('AI job service', () => {
     const service = createAiJobService(store, {
       now: () => '2026-10-23T09:00:00.000Z',
     });
-    const job = await service.startJob(admin, {
+    const job = await seedLegacyTemplate(store, service, {
       kind: 'template',
       inventoryJobId: 'inventory-ready',
       templateKind: 'normal',
@@ -780,7 +800,7 @@ describe('AI job service', () => {
         updatedAt: '2026-10-23T08:00:00.000Z',
       });
       const service = createAiJobService(store, { now: () => '2026-10-23T09:00:00.000Z' });
-      const job = await service.startJob(admin, {
+      const job = await seedLegacyTemplate(store, service, {
         kind: 'template',
         inventoryJobId: 'inventory-' + operationId,
         templateKind: 'normal',
@@ -971,7 +991,7 @@ describe('AI job service', () => {
     const service = createAiJobService(store, {
       now: () => '2026-10-23T09:00:00.000Z',
     });
-    const job = await service.startJob(admin, {
+    const job = await seedLegacyTemplate(store, service, {
       kind: 'template',
       inventoryJobId: 'inventory-question-repair',
       templateKind: 'normal',
@@ -1073,7 +1093,7 @@ describe('AI job service', () => {
       updatedAt: '2026-10-23T08:00:00.000Z',
     });
     const service = createAiJobService(store, { now: () => '2026-10-23T09:00:00.000Z' });
-    const job = await service.startJob(admin, {
+    const job = await seedLegacyTemplate(store, service, {
       kind: 'template',
       inventoryJobId: 'inventory-verify',
       templateKind: 'normal',

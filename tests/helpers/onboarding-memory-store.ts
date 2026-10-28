@@ -7,6 +7,8 @@ import type {
 } from '../../src/onboarding/store';
 import { ONBOARDING_COLLECTIONS } from '../../src/onboarding/schema';
 
+function jsonCopy<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
+
 export class MemoryOnboardingStore implements OnboardingStore {
   private sequence = 0;
   private readonly rows = new Map<string, Map<string, StoreRecord>>();
@@ -51,15 +53,15 @@ export class MemoryOnboardingStore implements OnboardingStore {
     data: StoreRecord,
   ): Promise<T> {
     const id = `db-${++this.sequence}`;
-    const row = { ...data, id };
+    const row = jsonCopy({ ...data, id });
     this.assertUnique(roomId, collection, row);
     this.table(roomId, collection).set(id, row);
-    return row as T;
+    return jsonCopy(row) as T;
   }
 
   async get<T extends StoreRecord>(roomId: string, collection: string, id: string): Promise<T | null> {
     const row = this.table(roomId, collection).get(id);
-    return row && !row.deletedAt ? row as T : null;
+    return row && !row.deletedAt ? jsonCopy(row) as T : null;
   }
 
   async query<T extends StoreRecord>(
@@ -80,7 +82,7 @@ export class MemoryOnboardingStore implements OnboardingStore {
     const pageSize = Math.min(requestedPageSize, this.maxPageSize ?? requestedPageSize);
     const nextOffset = offset + pageSize;
     return {
-      records: records.slice(offset, nextOffset) as T[],
+      records: jsonCopy(records.slice(offset, nextOffset)) as T[],
       ...(nextOffset < records.length ? { nextCursor: String(nextOffset) } : {}),
     };
   }
@@ -90,16 +92,19 @@ export class MemoryOnboardingStore implements OnboardingStore {
     collection: string,
     id: string,
     data: StoreRecord,
-    _options?: StoreUpdateOptions,
+    options?: StoreUpdateOptions,
   ): Promise<T> {
     const current = this.table(roomId, collection).get(id);
     if (!current) throw new Error('missing record');
+    if (options?.expectedUpdatedAt !== undefined && current.updatedAt !== options.expectedUpdatedAt) {
+      throw Object.assign(new Error('Atomic update conflict'), { code: 'OPERATION_CONFLICT' });
+    }
     // The real store sends `data` as JSON, so undefined fields are dropped rather than cleared.
     const sent = Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined));
-    const row = { ...current, ...sent, id };
+    const row = jsonCopy({ ...current, ...sent, id });
     this.assertUnique(roomId, collection, row, id);
     this.table(roomId, collection).set(id, row);
-    return row as T;
+    return jsonCopy(row) as T;
   }
 
   async softDelete(roomId: string, collection: string, id: string): Promise<void> {

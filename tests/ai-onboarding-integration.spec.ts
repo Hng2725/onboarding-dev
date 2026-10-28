@@ -116,12 +116,22 @@ describe('AI onboarding integration', () => {
     });
     expect(inventory.status).toBe('completed');
 
-    const templateJob = await jobs.startJob(admin, {
+    // Continue a persisted pre-module job through its original review/publish path.
+    await store.create(admin.roomId, 'onboarding_ai_jobs', {
+      jobId: 'legacy-template-integration',
       kind: 'template',
+      pipelineVersion: 'legacy',
+      status: 'running',
       inventoryJobId: inventoryJob.jobId,
       templateKind: 'normal',
       operationId: 'template-integration',
+      sourceIds: inventory.sourceIds,
+      promptVersion: '2026-10-23.1',
+      calls: [{ callId: 'B-lessons', stage: 'B', operationId: 'legacy-template-integration:B-lessons', status: 'pending' }],
+      stageOutputs: { __inventory: inventory.result, __repairMode: 'module' },
+      createdBy: admin.userId, createdAt: now(), updatedAt: now(),
     });
+    const templateJob = await jobs.getJob(admin, 'legacy-template-integration');
     const generated = generatedWithEvidence(section.id);
     await jobs.nextStep(admin, { jobId: templateJob.jobId, workerId: 'integration-worker' });
     await jobs.submitAiOutput(admin, {

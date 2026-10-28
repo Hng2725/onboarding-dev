@@ -169,6 +169,7 @@ export const ONBOARDING_COLLECTIONS: readonly OnboardingCollectionDefinition[] =
     index('sources_checksum', ['checksum']),
   ]),
   collection('onboarding_ai_jobs', [
+    field('pipelineVersion'), field('outline', 'json'), field('outlineApprovedRevision', 'number'), field('moduleRuns', 'json'),
     field('jobId', 'string', true), field('kind', 'string', true),
     field('status', 'string', true), field('templateKind'), field('roleProfile', 'json'),
     field('title'), field('sourceIds', 'string[]'), field('inventoryJobId'),

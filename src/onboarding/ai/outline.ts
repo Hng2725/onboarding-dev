@@ -104,6 +104,11 @@ export function applyTemplateOutlineEdits(outline: TemplateOutline, edits: reado
       if (index < 0) throw new Error('Module not found.');
       const [module] = active.splice(index, 1);
       if (edit.type === 'delete') tombstones.push({ ...module, tombstoned: true });
+      else if (edit.type === 'update') {
+        const allowed = ['title', 'description', 'estimatedMinutes', 'objectives', 'featureIds', 'sourceSectionIds', 'responsibilityIndexes'];
+        if (Object.keys(edit.patch).some((key) => !allowed.includes(key))) throw new Error('Outline identity cannot change.');
+        active.splice(index, 0, { ...module, ...edit.patch });
+      }
       else active.splice(Math.max(0, Math.min(active.length, edit.order)), 0, module);
     }
   }
