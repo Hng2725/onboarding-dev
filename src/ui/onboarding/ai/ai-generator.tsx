@@ -369,7 +369,9 @@ export async function cancelRunningAiJob(
 ): Promise<{ readonly job: AiJobRecord; readonly unconfirmed: number }> {
   abort();
   let job = (await api.adminAi<{ job: AiJobRecord }>('cancel_job', { jobId })).job;
-  let unconfirmed = 0;
+  let unconfirmed = (job.calls ?? []).filter((call) => !call.attemptRef && call.cleanupState !== 'confirmed'
+    && (call.dispatchUnknown || call.cleanupState === 'pending' || call.cleanupState === 'unknown'
+      || (call.status === 'pending' && call.dispatchClaimedAt))).length;
   if (!confirmAttempt) return { job, unconfirmed };
   const live = (job.calls ?? []).filter((call) => call.attemptRef && call.cleanupState !== 'confirmed'
     && (call.status === 'dispatched' || call.cleanupState === 'pending' || call.cleanupState === 'unknown'));

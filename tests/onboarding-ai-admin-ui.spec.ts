@@ -210,6 +210,16 @@ describe('Admin AI template UI model', () => {
     expect(api.adminAi).toHaveBeenCalledWith('record_attempt_cleanup', expect.objectContaining({ attemptRef: 'attempt-timeout', state: 'confirmed' }));
   });
 
+  it('reports an unconfirmed cancellation when a dispatch claim has no provider reference yet', async () => {
+    const job = { jobId: 'job-1', status: 'cancelled', calls: [{ callId: 'A1', status: 'pending', dispatchClaimedAt: '2026-10-28T00:00:00.000Z', cleanupState: 'pending' }] };
+    const api = { adminAi: vi.fn(async () => ({ job })) };
+    const confirm = vi.fn();
+    const result = await cancelRunningAiJob(api as never, 'job-1', () => undefined, confirm);
+    expect(result.unconfirmed).toBe(1);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(api.adminAi).toHaveBeenCalledTimes(1);
+  });
+
   it('selects only the current user\'s unconfirmed Native attempts as blocking', () => {
     const jobs = [
       {
