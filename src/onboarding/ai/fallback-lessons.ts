@@ -26,7 +26,8 @@ function segments(text: string): readonly Segment[] {
   for (const rawLine of text.replace(/\r\n?/g, '\n').split('\n')) {
     const line = rawLine.trim();
     if (!line) { flush(); kind = undefined; continue; }
-    const nextKind: SegmentKind = /^(?:[-*+]\s+|\d+[.)]\s+)/u.test(line) ? 'steps' : 'concept';
+    const listItem = /^(?:[-*+]|\d+[.)])\s+(.+)$/u.exec(line);
+    const nextKind: SegmentKind = listItem && listItem[1].length <= 1_000 ? 'steps' : 'concept';
     if (kind && kind !== nextKind) flush();
     kind = nextKind;
     lines.push(line);

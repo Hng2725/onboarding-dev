@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { SourceSection, TemplateOutlineModule } from '../src/onboarding/contracts';
 import { buildFallbackLesson } from '../src/onboarding/ai/fallback-lessons';
 import { normalizeForMatch } from '../src/onboarding/ai/grounding';
+import { validateModuleLessonOutput } from '../src/onboarding/ai/module-draft';
 
 const outline: TemplateOutlineModule = {
   moduleLocalId: 'module-a', frameKey: 'core', order: 1,
@@ -69,5 +70,27 @@ describe('source-only fallback lesson', () => {
       });
       expect(JSON.stringify(result)).not.toContain('blocks');
     }
+  });
+
+  it('preserves a 1,001-character list item in a schema-valid source-only draft', () => {
+    const longItem = 'a'.repeat(1_001);
+    const selected = [{ id: 'section-a', headingPath: ['Long item'], text: '- ' + longItem }];
+    const module = { ...outline, objectives: ['First objective', 'Second objective'], sourceSectionIds: ['section-a'] };
+    const result = buildFallbackLesson({ outline: module, sections: selected });
+    expect(result.kind).toBe('draft');
+    if (result.kind !== 'draft') return;
+    expect(result.module.blocks[0].body).toBe('- ' + longItem);
+    expect(result.module.blocks[0].kind).toBe('concept');
+    expect(result.module.blocks[0].steps).toBeUndefined();
+    expect(result.module.blocks[0].sourceRefs[0].sectionId).toBe('section-a');
+    const validation = validateModuleLessonOutput({
+      title: result.module.title,
+      description: result.module.description,
+      estimatedMinutes: result.module.estimatedMinutes,
+      objectives: result.module.objectives,
+      blocks: result.module.blocks,
+      flags: [],
+    }, { module, sections: selected, features: [], responsibilities: [], templateKind: 'normal' });
+    expect(validation).toMatchObject({ ok: true });
   });
 });
