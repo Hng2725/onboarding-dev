@@ -8,6 +8,9 @@ import {
 } from '../src/onboarding/templates';
 import type { StoreQueryOptions, StoreRecord, StoreUpdateOptions } from '../src/onboarding/store';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
+import { createAiReviewService } from '../src/onboarding/ai/review';
+import { materializeAiTemplate } from '../src/onboarding/ai/materialize';
+import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
 
 const admin: OnboardingActor = {
   userId: 'admin-1', username: 'admin', roomId: 'room-a', access: 'admin',
@@ -231,6 +234,25 @@ describe('onboarding template service', () => {
     await expect(service.deleteDraft(admin, assigned.id, assigned.version)).rejects.toMatchObject({
       code: 'TEMPLATE_IN_USE',
     });
+  });
+
+  it.each(['draft', 'published'] as const)('deleting a %s AI target retires its pending publication without blocking another batch', async (status) => {
+    const { service, store } = setup();
+    await seedAiSource(store);
+    const reviews = createAiReviewService(store, service);
+    const drafts = await Promise.all(['deleted-job', 'retained-job'].map((jobId) => materializeAiTemplate(store, service, admin,
+      { jobId, templateKind: 'normal', generated: generatedTemplate, sources: [aiSource] })));
+    const batches = [];
+    for (const draft of drafts) batches.push(await reviews.beginPublication(admin, {
+      targets: [{ kind: 'normal', templateId: draft.id, version: draft.version }],
+    }));
+    if (status === 'published') await service.publish(admin, drafts[0].id, 1);
+    await service.deleteDraft(admin, drafts[0].id, 1);
+    const recreated = createAiReviewService(store, createTemplateService(store));
+    await expect(recreated.listIncompletePublications(admin)).resolves.toEqual([batches[1]]);
+    await expect(recreated.listIncompletePublications(admin)).resolves.toEqual([batches[1]]);
+    await expect(recreated.beginPublication(admin, { batchId: batches[0].batchId, targets: batches[0].targets }))
+      .rejects.toMatchObject({ code: 'REVIEW_CONFLICT' });
   });
 
   it('publishes immutable version 1 and edits published content as version 2', async () => {

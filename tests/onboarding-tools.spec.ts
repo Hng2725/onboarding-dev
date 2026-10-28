@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { VerifiedActor } from '@privos_ai/app-server';
+import { createAiReviewService } from '../src/onboarding/ai/review';
+import { createTemplateService } from '../src/onboarding/templates';
+import { materializeAiTemplate } from '../src/onboarding/ai/materialize';
+import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
+import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
 
 import {
   DATA_TOOL_NAMES,
@@ -103,6 +108,32 @@ function services(): OnboardingServiceBundle {
 }
 
 describe('onboarding tool dispatcher', () => {
+  it('lists jobs and unrelated recoverable batches after deletion without exposing another owner', async () => {
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    const templates = createTemplateService(store);
+    const aiReview = createAiReviewService(store, templates);
+    const admin = { roomId: 'room-a', userId: 'admin-1', access: 'admin' as const };
+    const otherAdmin = { ...admin, userId: 'admin-2' };
+    const drafts = [];
+    const batches = [];
+    for (const [index, actor] of [admin, admin, otherAdmin].entries()) {
+      const draft = await materializeAiTemplate(store, templates, actor, { jobId: 'batch-job-' + index,
+        templateKind: 'normal', generated: generatedTemplate, sources: [aiSource] });
+      drafts.push(draft);
+      batches.push(await aiReview.beginPublication(actor, { targets: [{ kind: 'normal', templateId: draft.id, version: draft.version }] }));
+    }
+    const handle = createOnboardingToolHandler(() => ({ ...services(), templates, aiReview }));
+    const actor = verified({ room_roles: ['owner'] }, 'admin-1');
+    await handle('onboarding_admin_templates', { action: 'delete', templateId: drafts[0].id, version: 1 }, actor);
+    await expect(handle('onboarding_admin_ai', { action: 'list_jobs' }, actor)).resolves.toMatchObject({
+      jobs: [{ jobId: 'job-1' }], publicationBatches: [batches[1]],
+    });
+    await expect(handle('onboarding_admin_ai', { action: 'list_jobs' }, verified({ room_roles: ['owner'] }, 'admin-2')))
+      .resolves.toMatchObject({ publicationBatches: [batches[2]] });
+    await expect(aiReview.beginPublication(admin, { batchId: batches[2].batchId, targets: batches[2].targets }))
+      .rejects.toMatchObject({ code: 'REVIEW_CONFLICT' });
+  });
   it('validates and routes module actions using the verified room admin', async () => {
     const bundle = services();
     const handle = createOnboardingToolHandler(() => bundle);

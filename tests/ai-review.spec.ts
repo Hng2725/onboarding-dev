@@ -12,6 +12,59 @@ import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template
 const admin: OnboardingActor = { userId: 'admin-1', roomId: 'room-a', access: 'admin' };
 
 describe('module publication gate', () => {
+  it('starts a fresh batch when an admin restores retired content without reviving another owner or old batch', async () => {
+    const { review, draft, store } = await setup();
+    const target = { kind: 'normal' as const, templateId: draft.id, version: 1 };
+    const request = { targets: [target] };
+    const original = await review.beginPublication(admin, request);
+    const otherAdmin = { ...admin, userId: 'admin-2' };
+    const otherBatch = await review.beginPublication(otherAdmin, request);
+    const originalBody = draft.content!.modules[0].blocks[0].body;
+    const edit = async (body: string) => {
+      const current = await review.getReview(admin, draft.id, 1);
+      await review.updateReview(admin, { templateId: draft.id, version: 1, expectedUpdatedAt: current.updatedAt,
+        ops: [{ kind: 'update_block', moduleId: current.modules[0].id, blockId: current.content!.modules[0].blocks[0].id, body }] });
+    };
+    await edit('Changed content');
+    const changed = await review.beginPublication(admin, request);
+    await edit(originalBody);
+    const restored = await review.beginPublication(admin, request);
+    expect(new Set([original.batchId, changed.batchId, restored.batchId]).size).toBe(3);
+    expect((await review.beginPublication(admin, request)).batchId).toBe(restored.batchId);
+    expect(await review.listIncompletePublications(admin)).toEqual([restored]);
+    expect(await review.listIncompletePublications(otherAdmin)).toEqual([otherBatch]);
+    const otherRow = (await store.query(admin.roomId, 'onboarding_ai_publications', { filter: { batchId: otherBatch.batchId } })).records[0];
+    expect(otherRow.retiredAt).toBeUndefined();
+  });
+
+  it.each(['lesson', 'question', 'settings'] as const)('replaces an obsolete partial batch after a same-version %s edit and keeps unchanged retries idempotent', async (edit) => {
+    const { templates, review, draft, store } = await setup();
+    const target = { kind: 'normal' as const, templateId: draft.id, version: draft.version,
+      settings: { passingScore: draft.passingScore!, maxAttemptsPerModule: draft.content!.maxAttemptsPerModule, learningMode: draft.content!.learningMode } };
+    const original = await review.beginPublication(admin, { targets: [target] });
+    expect((await review.beginPublication(admin, { targets: [target] })).batchId).toBe(original.batchId);
+    let current = await review.getReview(admin, draft.id, draft.version);
+    current = await review.updateReview(admin, { templateId: draft.id, version: draft.version, expectedUpdatedAt: current.updatedAt,
+      ops: [{ kind: 'checkpoint_publication', moduleId: current.modules[0].id,
+        resource: { id: 'ai-lesson-pdf-' + current.modules[0].id, title: 'Old lesson', kind: 'file', required: true, fileId: 'old-pdf' } }] });
+    const updated = await review.updateReview(admin, { templateId: draft.id, version: draft.version, expectedUpdatedAt: current.updatedAt,
+      ops: edit === 'lesson' ? [{ kind: 'update_block', moduleId: current.modules[0].id, blockId: current.content!.modules[0].blocks[0].id, body: 'Revised lesson' }]
+        : edit === 'question' ? [{ kind: 'update_question', questionId: current.modules[0].questions[0].id, prompt: 'Revised question?' }]
+          : [{ kind: 'set_settings', passingScore: 85 }] });
+    const request = { targets: [{ ...target, settings: { ...target.settings, passingScore: updated.passingScore! } }] };
+    const replacement = await review.beginPublication(admin, request);
+    expect(replacement.batchId).not.toBe(original.batchId);
+    const recreated = createAiReviewService(store, createTemplateService(store));
+    expect((await recreated.beginPublication(admin, request)).batchId).toBe(replacement.batchId);
+    expect(await recreated.listIncompletePublications(admin)).toEqual([replacement]);
+    await expect(recreated.beginPublication(admin, { batchId: original.batchId, targets: [target] })).rejects.toMatchObject({ code: 'REVIEW_CONFLICT' });
+    expect((await recreated.getReview(admin, draft.id, draft.version)).passingScore).toBe(updated.passingScore);
+    const published = await templates.publish(admin, draft.id, draft.version);
+    await recreated.updateReview(admin, { templateId: draft.id, version: draft.version, expectedUpdatedAt: published.updatedAt,
+      ops: [{ kind: 'checkpoint_publication', jsonFileId: 'replacement-json' }] });
+    expect(await recreated.listIncompletePublications(admin)).toEqual([]);
+  });
+
   it('discovers persisted incomplete publication selections after service recreation and removes fully completed batches', async () => {
     const { templates, review, draft, store } = await setup();
     expect(typeof review.beginPublication).toBe('function');

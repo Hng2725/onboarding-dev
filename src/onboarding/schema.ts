@@ -203,6 +203,7 @@ export const ONBOARDING_COLLECTIONS: readonly OnboardingCollectionDefinition[] =
   ]),
   collection('onboarding_ai_publications', [
     field('batchId', 'string', true), field('createdBy', 'string', true), field('targets', 'json', true),
+    field('requestFingerprint'), field('retiredAt', 'datetime'), field('retirementReason'), field('supersededBy'),
     field('createdAt', 'datetime', true), field('updatedAt', 'datetime', true),
   ], [
     index('ai_publications_batch_unique', ['batchId'], true),

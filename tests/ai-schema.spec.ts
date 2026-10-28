@@ -11,6 +11,13 @@ const AI_COLLECTIONS = [
 ] as const;
 
 describe('AI onboarding collections', () => {
+  it('keeps batch identity and retirement fields optional for existing publications', () => {
+    const fields = ONBOARDING_COLLECTIONS.find((definition) => definition.collection === 'onboarding_ai_publications')!.fields;
+    for (const name of ['requestFingerprint', 'retiredAt', 'retirementReason', 'supersededBy']) {
+      expect(fields.find((field) => field.name === name)).toBeDefined();
+      expect(fields.find((field) => field.name === name)?.required).not.toBe(true);
+    }
+  });
   it('persists optional module lifecycle fields without migrating legacy rows', () => {
     const fields = ONBOARDING_COLLECTIONS.find((d) => d.collection === 'onboarding_ai_jobs')!.fields;
     for (const name of ['pipelineVersion', 'outline', 'outlineApprovedRevision', 'moduleRuns']) {
