@@ -14,6 +14,7 @@ GEMINI.md
 pnpm-lock.yaml
 dist-source/
 *.tsbuildinfo
+.worktrees/
 
 # Standalone pairing identity (secret: relay creds + dispatch trust) — never commit
 privos-standalone-identity.json
