@@ -375,6 +375,7 @@ export function parseBlocks(
   modulePath: string,
   errors: ValidationError[],
   ids: Set<string>,
+  allowUnreferenced = false,
 ): readonly GeneratedBlock[] {
   if (!Array.isArray(value)) {
     add(errors, 'FIELD_INVALID', modulePath + '.blocks', 'blocks must be an array.');
@@ -394,7 +395,7 @@ export function parseBlocks(
     const kind = text(entry.kind, path + '.kind', errors) as GeneratedBlock['kind'];
     if (!BLOCK_KINDS.includes(kind)) add(errors, 'BLOCK_KIND', path + '.kind', 'Unknown block kind.');
     const refs = rawRefs(entry.sourceRefs, path + '.sourceRefs', errors);
-    if (kind !== 'summary' && refs.length === 0) {
+    if (!allowUnreferenced && kind !== 'summary' && refs.length === 0) {
       add(errors, 'SOURCE_REF_REQUIRED', path + '.sourceRefs', 'Non-summary blocks require a source.');
     }
     let steps: GeneratedBlock['steps'];
@@ -438,6 +439,7 @@ export function parseQuestions(
   blockIds: ReadonlySet<string>,
   errors: ValidationError[],
   ids: Set<string>,
+  allowUnreferenced = false,
 ): readonly GeneratedQuestion[] {
   if (!Array.isArray(value)) {
     add(errors, 'FIELD_INVALID', modulePath + '.questions', 'questions must be an array.');
@@ -509,7 +511,7 @@ export function parseQuestions(
       add(errors, 'QUESTION_BLOCK_UNKNOWN', path + '.blockIds', 'Questions must reference blocks in their module.');
     }
     const refs = rawRefs(entry.sourceRefs, path + '.sourceRefs', errors);
-    if (refs.length === 0) add(errors, 'SOURCE_REF_REQUIRED', path + '.sourceRefs', 'Questions require a source.');
+    if (!allowUnreferenced && refs.length === 0) add(errors, 'SOURCE_REF_REQUIRED', path + '.sourceRefs', 'Questions require a source.');
     questions.push({
       localId,
       level,

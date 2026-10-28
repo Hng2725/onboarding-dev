@@ -104,6 +104,19 @@ export function inventoryMilestones(
 export function templateMilestones(
   job: AiJobRecord | null | undefined,
 ): readonly AiMilestone[] {
+  if (job?.pipelineVersion === 'module_v2') {
+    const runs = (job.moduleRuns ?? []).filter((run) => !run.outline.tombstoned);
+    const approved = job.outline?.revision === job.outlineApprovedRevision;
+    const documents = runs.filter((run) => Boolean(run.lessonDraft)).length;
+    const lessonDone = runs.length > 0 && runs.every((run) => run.lessonState === 'approved');
+    const questionDone = runs.length > 0 && runs.every((run) => run.questionState === 'approved');
+    return [
+      { id: 'prepare', label: 'Duyệt khung lộ trình', status: approved ? 'completed' : 'active' },
+      { id: 'lessons', label: 'Viết và duyệt tài liệu học', status: lessonDone ? 'completed' : approved ? 'active' : 'pending', detail: documents + '/' + runs.length + ' module có tài liệu' },
+      { id: 'questions', label: 'Tạo và duyệt câu hỏi', status: questionDone ? 'completed' : approved ? 'active' : 'pending' },
+      { id: 'draft', label: 'Tạo bản nháp để rà soát', status: job.status === 'completed' ? 'completed' : 'pending' },
+    ];
+  }
   const completed = job?.status === 'completed';
   if (completed) {
     return [

@@ -21,9 +21,9 @@ type Result<T> = { readonly ok: true; readonly value: T; readonly errors: readon
 export type ModuleLessonValidation = Result<{ readonly module: GeneratedModule; readonly flags: readonly GeneratedFlag[] }>;
 export type ModuleQuestionValidation = Result<{ readonly questions: readonly GeneratedQuestion[]; readonly flags: readonly GeneratedFlag[]; readonly lessonVersion: number }>;
 
-function verifyInput(input: ModuleLessonPromptInput): void {
+function verifyInput(input: ModuleLessonPromptInput, allowEmpty = false): void {
   const ids = input.module.sourceSectionIds;
-  if (input.module.tombstoned || !ids.length || ids.some((id) => !id.trim()) || new Set(ids).size !== ids.length || input.sections.length !== ids.length || new Set(input.sections.map((s) => s.id)).size !== ids.length || input.sections.some((s) => !ids.includes(s.id) || !s.text.trim())) throw new Error('Selected source sections must resolve exactly to usable sections.');
+  if (input.module.tombstoned || (!allowEmpty && !ids.length) || ids.some((id) => !id.trim()) || new Set(ids).size !== ids.length || input.sections.length !== ids.length || new Set(input.sections.map((s) => s.id)).size !== ids.length || input.sections.some((s) => !ids.includes(s.id) || !s.text.trim())) throw new Error('Selected source sections must resolve exactly to usable sections.');
   if (input.module.responsibilityIndexes.some((i) => !Number.isInteger(i) || i < 0 || i >= input.responsibilities.length)) throw new Error('Invalid responsibility selection.');
 }
 function context(input: ModuleLessonPromptInput): string {
@@ -41,7 +41,7 @@ function verifyLesson(input: ModuleQuestionPromptInput): void {
 }
 /** Fallback remains the exact source-only server draft; any admin edit uses manual validation. */
 export function validApprovedLesson(lesson: GeneratedModule, input: ModuleLessonPromptInput, provenance: 'ai' | 'fallback' | 'manual'): boolean {
-  try { verifyInput(input); } catch { return false; }
+  try { verifyInput(input, provenance === 'manual' && input.module.sourceSectionIds.length === 0); } catch { return false; }
   if (lesson.localId !== input.module.moduleLocalId || lesson.frameKey !== input.module.frameKey || JSON.stringify(lesson.featureIds) !== JSON.stringify(input.module.featureIds)) return false;
   if (provenance === 'fallback') {
     const fallback = buildFallbackLesson({ outline: input.module, sections: input.sections });
@@ -54,7 +54,7 @@ export function validApprovedLesson(lesson: GeneratedModule, input: ModuleLesson
     parseBlocks(lesson.blocks, 'root', errors, new Set([input.module.moduleLocalId]));
     return !errors.length && fallback.kind === 'draft' && JSON.stringify(lesson) === JSON.stringify(fallback.module);
   }
-  return validateModuleLessonOutput({ title: lesson.title, description: lesson.description, estimatedMinutes: lesson.estimatedMinutes, objectives: lesson.objectives, blocks: lesson.blocks, flags: [] }, input).ok;
+  return validateModuleLessonOutput({ title: lesson.title, description: lesson.description, estimatedMinutes: lesson.estimatedMinutes, objectives: lesson.objectives, blocks: lesson.blocks, flags: [] }, input, provenance === 'manual' && input.module.sourceSectionIds.length === 0).ok;
 }
 export function buildModuleQuestionPrompt(input: ModuleQuestionPromptInput): AiPromptRequest {
   verifyLesson(input);
@@ -108,14 +108,14 @@ function validateFlags(flags: readonly GeneratedFlag[], input: ModuleLessonPromp
     grounded(flag.evidence, input.sections, errors, 'root.flags.evidence');
   }
 }
-export function validateModuleLessonOutput(raw: unknown, input: ModuleLessonValidationInput): ModuleLessonValidation {
+export function validateModuleLessonOutput(raw: unknown, input: ModuleLessonValidationInput, allowManualWithoutSources = false): ModuleLessonValidation {
   const errors: ValidationError[] = [];
-  try { verifyInput(input); } catch { add(errors, 'SOURCE_SELECTION', 'input.sections', 'Selected source sections are invalid.'); }
+  try { verifyInput(input, allowManualWithoutSources && input.module.sourceSectionIds.length === 0); } catch { add(errors, 'SOURCE_SELECTION', 'input.sections', 'Selected source sections are invalid.'); }
   if (!isRecord(raw)) return { ok: false, errors: [{ code: 'FIELD_INVALID', path: 'root', message: 'An object is required.' }] };
   fields(raw, ['title', 'description', 'estimatedMinutes', 'objectives', 'blocks', 'flags'], 'root', errors);
   const objectives = stringArray(raw.objectives, 'root.objectives', errors);
   if (objectives.length < 2 || objectives.length > 4) add(errors, 'OBJECTIVE_COUNT', 'root.objectives', 'A module requires 2 to 4 objectives.');
-  const blocks = parseBlocks(raw.blocks, 'root', errors, new Set([input.module.moduleLocalId]));
+  const blocks = parseBlocks(raw.blocks, 'root', errors, new Set([input.module.moduleLocalId]), allowManualWithoutSources && input.module.sourceSectionIds.length === 0);
   if (blocks.filter((b) => b.kind === 'summary').length !== 1 || blocks[blocks.length - 1]?.kind !== 'summary') add(errors, 'SUMMARY_POSITION', 'root.blocks', 'Exactly one summary must be last.');
   if (input.templateKind === 'advanced' && !blocks.some((b) => b.kind === 'scenario')) add(errors, 'SCENARIO_REQUIRED', 'root.blocks', 'A scenario is required.');
   blocks.forEach((b) => grounded(b.sourceRefs, input.sections, errors, 'root.blocks.sourceRefs'));
@@ -126,13 +126,13 @@ export function validateModuleLessonOutput(raw: unknown, input: ModuleLessonVali
   const module: GeneratedModule = { localId: input.module.moduleLocalId, frameKey: input.module.frameKey, title: text(raw.title, 'root.title', errors, 80), description: text(raw.description, 'root.description', errors, 500), estimatedMinutes: minutes, objectives, featureIds: input.module.featureIds, blocks, questions: [] };
   return errors.length ? { ok: false, errors } : { ok: true, value: { module, flags }, errors: [] };
 }
-export function validateModuleQuestionOutput(raw: unknown, input: ModuleQuestionValidationInput): ModuleQuestionValidation {
+export function validateModuleQuestionOutput(raw: unknown, input: ModuleQuestionValidationInput, allowManualWithoutSources = false): ModuleQuestionValidation {
   const errors: ValidationError[] = [];
-  try { verifyInput(input); verifyLesson(input); } catch { add(errors, 'INPUT_INVALID', 'input', 'Module source selection or lesson version is invalid.'); }
+  try { verifyInput(input, allowManualWithoutSources && input.lessonProvenance === 'manual' && input.module.sourceSectionIds.length === 0); verifyLesson(input); } catch { add(errors, 'INPUT_INVALID', 'input', 'Module source selection or lesson version is invalid.'); }
   if (!isRecord(raw)) return { ok: false, errors: [{ code: 'FIELD_INVALID', path: 'root', message: 'An object is required.' }] };
   fields(raw, ['questions', 'flags'], 'root', errors);
   const blockIds = new Set(input.lesson.blocks.map((b) => b.localId));
-  const questions = parseQuestions(raw.questions, 'root', blockIds, errors, new Set([input.module.moduleLocalId, ...blockIds]));
+  const questions = parseQuestions(raw.questions, 'root', blockIds, errors, new Set([input.module.moduleLocalId, ...blockIds]), allowManualWithoutSources && input.lessonProvenance === 'manual' && input.module.sourceSectionIds.length === 0);
   questions.forEach((q) => grounded(q.sourceRefs, input.sections, errors, 'root.questions.sourceRefs'));
   const flags = parseFlags(raw.flags, errors);
   validateFlags(flags, input, blockIds, new Set(questions.map((q) => q.localId)), errors);

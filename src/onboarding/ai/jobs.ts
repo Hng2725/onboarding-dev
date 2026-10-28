@@ -1501,6 +1501,7 @@ export function createAiJobService(
         if (!target) continue;
         const context = await moduleContext(actor, row, run);
         if (!context.usable) {
+          if (target === 'questions' && run.lessonProvenance === 'manual' && run.outline.sourceSectionIds.length === 0) return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
           row = await updateJob(actor, row, { moduleRuns: replaceRun(row, await fallbackRun(actor, row, run)) });
           return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
         }
@@ -1679,7 +1680,7 @@ export function createAiJobService(
       const row = await requireModuleJob(actor, input.jobId);
       const run = requireRun(row, input.moduleLocalId);
       const next = updateQuestions(run, input.expectedVersion, input.questions);
-      const validation = validateModuleQuestionOutput({ questions: input.questions, flags: [] }, { ...(await moduleContext(actor, row, run)).input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance });
+      const validation = validateModuleQuestionOutput({ questions: input.questions, flags: [] }, { ...(await moduleContext(actor, row, run)).input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance }, true);
       if (!validation.ok) throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Questions are invalid or ungrounded.');
       return saveRun(actor, row, next);
     },
@@ -1687,7 +1688,7 @@ export function createAiJobService(
       const row = await requireModuleJob(actor, input.jobId);
       const run = requireRun(row, input.moduleLocalId);
       const next = approveQuestions(run, input.expectedVersion);
-      const validation = validateModuleQuestionOutput({ questions: next.questionDraft, flags: next.questionFlags ?? [] }, { ...(await moduleContext(actor, row, run)).input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance });
+      const validation = validateModuleQuestionOutput({ questions: next.questionDraft, flags: next.questionFlags ?? [] }, { ...(await moduleContext(actor, row, run)).input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance }, true);
       if (!validation.ok) throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Questions are invalid or ungrounded.');
       return saveRun(actor, row, next, { target: 'questions', version: next.questionVersion, lessonVersion: next.lessonVersion, questions: next.questionDraft, flags: next.questionFlags ?? [] });
     },

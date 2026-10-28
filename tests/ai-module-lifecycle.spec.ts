@@ -300,3 +300,27 @@ describe('persisted module jobs', () => {
     await expect(service.retryModule(admin, { jobId: job.jobId, moduleLocalId, target: 'questions' })).rejects.toThrow();
   });
 });
+
+it('allows approved manual content without sources while rejecting invalid and forged fallback lessons', async () => {
+  const { service, job } = await setup();
+  const moduleLocalId = active(job).outline.moduleLocalId;
+  const edited = await service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: [{ type: 'update', moduleLocalId, patch: { sourceSectionIds: [] } }] });
+  await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: edited.outline!.revision });
+  await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' });
+  const placeholder = active(await service.getJob(admin, job.jobId));
+  expect(placeholder.lessonState).toBe('manual_required');
+  const content = { ...manualLesson(placeholder), blocks: manualLesson(placeholder).blocks.map((block) => ({ ...block, sourceRefs: [] })) };
+  const args = { jobId: job.jobId, moduleLocalId };
+  await expect(service.updateModuleLesson(admin, { ...args, expectedVersion: placeholder.lessonVersion, module: { ...content, blocks: [] } })).rejects.toThrow();
+  const context = { module: placeholder.outline, sections: [], features: [], responsibilities: [], templateKind: 'normal' as const };
+  expect(validApprovedLesson(content, context, 'fallback')).toBe(false);
+  let current = await service.updateModuleLesson(admin, { ...args, expectedVersion: placeholder.lessonVersion, module: content });
+  current = await service.approveModuleLesson(admin, { ...args, expectedVersion: active(current).lessonVersion });
+  expect(active(current)).toMatchObject({ lessonState: 'approved', lessonProvenance: 'manual' });
+  await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' });
+  expect(active(await service.getJob(admin, job.jobId)).lessonState).toBe('approved');
+  const qs = lesson.questions.map((question) => ({ ...question, sourceRefs: [] }));
+  current = await service.updateModuleQuestions(admin, { ...args, expectedVersion: active(current).questionVersion, questions: qs });
+  current = await service.approveModuleQuestions(admin, { ...args, expectedVersion: active(current).questionVersion });
+  expect(active(current)).toMatchObject({ questionState: 'approved', questionLessonVersion: active(current).lessonVersion });
+});

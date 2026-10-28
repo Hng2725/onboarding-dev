@@ -179,3 +179,72 @@ describe('AI generator lifecycle', () => {
     renderer.unmount();
   });
 });
+
+it('reopens a completed module job without routing to legacy review', async () => {
+  const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
+  vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+  const module = { moduleLocalId: 'm', frameKey: 't1-core', order: 0, title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [] };
+  const job = { ...failedTemplateJob, templateKind: 'normal' as const, roleProfile: undefined, status: 'completed' as const, pipelineVersion: 'module_v2' as const, outline: { revision: 1, modules: [module], flags: [], taskCoverage: [] }, outlineApprovedRevision: 1, moduleRuns: [{ outline: module, outlineRevision: 1, lessonState: 'approved' as const, lessonVersion: 1, questionState: 'approved' as const, questionVersion: 1 }], result: null };
+  const api = { adminAi: vi.fn(async (action: string) => { if (action === 'list_sources') return { sources: [] }; if (action === 'list_jobs') return { jobs: [inventoryJob, job] }; throw new Error('Unexpected action: ' + action); }) };
+  let view!: TestRenderer.ReactTestRenderer;
+  await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+  expect(JSON.stringify(view.toJSON())).toContain('Sẵn sàng tạo bản nháp/xuất bản');
+  expect(api.adminAi).not.toHaveBeenCalledWith('get_review', expect.anything());
+  view.unmount(); vi.unstubAllGlobals();
+});
+
+it('restores the selected module on reopen without starting or cancelling work', async () => {
+  const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
+  vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+  const modules = ['First', 'Second'].map((title, order) => ({ moduleLocalId: `m${order}`, frameKey: order ? 't1-core' : 't1-overview', order, title, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [] }));
+  const job = { ...failedTemplateJob, templateKind: 'normal' as const, roleProfile: undefined, status: 'running' as const, pipelineVersion: 'module_v2' as const, outline: { revision: 1, modules, flags: [], taskCoverage: [] }, outlineApprovedRevision: 1, moduleRuns: modules.map((outline) => ({ outline, outlineRevision: 1, lessonState: 'manual_required' as const, lessonVersion: 0, questionState: 'blocked' as const, questionVersion: 0 })) };
+  const api = { adminAi: vi.fn(async (action: string) => { if (action === 'list_sources') return { sources: [] }; if (action === 'list_jobs') return { jobs: [inventoryJob, job] }; throw new Error('Unexpected action: ' + action); }) };
+  const page = () => createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined });
+  let view!: TestRenderer.ReactTestRenderer;
+  await act(async () => { view = TestRenderer.create(page()); });
+  const second = view.root.findByProps({ 'aria-label': 'Danh sách module' }).findAllByType('button')[1];
+  act(() => second.props.onClick());
+  expect(storage.get('onboarding:ai:module:room-1')).toBe('m1');
+  view.unmount();
+  await act(async () => { view = TestRenderer.create(page()); });
+  expect(view.root.findByType('article').findByType('h3').children.join('')).toBe('Second');
+  expect(api.adminAi.mock.calls.every(([action]) => action === 'list_sources' || action === 'list_jobs')).toBe(true);
+  view.unmount(); vi.unstubAllGlobals();
+});
+
+it('approves the persisted outline revision then resumes only that job', async () => {
+  const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
+  vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+  const modules = ['t1-overview', 't1-access', 't1-navigation', 't1-core'].map((frameKey, order) => ({ moduleLocalId: `m${order}`, frameKey, order, title: frameKey, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] }));
+  const job = { ...failedTemplateJob, templateKind: 'normal' as const, roleProfile: undefined, status: 'running' as const, pipelineVersion: 'module_v2' as const, outline: { revision: 4, modules, flags: [], taskCoverage: [] }, outlineApprovedRevision: 0, moduleRuns: modules.map((outline) => ({ outline, outlineRevision: 4, lessonState: 'queued' as const, lessonVersion: 0, questionState: 'blocked' as const, questionVersion: 0 })) };
+  const approved = { ...job, outlineApprovedRevision: 4 };
+  const api = { adminAi: vi.fn(async (action: string) => { if (action === 'list_sources') return { sources: [] }; if (action === 'list_jobs') return { jobs: [inventoryJob, job] }; if (action === 'approve_outline') return { job: approved }; if (action === 'next_step') return { kind: 'awaiting_admin', job: approved }; throw new Error('Unexpected action: ' + action); }) };
+  let view!: TestRenderer.ReactTestRenderer;
+  await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+  expect(api.adminAi.mock.calls.some(([action]) => action === 'next_step')).toBe(false);
+  const button = view.root.findAllByType('button').find((item) => item.children.join('') === 'Duyệt khung và bắt đầu viết')!;
+  await act(async () => { button.props.onClick(); });
+  expect(api.adminAi).toHaveBeenCalledWith('approve_outline', { jobId: 'template-1', expectedRevision: 4 });
+  expect(api.adminAi).toHaveBeenCalledWith('next_step', expect.objectContaining({ jobId: 'template-1' }));
+  view.unmount(); vi.unstubAllGlobals();
+});
+
+it('lets an admin explicitly start Template 2 after Template 1 completed without a legacy result', async () => {
+  const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1'], ['onboarding:ai:selection:room-1', 'both'], ['onboarding:ai:responsibilities:room-1', 'First task\nSecond task']]);
+  vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+  const module = { moduleLocalId: 'm', frameKey: 't1-core', order: 0, title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [] };
+  const job = { ...failedTemplateJob, inventoryJobId: 'inventory-1', templateKind: 'normal' as const, roleProfile: undefined, status: 'completed' as const, pipelineVersion: 'module_v2' as const, outline: { revision: 1, modules: [module], flags: [], taskCoverage: [] }, outlineApprovedRevision: 1, moduleRuns: [{ outline: module, outlineRevision: 1, lessonState: 'approved' as const, lessonVersion: 1, questionState: 'approved' as const, questionVersion: 1 }], result: null };
+  const api = { adminAi: vi.fn(async (action: string) => { if (action === 'list_sources') return { sources: [] }; if (action === 'list_jobs') return { jobs: [inventoryJob, job] }; if (action === 'start_job') return { job: { ...job, jobId: 'template-2', templateKind: 'advanced', status: 'running', outlineApprovedRevision: 0 } }; if (action === 'next_step') return { kind: 'awaiting_admin', job: { ...job, jobId: 'template-2', templateKind: 'advanced', status: 'running', outlineApprovedRevision: 0 } }; throw new Error('Unexpected action: ' + action); }) };
+  let view!: TestRenderer.ReactTestRenderer;
+  await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+  const next = view.root.findAllByType('button').find((button) => button.children.join('') === 'Tiếp tục Template 2');
+  expect(next).toBeDefined();
+  act(() => next!.props.onClick());
+  expect(JSON.stringify(view.toJSON())).toContain('Template 2');
+  expect(api.adminAi.mock.calls.every(([action]) => action === 'list_sources' || action === 'list_jobs')).toBe(true);
+  const generate = view.root.findAllByType('button').find((button) => button.children.join('').includes('Tạo lộ trình') && !button.props.disabled)!;
+  await act(async () => { generate.props.onClick(); });
+  expect(api.adminAi).toHaveBeenCalledWith('start_job', expect.objectContaining({ templateKind: 'advanced' }));
+  expect(api.adminAi.mock.calls.filter(([action]) => action === 'start_job')).toHaveLength(1);
+  view.unmount(); vi.unstubAllGlobals();
+});
