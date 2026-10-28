@@ -65,4 +65,11 @@ describe('module draft contracts', () => {
     expect(request.systemContext).not.toContain('FOREIGN MODULE SECRET');
     expect(request.systemContext).not.toContain('FOREIGN FLAG SECRET');
   });
+  it('rejects repair flags pointing to foreign blocks or any questions', () => {
+    const flag = { type: 'missing', severity: 'blocking', message: 'Missing detail', questionForAdmin: 'Provide source', evidence: [] };
+    for (const location of [{ blockLocalId: 'other-module-block' }, { questionLocalId: 'other-module-question' }]) {
+      expect(() => buildModuleLessonRepairPrompt({ ...input, previous: { ...lesson, flags: [{ ...flag, location }] }, errors: ['invalid'] })).toThrow();
+    }
+    expect(() => buildModuleLessonRepairPrompt({ ...input, previous: { ...lesson, flags: [{ ...flag, location: { blockLocalId: 'b1' } }] }, errors: ['invalid'] })).not.toThrow();
+  });
 });

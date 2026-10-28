@@ -44,14 +44,17 @@ export function buildModuleQuestionPrompt(input: ModuleQuestionPromptInput): AiP
 }
 export function buildModuleLessonRepairPrompt(input: ModuleLessonRepairPromptInput): AiPromptRequest {
   verifyInput(input);
-  verifyRepairOwnership(input.previous, input);
+  const blockIds = new Set(isRecord(input.previous) && Array.isArray(input.previous.blocks)
+    ? input.previous.blocks.filter(isRecord).map((block) => block.localId).filter((id): id is string => typeof id === 'string' && Boolean(id.trim()))
+    : []);
+  verifyRepairOwnership(input.previous, input, blockIds);
   const previous = isRecord(input.previous) ? Object.fromEntries(Object.entries(input.previous).filter(([key]) => ['title', 'description', 'estimatedMinutes', 'objectives', 'blocks', 'flags'].includes(key))) : {};
   return bounded(lessonRules + '\nRepair only this module using these validation errors:\n' + input.errors.join('\n'), context(input) + '\n<previous_output>\n' + escapeXml(jsonLines(previous)) + '\n</previous_output>');
 }
 /** Reject foreign ownership and references before retaining any prior output as repair data. */
-function verifyRepairOwnership(value: unknown, input: ModuleLessonPromptInput, root = true): void {
+function verifyRepairOwnership(value: unknown, input: ModuleLessonPromptInput, blockIds: ReadonlySet<string>, root = true): void {
   if (Array.isArray(value)) {
-    value.forEach((item) => verifyRepairOwnership(item, input, false));
+    value.forEach((item) => verifyRepairOwnership(item, input, blockIds, false));
     return;
   }
   if (!isRecord(value)) return;
@@ -60,6 +63,8 @@ function verifyRepairOwnership(value: unknown, input: ModuleLessonPromptInput, r
       || (key === 'frameKey' && item !== input.module.frameKey)
       || (key === 'featureId' && (typeof item !== 'string' || !input.module.featureIds.includes(item)))
       || (key === 'featureIds' && (!Array.isArray(item) || item.some((id) => typeof id !== 'string' || !input.module.featureIds.includes(id))))
+      || (key === 'blockLocalId' && (typeof item !== 'string' || !blockIds.has(item)))
+      || key === 'questionLocalId'
       || key === 'modules') throw new Error('Repair output has conflicting module ownership.');
     if (key === 'sourceRefs' || key === 'evidence') {
       if (!Array.isArray(item) || item.some((ref) => !isRecord(ref) || typeof ref.sectionId !== 'string' || typeof ref.quote !== 'string')) throw new Error('Repair output has invalid source references.');
@@ -68,7 +73,7 @@ function verifyRepairOwnership(value: unknown, input: ModuleLessonPromptInput, r
       if (errors.length) throw new Error('Repair output has references outside the selected sources.');
     }
     if (key === 'sectionId' && (typeof item !== 'string' || !input.module.sourceSectionIds.includes(item))) throw new Error('Repair output has references outside the selected sources.');
-    verifyRepairOwnership(item, input, false);
+    verifyRepairOwnership(item, input, blockIds, false);
   }
 }
 function grounded(refs: readonly RawSourceRef[], sections: readonly SourceSection[], errors: ValidationError[], path: string): void {
