@@ -141,11 +141,11 @@ const FORBIDDEN_OPTIONS = [
   'cả a, b',
 ];
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function add(
+export function add(
   errors: ValidationError[],
   code: string,
   path: string,
@@ -154,7 +154,7 @@ function add(
   errors.push({ code, path, message });
 }
 
-function fields(
+export function fields(
   value: Record<string, unknown>,
   allowed: readonly string[],
   path: string,
@@ -165,7 +165,7 @@ function fields(
   }
 }
 
-function text(
+export function text(
   value: unknown,
   path: string,
   errors: ValidationError[],
@@ -178,7 +178,7 @@ function text(
   return value.trim();
 }
 
-function stringArray(
+export function stringArray(
   value: unknown,
   path: string,
   errors: ValidationError[],
@@ -317,7 +317,7 @@ function normalizeTemplateShape(value: Record<string, unknown>): Record<string, 
   };
 }
 
-function parseFlags(
+export function parseFlags(
   value: unknown,
   errors: ValidationError[],
 ): readonly GeneratedFlag[] {
@@ -370,7 +370,7 @@ function parseFlags(
   return flags;
 }
 
-function parseBlocks(
+export function parseBlocks(
   value: unknown,
   modulePath: string,
   errors: ValidationError[],
@@ -432,7 +432,7 @@ function parseBlocks(
   return blocks;
 }
 
-function parseQuestions(
+export function parseQuestions(
   value: unknown,
   modulePath: string,
   blockIds: ReadonlySet<string>,
