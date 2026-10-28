@@ -43,13 +43,39 @@ export function buildModuleQuestionPrompt(input: ModuleQuestionPromptInput): AiP
   return bounded('Draft exactly 3–5 single-choice questions for the approved lesson. Return only {questions,flags}. Each question has localId, level, prompt, options (a,b,c,d), correctOptionId, explanation, blockIds, sourceRefs. Ground references in source_sections.', context(input) + '\n<approved_lesson>\n' + escapeXml(jsonLines({ title: input.lesson.title, description: input.lesson.description, objectives: input.lesson.objectives, blocks: input.lesson.blocks })) + '\n</approved_lesson>');
 }
 export function buildModuleLessonRepairPrompt(input: ModuleLessonRepairPromptInput): AiPromptRequest {
+  verifyInput(input);
+  verifyRepairOwnership(input.previous, input);
   const previous = isRecord(input.previous) ? Object.fromEntries(Object.entries(input.previous).filter(([key]) => ['title', 'description', 'estimatedMinutes', 'objectives', 'blocks', 'flags'].includes(key))) : {};
   return bounded(lessonRules + '\nRepair only this module using these validation errors:\n' + input.errors.join('\n'), context(input) + '\n<previous_output>\n' + escapeXml(jsonLines(previous)) + '\n</previous_output>');
+}
+/** Reject foreign ownership and references before retaining any prior output as repair data. */
+function verifyRepairOwnership(value: unknown, input: ModuleLessonPromptInput, root = true): void {
+  if (Array.isArray(value)) {
+    value.forEach((item) => verifyRepairOwnership(item, input, false));
+    return;
+  }
+  if (!isRecord(value)) return;
+  for (const [key, item] of Object.entries(value)) {
+    if (((key === 'moduleLocalId' || key === 'moduleId' || (root && (key === 'localId' || key === 'id'))) && item !== input.module.moduleLocalId)
+      || (key === 'frameKey' && item !== input.module.frameKey)
+      || (key === 'featureId' && (typeof item !== 'string' || !input.module.featureIds.includes(item)))
+      || (key === 'featureIds' && (!Array.isArray(item) || item.some((id) => typeof id !== 'string' || !input.module.featureIds.includes(id))))
+      || key === 'modules') throw new Error('Repair output has conflicting module ownership.');
+    if (key === 'sourceRefs' || key === 'evidence') {
+      if (!Array.isArray(item) || item.some((ref) => !isRecord(ref) || typeof ref.sectionId !== 'string' || typeof ref.quote !== 'string')) throw new Error('Repair output has invalid source references.');
+      const errors: ValidationError[] = [];
+      grounded(item as RawSourceRef[], input.sections, errors, 'previous');
+      if (errors.length) throw new Error('Repair output has references outside the selected sources.');
+    }
+    if (key === 'sectionId' && (typeof item !== 'string' || !input.module.sourceSectionIds.includes(item))) throw new Error('Repair output has references outside the selected sources.');
+    verifyRepairOwnership(item, input, false);
+  }
 }
 function grounded(refs: readonly RawSourceRef[], sections: readonly SourceSection[], errors: ValidationError[], path: string): void {
   for (const ref of refs) {
     const section = sections.find((s) => s.id === ref.sectionId);
-    if (!section || ref.quote.trim().length < AI_GENERATION_LIMITS.minQuoteChars || ref.quote.trim().length > AI_GENERATION_LIMITS.maxQuoteChars || !normalizeForMatch(section.text).includes(normalizeForMatch(ref.quote))) add(errors, 'SOURCE_REF_UNGROUNDED', path, 'Reference must quote a selected section.');
+    const normalizedQuote = normalizeForMatch(ref.quote);
+    if (!section || !normalizedQuote || ref.quote.trim().length < AI_GENERATION_LIMITS.minQuoteChars || ref.quote.trim().length > AI_GENERATION_LIMITS.maxQuoteChars || !normalizeForMatch(section.text).includes(normalizedQuote)) add(errors, 'SOURCE_REF_UNGROUNDED', path, 'Reference must quote a selected section.');
   }
 }
 function validateFlags(flags: readonly GeneratedFlag[], input: ModuleLessonPromptInput, blockIds: ReadonlySet<string>, questionIds: ReadonlySet<string>, errors: ValidationError[]): void {

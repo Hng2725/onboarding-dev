@@ -1,4 +1,4 @@
-﻿import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { buildModuleLessonPrompt, buildModuleQuestionPrompt, buildModuleLessonRepairPrompt, validateModuleLessonOutput, validateModuleQuestionOutput } from '../src/onboarding/ai/module-draft';
 
 const module = { moduleLocalId: 'm1', frameKey: 't1-core', order: 3, title: 'Outline', description: '', estimatedMinutes: 10, objectives: [], featureIds: ['f1'], sourceSectionIds: ['s1'], responsibilityIndexes: [0] };
@@ -38,5 +38,31 @@ describe('module draft contracts', () => {
     const parsed = validateModuleLessonOutput(lesson, input);
     if (!parsed.ok) throw new Error('lesson invalid');
     expect(buildModuleQuestionPrompt({ ...input, lesson: parsed.value.module, lessonVersion: 7 }).prompt).toContain('3–5');
+  });
+  it('rejects markup-only and zero-width-only source quotes in lessons and questions', () => {
+    const parsed = validateModuleLessonOutput(lesson, input);
+    if (!parsed.ok) throw new Error('lesson invalid');
+    const qinput = { ...input, lesson: parsed.value.module, lessonVersion: 7 };
+    for (const quote of ['********', '\u200b'.repeat(8)]) {
+      const badRef = { ...ref, quote };
+      const badLesson = { ...lesson, blocks: [{ ...lesson.blocks[0], sourceRefs: [badRef] }, lesson.blocks[1]] };
+      expect(validateModuleLessonOutput(badLesson, input).ok).toBe(false);
+      const questions = [question('q1'), question('q2'), question('q3')].map((q) => ({ ...q, sourceRefs: [badRef] }));
+      expect(validateModuleQuestionOutput({ questions, flags: [] }, qinput).ok).toBe(false);
+    }
+  });
+  it('rejects foreign ownership and foreign nested references before building repair context', () => {
+    const foreignBlock = { ...lesson.blocks[0], body: 'FOREIGN MODULE SECRET', sourceRefs: [{ sectionId: 'other', quote: 'Foreign module secret' }] };
+    const foreignFlag = { type: 'missing', severity: 'blocking', message: 'FOREIGN FLAG SECRET', questionForAdmin: 'Provide source', location: { moduleLocalId: 'other' }, evidence: [] };
+    for (const previous of [
+      { ...lesson, localId: 'other', blocks: [foreignBlock, lesson.blocks[1]] },
+      { ...lesson, blocks: [foreignBlock, lesson.blocks[1]] },
+      { ...lesson, flags: [foreignFlag] },
+    ]) {
+      expect(() => buildModuleLessonRepairPrompt({ ...input, previous, errors: ['invalid'] })).toThrow();
+    }
+    const request = buildModuleLessonRepairPrompt({ ...input, previous: lesson, errors: ['invalid'] });
+    expect(request.systemContext).not.toContain('FOREIGN MODULE SECRET');
+    expect(request.systemContext).not.toContain('FOREIGN FLAG SECRET');
   });
 });
