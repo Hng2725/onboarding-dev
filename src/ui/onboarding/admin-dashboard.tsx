@@ -4,6 +4,8 @@ import {
   CheckCircleOutlined,
   ClockCircleOutlined,
   ExclamationCircleOutlined,
+  FlagOutlined,
+  SafetyCertificateOutlined,
   TeamOutlined,
 } from '@ant-design/icons';
 import { useCallback, useState } from 'react';
@@ -29,6 +31,11 @@ interface MemberRow {
   readonly userId: string;
   readonly username?: string;
   readonly displayName?: string;
+}
+
+export interface AdminOperationalSummary {
+  readonly needsSupportModules: number;
+  readonly openFlags: number;
 }
 
 export interface AdminKpis {
@@ -228,13 +235,21 @@ export function buildAdminOverview(
 export async function loadAdminDashboard(api: OnboardingApi): Promise<{
   readonly assignments: readonly AssignmentRow[];
   readonly members: readonly MemberRow[];
+  readonly operational: AdminOperationalSummary;
 }> {
   const [assignmentResult, memberResult] = await Promise.all([
-    api.adminAssignments<{ assignments: readonly AssignmentRow[] }>('list'),
+    api.adminAssignments<{
+      assignments: readonly AssignmentRow[];
+      summary?: AdminOperationalSummary;
+    }>('list'),
     api.adminAssignments<{ members: readonly MemberRow[] }>('list_members')
       .catch(() => ({ members: [] as readonly MemberRow[] })),
   ]);
-  return { assignments: assignmentResult.assignments, members: memberResult.members };
+  return {
+    assignments: assignmentResult.assignments,
+    members: memberResult.members,
+    operational: assignmentResult.summary ?? { needsSupportModules: 0, openFlags: 0 },
+  };
 }
 
 function deadlineGradient(deadlines: AdminOverview['deadlines']): string {
@@ -255,11 +270,13 @@ function attentionActionLabel(route: AttentionRoute): string {
 export function AdminOverviewContent({
   rows,
   members,
+  operational = { needsSupportModules: 0, openFlags: 0 },
   now = new Date(),
   onNavigate,
 }: {
   rows: readonly AssignmentRow[];
   members: readonly MemberRow[];
+  operational?: AdminOperationalSummary;
   now?: Date;
   onNavigate: (route: AttentionRoute) => void;
 }) {
@@ -297,6 +314,21 @@ export function AdminOverviewContent({
           <div className="overview-kpi-heading"><span className="overview-kpi-icon"><TeamOutlined /></span><span>Cần Admin xử lý</span></div>
           <strong>{overview.kpis.needsAction}</strong>
           <small>Nhận xét, đánh giá hoặc xem kết quả</small>
+        </article>
+      </section>
+
+      <section className="overview-operation-strip" aria-label="Chỉ số học theo module và AI">
+        <div className="overview-operation-heading">
+          <span className="section-kicker">THEO DÕI HỖ TRỢ</span>
+          <strong>Chỉ số cần Admin chủ động xử lý</strong>
+        </div>
+        <article>
+          <span className="overview-operation-icon overview-operation-danger"><SafetyCertificateOutlined /></span>
+          <span><strong>{operational.needsSupportModules}</strong><small>Module cần hỗ trợ</small></span>
+        </article>
+        <article>
+          <span className="overview-operation-icon overview-operation-warning"><FlagOutlined /></span>
+          <span><strong>{operational.openFlags}</strong><small>Cờ đang mở</small></span>
         </article>
       </section>
 
@@ -396,6 +428,10 @@ export function AdminDashboardHeader({ onOpenEmployees }: { onOpenEmployees: () 
 export function AdminDashboard({ api, onNavigate }: { api: OnboardingApi; onNavigate: (route: AttentionRoute) => void }) {
   const [rows, setRows] = useState<readonly AssignmentRow[]>([]);
   const [members, setMembers] = useState<readonly MemberRow[]>([]);
+  const [operational, setOperational] = useState<AdminOperationalSummary>({
+    needsSupportModules: 0,
+    openFlags: 0,
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
@@ -406,6 +442,7 @@ export function AdminDashboard({ api, onNavigate }: { api: OnboardingApi; onNavi
       const result = await loadAdminDashboard(api);
       setRows(result.assignments);
       setMembers(result.members);
+      setOperational(result.operational);
       setError(null);
     } catch (caught) {
       if (initial) setError(caught instanceof Error ? caught : new Error('Không thể tải dashboard.'));
@@ -422,7 +459,7 @@ export function AdminDashboard({ api, onNavigate }: { api: OnboardingApi; onNavi
   return (
     <div className="page-stack">
       <AdminDashboardHeader onOpenEmployees={() => onNavigate('employees')} />
-      <AdminOverviewContent rows={rows} members={members} onNavigate={onNavigate} />
+      <AdminOverviewContent rows={rows} members={members} operational={operational} onNavigate={onNavigate} />
     </div>
   );
 }

@@ -5,11 +5,15 @@ import type {
   OnboardingQuestion,
   QuestionOption,
   QuestionType,
+  RoleProfile,
   ResourceKind,
+  TemplateContentSnapshot,
   TemplateModule,
   TemplateResource,
   TemplateSnapshot,
+  TemplateSource,
   TemplateStatus,
+  VerificationFlag,
 } from './contracts';
 import type { OnboardingStore, StoreRecord } from './store';
 import { SYSTEM_TEMPLATES, getSystemTemplate } from './system-templates';
@@ -55,6 +59,12 @@ export interface TemplateDraftInput {
 export interface AdminTemplateDetail extends TemplateSnapshot {
   readonly locked: boolean;
   readonly maxAttempts: number;
+  readonly flags?: readonly VerificationFlag[];
+  readonly roleProfile?: RoleProfile;
+  readonly sourceIds?: readonly string[];
+  readonly jobId?: string;
+  readonly promptVersion?: string;
+  readonly generationNotes?: readonly string[];
   readonly createdAt?: string;
   readonly updatedAt: string;
   readonly publishedAt?: string;
@@ -63,7 +73,7 @@ export interface AdminTemplateDetail extends TemplateSnapshot {
 export interface TemplateCatalogItem {
   readonly id: string;
   readonly version: number;
-  readonly source: 'system' | 'custom';
+  readonly source: TemplateSource;
   readonly status: TemplateStatus;
   readonly employeeType: EmployeeType;
   readonly title: string;
@@ -79,25 +89,50 @@ export interface UpdateTemplateDraftInput {
   readonly draft: TemplateDraftInput;
 }
 
+export interface AiTemplateDraftMetadata {
+  readonly templateId: string;
+  readonly jobId: string;
+  readonly promptVersion?: string;
+  readonly sourceIds: readonly string[];
+  readonly roleProfile?: RoleProfile;
+  readonly generationNotes?: readonly string[];
+  readonly content: TemplateContentSnapshot;
+  readonly flags: readonly VerificationFlag[];
+}
+
+export interface CreateAiTemplateDraftInput extends AiTemplateDraftMetadata {
+  readonly draft: TemplateDraftInput;
+}
+
+export interface UpdateAiTemplateDraftInput extends AiTemplateDraftMetadata {
+  readonly version: number;
+  readonly expectedUpdatedAt: string;
+  readonly draft: TemplateDraftInput;
+}
+
 export interface TemplateService {
   list(actor: OnboardingActor): Promise<readonly TemplateCatalogItem[]>;
   getAdminDetail(actor: OnboardingActor, templateId: string, version: number): Promise<AdminTemplateDetail>;
   getLearnerSnapshot(actor: OnboardingActor, templateId: string, version: number): Promise<LearnerTemplateDto>;
   createDraft(actor: OnboardingActor, draft: TemplateDraftInput): Promise<AdminTemplateDetail>;
+  createAiDraft(actor: OnboardingActor, input: CreateAiTemplateDraftInput): Promise<AdminTemplateDetail>;
   updateDraft(actor: OnboardingActor, input: UpdateTemplateDraftInput): Promise<AdminTemplateDetail>;
+  updateAiDraft(actor: OnboardingActor, input: UpdateAiTemplateDraftInput): Promise<AdminTemplateDetail>;
   cloneSystemTemplate(actor: OnboardingActor, templateId: string, version: number): Promise<AdminTemplateDetail>;
   publish(actor: OnboardingActor, templateId: string, version: number, expectedUpdatedAt?: string): Promise<AdminTemplateDetail>;
   archive(actor: OnboardingActor, templateId: string, version: number): Promise<AdminTemplateDetail>;
   deleteDraft(actor: OnboardingActor, templateId: string, version: number): Promise<void>;
 }
 
-type TemplateServiceErrorCode =
+export type TemplateServiceErrorCode =
   | 'ADMIN_REQUIRED'
+  | 'MANUAL_TEMPLATE_CREATION_DISABLED'
   | 'SYSTEM_TEMPLATE_LOCKED'
   | 'TEMPLATE_NOT_FOUND'
   | 'TEMPLATE_CONFLICT'
   | 'TEMPLATE_IN_USE'
   | 'TEMPLATE_INVALID'
+  | 'TEMPLATE_FLAGS_BLOCKING'
   | 'TEMPLATE_NOT_PUBLISHED';
 
 export class TemplateServiceError extends Error {
@@ -163,9 +198,29 @@ interface QuestionDbRecord extends StoreRecord {
   readonly order: number;
 }
 
+interface TemplateContentDbRecord extends StoreRecord {
+  readonly id: string;
+  readonly templateId: string;
+  readonly templateVersion: number;
+  readonly content: TemplateContentSnapshot;
+  readonly flags: readonly VerificationFlag[];
+  readonly roleProfile?: RoleProfile;
+  readonly sourceIds?: readonly string[];
+  readonly jobId: string;
+  readonly promptVersion?: string;
+  readonly generationNotes?: readonly string[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
 export interface TemplateServiceOptions {
   readonly id?: () => string;
   readonly now?: () => string;
+  readonly allowLegacyManualCreation?: boolean;
+  readonly publishGuard?: (
+    actor: OnboardingActor,
+    detail: AdminTemplateDetail,
+  ) => Promise<void>;
 }
 
 function requireAdmin(actor: OnboardingActor): void {
@@ -219,6 +274,7 @@ function normalizeDraft(
   version: number,
   makeId: () => string,
   forceNewIds = false,
+  source: TemplateSource = 'custom',
 ): { snapshot: TemplateSnapshot; maxAttempts: number } {
   if (input.employeeType !== 'normal' && input.employeeType !== 'advanced') {
     throw new TemplateServiceError('TEMPLATE_INVALID', 'Employee type must be normal or advanced.');
@@ -298,7 +354,7 @@ function normalizeDraft(
     snapshot: {
       id: templateId,
       version,
-      source: 'custom',
+      source,
       status: 'draft',
       employeeType: input.employeeType,
       title: text(input.title, 'Template title'),
@@ -327,8 +383,17 @@ function toDraftInput(snapshot: TemplateSnapshot, title = snapshot.title): Templ
 }
 
 function learnerSnapshot(snapshot: TemplateSnapshot): LearnerTemplateDto {
+  const learnerContent = snapshot.content
+    ? {
+      assessmentMode: snapshot.content.assessmentMode,
+      learningMode: snapshot.content.learningMode,
+      maxAttemptsPerModule: snapshot.content.maxAttemptsPerModule,
+      modules: snapshot.content.modules,
+    }
+    : undefined;
   return {
     ...snapshot,
+    ...(learnerContent ? { content: learnerContent } : {}),
     modules: snapshot.modules.map((module) => ({
       ...module,
       questions: module.questions.map((question) => {
@@ -358,6 +423,38 @@ export function createTemplateService(
     const record = await findRecord(roomId, templateId, version);
     if (!record) throw new TemplateServiceError('TEMPLATE_NOT_FOUND', `Template ${templateId}@${version} was not found.`);
     return record;
+  }
+
+  async function findAiContent(
+    roomId: string,
+    templateId: string,
+    version: number,
+  ): Promise<TemplateContentDbRecord | undefined> {
+    const result = await store.query<TemplateContentDbRecord>(roomId, 'onboarding_template_content', {
+      filter: { templateId, templateVersion: version },
+      limit: 1,
+    });
+    return result.records[0];
+  }
+
+  async function persistAiContent(
+    roomId: string,
+    input: AiTemplateDraftMetadata & { readonly version: number },
+    timestamp: string,
+  ): Promise<TemplateContentDbRecord> {
+    return store.create<TemplateContentDbRecord>(roomId, 'onboarding_template_content', {
+      templateId: input.templateId,
+      templateVersion: input.version,
+      content: input.content,
+      flags: input.flags,
+      ...(input.roleProfile ? { roleProfile: input.roleProfile } : {}),
+      sourceIds: input.sourceIds,
+      jobId: input.jobId,
+      ...(input.promptVersion ? { promptVersion: input.promptVersion } : {}),
+      ...(input.generationNotes ? { generationNotes: input.generationNotes } : {}),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }, `ai-template-content:${input.templateId}:${input.version}`);
   }
 
   async function persistContent(roomId: string, snapshot: TemplateSnapshot, timestamp: string): Promise<void> {
@@ -435,6 +532,7 @@ export function createTemplateService(
   }
 
   async function loadCustom(roomId: string, record: TemplateDbRecord): Promise<AdminTemplateDetail> {
+    const ai = await findAiContent(roomId, record.templateId, record.version);
     const moduleRows = await store.query<ModuleDbRecord>(roomId, 'onboarding_modules', {
       filter: { templateId: record.templateId, templateVersion: record.version },
       orderBy: [{ field: 'order', direction: 'asc' }],
@@ -479,12 +577,22 @@ export function createTemplateService(
     return {
       id: record.templateId,
       version: record.version,
-      source: 'custom',
+      source: ai ? 'ai_generated' : 'custom',
       status: record.status,
       employeeType: record.employeeType,
       title: record.title,
       description: record.description,
       passingScore: record.passingScore,
+      ...(ai ? {
+        assessmentMode: 'per_module' as const,
+        content: ai.content,
+        flags: ai.flags,
+        roleProfile: ai.roleProfile,
+        sourceIds: ai.sourceIds,
+        jobId: ai.jobId,
+        promptVersion: ai.promptVersion,
+        generationNotes: ai.generationNotes,
+      } : {}),
       modules,
       locked: false,
       maxAttempts: record.maxAttempts,
@@ -521,11 +629,147 @@ export function createTemplateService(
     return loadCustom(actor.roomId, await requireRecord(actor.roomId, templateId, 1));
   }
 
+  async function persistNewAiDraft(
+    actor: OnboardingActor,
+    input: CreateAiTemplateDraftInput,
+  ): Promise<AdminTemplateDetail> {
+    const existingRecord = await findRecord(actor.roomId, input.templateId, 1);
+    const existingContent = await findAiContent(actor.roomId, input.templateId, 1);
+    if (existingContent) {
+      if (existingContent.jobId !== input.jobId) {
+        throw new TemplateServiceError('TEMPLATE_CONFLICT', 'The AI template ID belongs to another generation job.');
+      }
+      if (!existingRecord) {
+        throw new TemplateServiceError('TEMPLATE_CONFLICT', 'The AI template catalog record is missing.');
+      }
+      return loadCustom(actor.roomId, existingRecord);
+    }
+
+    const normalized = normalizeDraft(
+      input.draft,
+      input.templateId,
+      1,
+      makeId,
+      false,
+      'ai_generated',
+    );
+    const timestamp = now();
+    let record = existingRecord;
+    if (record) {
+      if (
+        record.title !== normalized.snapshot.title
+        || record.employeeType !== normalized.snapshot.employeeType
+        || record.status !== 'draft'
+      ) {
+        throw new TemplateServiceError('TEMPLATE_CONFLICT', 'The AI template ID conflicts with an existing template.');
+      }
+    } else {
+      record = await store.create<TemplateDbRecord>(actor.roomId, 'onboarding_templates', {
+        templateId: input.templateId,
+        title: normalized.snapshot.title,
+        description: normalized.snapshot.description,
+        employeeType: normalized.snapshot.employeeType,
+        status: 'draft',
+        version: 1,
+        passingScore: normalized.snapshot.passingScore,
+        maxAttempts: normalized.maxAttempts,
+        createdBy: actor.userId,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }, `ai-template:${input.jobId}`);
+      await persistContent(actor.roomId, normalized.snapshot, timestamp);
+    }
+    await persistAiContent(actor.roomId, { ...input, version: 1 }, timestamp);
+    return loadCustom(actor.roomId, record);
+  }
+
+  async function persistAiDraftUpdate(
+    actor: OnboardingActor,
+    input: UpdateAiTemplateDraftInput,
+  ): Promise<AdminTemplateDetail> {
+    const record = await requireRecord(actor.roomId, input.templateId, input.version);
+    const ai = await findAiContent(actor.roomId, input.templateId, input.version);
+    if (!ai) throw new TemplateServiceError('TEMPLATE_INVALID', 'This template is not AI-generated.');
+    const currentUpdatedAt = canonicalTimestamp(record.updatedAt, 'Template updatedAt');
+    const expectedUpdatedAt = canonicalTimestamp(input.expectedUpdatedAt, 'Expected template updatedAt');
+    if (currentUpdatedAt !== expectedUpdatedAt) {
+      throw new TemplateServiceError('TEMPLATE_CONFLICT', 'Template changed after this editor loaded it.');
+    }
+    if (record.status !== 'draft' && record.status !== 'published') {
+      throw new TemplateServiceError('TEMPLATE_INVALID', 'Only draft or published AI templates can be edited.');
+    }
+    const timestamp = now();
+    const version = record.status === 'draft'
+      ? record.version
+      : Math.max(
+        ...(await store.query<TemplateDbRecord>(actor.roomId, 'onboarding_templates', {
+          filter: { templateId: record.templateId },
+          limit: 1000,
+        })).records.map((item) => item.version),
+      ) + 1;
+    const normalized = normalizeDraft(
+      input.draft,
+      input.templateId,
+      version,
+      makeId,
+      false,
+      'ai_generated',
+    );
+
+    if (record.status === 'draft') {
+      await removeContent(actor.roomId, record.templateId, record.version);
+      await store.update(actor.roomId, 'onboarding_templates', record.id, {
+        title: normalized.snapshot.title,
+        description: normalized.snapshot.description,
+        employeeType: normalized.snapshot.employeeType,
+        passingScore: normalized.snapshot.passingScore,
+        maxAttempts: normalized.maxAttempts,
+        updatedAt: timestamp,
+      }, { expectedUpdatedAt: currentUpdatedAt });
+      await persistContent(actor.roomId, normalized.snapshot, timestamp);
+      await store.update(actor.roomId, 'onboarding_template_content', ai.id, {
+        content: input.content,
+        flags: input.flags,
+        ...(input.roleProfile ? { roleProfile: input.roleProfile } : {}),
+        sourceIds: input.sourceIds,
+        jobId: input.jobId,
+        ...(input.promptVersion ? { promptVersion: input.promptVersion } : {}),
+        ...(input.generationNotes ? { generationNotes: input.generationNotes } : {}),
+        updatedAt: timestamp,
+      }, { expectedUpdatedAt: ai.updatedAt });
+      return loadCustom(actor.roomId, await requireRecord(actor.roomId, record.templateId, version));
+    }
+
+    const nextRecord = await store.create<TemplateDbRecord>(actor.roomId, 'onboarding_templates', {
+      templateId: record.templateId,
+      title: normalized.snapshot.title,
+      description: normalized.snapshot.description,
+      employeeType: normalized.snapshot.employeeType,
+      status: 'draft',
+      version,
+      passingScore: normalized.snapshot.passingScore,
+      maxAttempts: normalized.maxAttempts,
+      createdBy: actor.userId,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }, `ai-template-revision:${record.templateId}:${version}`);
+    await persistContent(actor.roomId, normalized.snapshot, timestamp);
+    await persistAiContent(actor.roomId, { ...input, version }, timestamp);
+    return loadCustom(actor.roomId, nextRecord);
+  }
+
   return {
     async list(actor) {
-      const custom = await store.query<TemplateDbRecord>(actor.roomId, 'onboarding_templates', {
-        orderBy: [{ field: 'updatedAt', direction: 'desc' }], limit: 1000,
-      });
+      const [custom, aiContent] = await Promise.all([
+        store.query<TemplateDbRecord>(actor.roomId, 'onboarding_templates', {
+          orderBy: [{ field: 'updatedAt', direction: 'desc' }], limit: 1000,
+        }),
+        store.query<TemplateContentDbRecord>(actor.roomId, 'onboarding_template_content', {
+          limit: 1000,
+        }),
+      ]);
+      const aiVersions = new Set(aiContent.records.map((row) =>
+        row.templateId + '@' + String(row.templateVersion)));
       return [
         ...SYSTEM_TEMPLATES.map((snapshot): TemplateCatalogItem => ({
           id: snapshot.id,
@@ -541,7 +785,9 @@ export function createTemplateService(
         ...custom.records.map((record): TemplateCatalogItem => ({
           id: record.templateId,
           version: record.version,
-          source: 'custom',
+          source: aiVersions.has(record.templateId + '@' + String(record.version))
+            ? 'ai_generated'
+            : 'custom',
           status: record.status,
           employeeType: record.employeeType,
           title: record.title,
@@ -571,7 +817,18 @@ export function createTemplateService(
 
     async createDraft(actor, draft) {
       requireAdmin(actor);
+      if (!options.allowLegacyManualCreation) {
+        throw new TemplateServiceError(
+          'MANUAL_TEMPLATE_CREATION_DISABLED',
+          'New templates must be generated from Admin-provided source documents.',
+        );
+      }
       return createCustomDraft(actor, draft);
+    },
+
+    async createAiDraft(actor, input) {
+      requireAdmin(actor);
+      return persistNewAiDraft(actor, input);
     },
 
     async updateDraft(actor, input) {
@@ -623,8 +880,20 @@ export function createTemplateService(
       return loadCustom(actor.roomId, await requireRecord(actor.roomId, record.templateId, version));
     },
 
+    async updateAiDraft(actor, input) {
+      requireAdmin(actor);
+      if (systemId(input.templateId)) return locked(input.templateId);
+      return persistAiDraftUpdate(actor, input);
+    },
+
     async cloneSystemTemplate(actor, templateId, version) {
       requireAdmin(actor);
+      if (!options.allowLegacyManualCreation) {
+        throw new TemplateServiceError(
+          'MANUAL_TEMPLATE_CREATION_DISABLED',
+          'New templates must be generated from Admin-provided source documents.',
+        );
+      }
       const source = getSystemTemplate(templateId, version);
       if (!source) throw new TemplateServiceError('TEMPLATE_NOT_FOUND', `System template ${templateId}@${version} was not found.`);
       return createCustomDraft(actor, toDraftInput(source, `${source.title} — bản sao`), true);
@@ -639,6 +908,8 @@ export function createTemplateService(
       if (expectedUpdatedAt && canonicalTimestamp(expectedUpdatedAt, 'Expected template updatedAt') !== currentUpdatedAt) {
         throw new TemplateServiceError('TEMPLATE_CONFLICT', 'Template changed before publication.');
       }
+      const detail = await loadCustom(actor.roomId, record);
+      if (options.publishGuard) await options.publishGuard(actor, detail);
       const timestamp = now();
       await store.update(actor.roomId, 'onboarding_templates', record.id, {
         status: 'published', publishedAt: timestamp, updatedAt: timestamp,
@@ -668,6 +939,8 @@ export function createTemplateService(
       });
       if (assignments > 0) throw new TemplateServiceError('TEMPLATE_IN_USE', 'This template version is assigned.');
       await removeContent(actor.roomId, templateId, version);
+      const ai = await findAiContent(actor.roomId, templateId, version);
+      if (ai) await store.softDelete(actor.roomId, 'onboarding_template_content', ai.id);
       await store.softDelete(actor.roomId, 'onboarding_templates', record.id);
     },
   };

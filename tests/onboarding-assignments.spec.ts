@@ -5,11 +5,13 @@ import {
   AssignmentServiceError,
   createAssignmentService,
 } from '../src/onboarding/assignments';
+import { materializeAiTemplate } from '../src/onboarding/ai/materialize';
 import { createEmployeeService } from '../src/onboarding/employees';
 import type { NotificationPort } from '../src/onboarding/notifications';
 import type { StoreQueryOptions, StoreRecord } from '../src/onboarding/store';
 import { createTemplateService } from '../src/onboarding/templates';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
+import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
 
 const admin: OnboardingActor = { userId: 'admin-1', roomId: 'room-a', access: 'admin' };
 const member: OnboardingActor = { userId: 'member-1', roomId: 'room-a', access: 'learner' };
@@ -75,6 +77,7 @@ function setup(
 ) {
   let sequence = 0;
   const templates = createTemplateService(store, {
+    allowLegacyManualCreation: true,
     id: () => `template-id-${++sequence}`,
     now: () => `2026-10-20T00:00:${String(++sequence).padStart(2, '0')}.000Z`,
   });
@@ -237,7 +240,13 @@ describe('onboarding assignment service', () => {
       templateVersion: 1,
       status: 'assigned',
     });
-    expect(callPlatform).toHaveBeenCalledWith('mcpapp.rooms.getMembers', { roomId: 'room-a' }, 'rooms:read', 'room-a');
+    expect(callPlatform).toHaveBeenCalledWith(
+      'mcpapp.rooms.getMembers',
+      { roomId: 'room-a' },
+      'rooms:read',
+      'room-a',
+      { replaySafe: true },
+    );
   });
 
   it('assigns a room member identified by the platform _id field', async () => {
@@ -370,6 +379,36 @@ describe('onboarding assignment service', () => {
     await templates.publish(admin, draft.id, 2, next.updatedAt);
 
     expect((await service.getMine(member, assignment.id)).template.title).toBe('Phiên bản gốc');
+  });
+
+  it('pins AI lesson content and strips question metadata from the learner assignment DTO', async () => {
+    const context = setup();
+    await seedAiSource(context.store);
+    const draft = await materializeAiTemplate(context.store, context.templates, admin, {
+      jobId: 'assignment-ai-job',
+      promptVersion: '2026-10-23.1',
+      templateKind: 'normal',
+      generated: generatedTemplate,
+      sources: [aiSource],
+    });
+    await context.templates.publish(admin, draft.id, draft.version, draft.updatedAt);
+    await context.employees.add(admin, { memberId: 'member-1', employeeType: 'normal' });
+    const { assignment } = await context.service.assign(admin, {
+      memberId: 'member-1',
+      templateId: draft.id,
+      templateVersion: draft.version,
+    });
+
+    const adminDetail = await context.service.getAdminDetail(admin, assignment.id);
+    const learnerDetail = await context.service.getMine(member, assignment.id);
+
+    expect(adminDetail.template.content?.questionMeta).toHaveLength(12);
+    expect(adminDetail.moduleStates?.map((module) => module.status)).toEqual([
+      'available', 'locked', 'locked', 'locked',
+    ]);
+    expect(learnerDetail.template.content?.modules).toHaveLength(4);
+    expect(learnerDetail.template.content).not.toHaveProperty('questionMeta');
+    expect(JSON.stringify(learnerDetail.template)).not.toContain('correctOptionIds');
   });
 
   it('keeps a successful assignment when notification delivery fails', async () => {

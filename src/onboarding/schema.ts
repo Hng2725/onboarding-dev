@@ -117,7 +117,7 @@ export const ONBOARDING_COLLECTIONS: readonly OnboardingCollectionDefinition[] =
     field('createdAt', 'datetime', true), field('updatedAt', 'datetime', true), field('deletedAt', 'datetime'),
   ], [
     index('attempts_assignment_ordinal_unique', ['assignmentId', 'ordinal'], true),
-    index('attempts_operation_unique', ['operationId'], true),
+    index('attempts_operation', ['operationId']),
     index('attempts_member_status', ['memberId', 'status']),
   ]),
   collection('onboarding_answers', [
@@ -154,7 +154,69 @@ export const ONBOARDING_COLLECTIONS: readonly OnboardingCollectionDefinition[] =
   ], [
     index('audit_target_time', ['targetType', 'targetId', 'occurredAt']),
     index('audit_actor_time', ['actorId', 'occurredAt']),
-    index('audit_operation_unique', ['operationId'], true),
+    index('audit_operation', ['operationId']),
+  ]),
+  collection('onboarding_sources', [
+    field('sourceId', 'string', true), field('kind', 'string', true),
+    field('fileId'), field('fileName', 'string', true), field('mimeType'),
+    field('checksum', 'string', true), field('systemName', 'string', true),
+    field('softwareVersion'), field('effectiveDate'), field('status', 'string', true),
+    field('errorCode'), field('sections', 'json'), field('textLength', 'number'),
+    field('createdBy', 'string', true), field('createdAt', 'datetime', true),
+    field('updatedAt', 'datetime', true), field('deletedAt', 'datetime'),
+  ], [
+    index('sources_source_id_unique', ['sourceId'], true),
+    index('sources_checksum', ['checksum']),
+  ]),
+  collection('onboarding_ai_jobs', [
+    field('jobId', 'string', true), field('kind', 'string', true),
+    field('status', 'string', true), field('templateKind'), field('roleProfile', 'json'),
+    field('title'), field('sourceIds', 'string[]'), field('inventoryJobId'),
+    field('promptVersion', 'string', true), field('calls', 'json'),
+    field('stageOutputs', 'json'), field('result', 'json'),
+    field('pumpLeaseUntil', 'datetime'), field('pumpedBy'), field('errorCode'),
+    field('errorMessage'), field('operationId', 'string', true),
+    field('createdBy', 'string', true), field('createdAt', 'datetime', true),
+    field('updatedAt', 'datetime', true),
+  ], [
+    index('ai_jobs_job_id_unique', ['jobId'], true),
+    index('ai_jobs_status_time', ['status', 'createdAt']),
+    index('ai_jobs_operation', ['operationId']),
+  ]),
+  collection('onboarding_template_content', [
+    field('templateId', 'string', true), field('templateVersion', 'number', true),
+    field('content', 'json', true), field('flags', 'json', true),
+    field('roleProfile', 'json'), field('sourceIds', 'string[]'),
+    field('jobId', 'string', true), field('promptVersion'),
+    field('generationNotes', 'json'), field('createdAt', 'datetime', true),
+    field('updatedAt', 'datetime', true),
+  ], [
+    index('template_content_unique', ['templateId', 'templateVersion'], true),
+  ]),
+  collection('onboarding_module_progress', [
+    field('assignmentId', 'string', true), field('memberId', 'string', true),
+    field('moduleId', 'string', true), field('openedAt', 'datetime'),
+    field('lessonCompletedAt', 'datetime'), field('passedAt', 'datetime'),
+    field('attemptCount', 'number', true), field('bestScore', 'number'),
+    field('extraAttempts', 'number', true), field('createdAt', 'datetime', true),
+    field('updatedAt', 'datetime', true),
+  ], [
+    index('module_progress_unique', ['assignmentId', 'moduleId'], true),
+    index('module_progress_member', ['memberId', 'assignmentId']),
+  ]),
+  collection('onboarding_module_attempts', [
+    field('assignmentId', 'string', true), field('memberId', 'string', true),
+    field('moduleId', 'string', true), field('ordinal', 'number', true),
+    field('status', 'string', true), field('questionOrder', 'string[]'),
+    field('optionOrder', 'json'), field('answers', 'json'),
+    field('correctCount', 'number'), field('totalCount', 'number'),
+    field('score', 'number'), field('passed', 'boolean'), field('operationId'),
+    field('startedAt', 'datetime'), field('submittedAt', 'datetime'),
+    field('createdAt', 'datetime', true), field('updatedAt', 'datetime', true),
+  ], [
+    index('module_attempts_ordinal_unique', ['assignmentId', 'moduleId', 'ordinal'], true),
+    index('module_attempts_operation', ['operationId']),
+    index('module_attempts_member', ['memberId', 'assignmentId']),
   ]),
 ] as const;
 
@@ -168,6 +230,7 @@ export async function ensureOnboardingSchema(roomId: string): Promise<void> {
         definition as unknown as Record<string, unknown>,
         'db:schema:write',
         roomId,
+        { replaySafe: true },
       );
     } catch (error) {
       const record = error && typeof error === 'object' ? error as Record<string, unknown> : undefined;
@@ -182,6 +245,7 @@ export async function ensureOnboardingSchema(roomId: string): Promise<void> {
       { collection: definition.collection },
       'db:schema:read',
       roomId,
+      { replaySafe: true },
     );
   }
 }

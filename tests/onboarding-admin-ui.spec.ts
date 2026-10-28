@@ -254,6 +254,7 @@ describe('Admin onboarding UI models', () => {
 
     expect(result.assignments).toHaveLength(1);
     expect(result.members).toEqual([]);
+    expect(result.operational).toEqual({ needsSupportModules: 0, openFlags: 0 });
     expect(dashboardMemberLabel(result.members, result.assignments[0].memberId)).toBe('member-1');
   });
 
@@ -299,12 +300,12 @@ describe('Admin onboarding UI models', () => {
   });
 
   it('never offers edit or delete for system templates', () => {
-    expect(templateActions({ source: 'system', status: 'published' })).toEqual(['use', 'clone']);
+    expect(templateActions({ source: 'system', status: 'published' })).toEqual(['use']);
   });
 
   it('offers deletion for every custom template lifecycle while archived templates remain inactive', () => {
-    expect(templateActions({ source: 'custom', status: 'published' })).toEqual(['use', 'edit', 'archive', 'delete']);
-    expect(templateActions({ source: 'custom', status: 'draft' })).toEqual(['edit', 'delete']);
+    expect(templateActions({ source: 'custom', status: 'published' })).toEqual(['use', 'archive', 'delete']);
+    expect(templateActions({ source: 'custom', status: 'draft' })).toEqual(['delete']);
     expect(templateActions({ source: 'custom', status: 'archived' })).toEqual(['delete']);
   });
 

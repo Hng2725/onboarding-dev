@@ -39,6 +39,7 @@ describe('onboarding employee service', () => {
     expect(await service.list(admin)).toEqual([employee]);
     expect(callPlatform).toHaveBeenCalledWith(
       'mcpapp.rooms.getMembers', { roomId: 'room-a' }, 'rooms:read', 'room-a',
+      { replaySafe: true },
     );
   });
 

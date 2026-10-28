@@ -19,6 +19,11 @@ const COLLECTION_NAMES = [
   'onboarding_essay_feedback',
   'onboarding_evaluations',
   'onboarding_audit_events',
+  'onboarding_sources',
+  'onboarding_ai_jobs',
+  'onboarding_template_content',
+  'onboarding_module_progress',
+  'onboarding_module_attempts',
 ];
 
 describe('onboarding App Database schema', () => {
@@ -26,7 +31,7 @@ describe('onboarding App Database schema', () => {
     callAppPlatformTool.mockReset();
   });
 
-  it('defines all twelve room-scoped collections and required unique indexes', () => {
+  it('defines all room-scoped collections and required unique indexes', () => {
     expect(ONBOARDING_COLLECTIONS.map((definition) => definition.collection)).toEqual(COLLECTION_NAMES);
     expect(ONBOARDING_COLLECTIONS.every((definition) => definition.scope === 'room')).toBe(true);
 
@@ -41,7 +46,7 @@ describe('onboarding App Database schema', () => {
     expect(indexes('onboarding_material_progress')).toContainEqual(expect.objectContaining({
       fields: { assignmentId: 1, resourceId: 1 }, unique: true,
     }));
-    expect(indexes('onboarding_attempts')).toContainEqual(expect.objectContaining({
+    expect(indexes('onboarding_attempts')).not.toContainEqual(expect.objectContaining({
       fields: { operationId: 1 }, unique: true,
     }));
     expect(indexes('onboarding_evaluations')).toContainEqual(expect.objectContaining({
@@ -57,8 +62,8 @@ describe('onboarding App Database schema', () => {
 
     await ensureOnboardingSchema('room-a');
 
-    expect(callAppPlatformTool).toHaveBeenCalledTimes(24);
-    for (const [index, [toolName, args, scope, roomId]] of callAppPlatformTool.mock.calls.entries()) {
+    expect(callAppPlatformTool).toHaveBeenCalledTimes(COLLECTION_NAMES.length * 2);
+    for (const [index, [toolName, args, scope, roomId, options]] of callAppPlatformTool.mock.calls.entries()) {
       if (index % 2 === 0) {
         expect(toolName).toBe('mcpapp.db.registerCollection');
         expect(args.scope).toBe('room');
@@ -68,6 +73,7 @@ describe('onboarding App Database schema', () => {
         expect(scope).toBe('db:schema:read');
       }
       expect(roomId).toBe('room-a');
+      expect(options).toEqual({ replaySafe: true });
     }
   });
 
@@ -79,7 +85,7 @@ describe('onboarding App Database schema', () => {
 
     const result = await ensureOnboardingSchema('room-a');
     expect(result).toBeUndefined();
-    expect(callAppPlatformTool).toHaveBeenCalledTimes(24);
+    expect(callAppPlatformTool).toHaveBeenCalledTimes(COLLECTION_NAMES.length * 2);
   });
 });
 
@@ -107,19 +113,40 @@ describe('onboarding store adapter', () => {
     await store.count('room-a', 'onboarding_assignments', { status: 'assigned' });
     await store.aggregate('room-a', 'onboarding_assignments', { groupBy: ['status'] });
 
-    expect(callAppPlatformTool.mock.calls.map(([tool, , scope, room]) => [tool, scope, room])).toEqual([
-      ['mcpapp.db.create', 'db:write', 'room-a'],
-      ['mcpapp.db.get', 'db:read', 'room-a'],
-      ['mcpapp.db.query', 'db:read', 'room-a'],
-      ['mcpapp.db.update', 'db:write', 'room-a'],
-      ['mcpapp.db.delete', 'db:write', 'room-a'],
-      ['mcpapp.db.count', 'db:read', 'room-a'],
-      ['mcpapp.db.aggregate', 'db:read', 'room-a'],
+    expect(callAppPlatformTool.mock.calls.map(([tool, , scope, room, options]) => [tool, scope, room, options])).toEqual([
+      ['mcpapp.db.create', 'db:write', 'room-a', undefined],
+      ['mcpapp.db.get', 'db:read', 'room-a', { replaySafe: true }],
+      ['mcpapp.db.query', 'db:read', 'room-a', { replaySafe: true }],
+      ['mcpapp.db.update', 'db:write', 'room-a', undefined],
+      ['mcpapp.db.delete', 'db:write', 'room-a', undefined],
+      ['mcpapp.db.count', 'db:read', 'room-a', { replaySafe: true }],
+      ['mcpapp.db.aggregate', 'db:read', 'room-a', { replaySafe: true }],
     ]);
     expect(callAppPlatformTool.mock.calls[2][1]).toMatchObject({ limit: 50 });
     expect(callAppPlatformTool.mock.calls[4][1]).toEqual({
       collection: 'onboarding_templates', id: 'one',
     });
+  });
+
+  it('marks database writes replay-safe only when they carry an operation id', async () => {
+    callAppPlatformTool
+      .mockResolvedValueOnce({ record: { id: 'created' } })
+      .mockResolvedValueOnce({ record: { id: 'updated' } });
+    const store = createOnboardingStore();
+
+    await store.create('room-a', 'onboarding_templates', { title: 'Created' }, 'create-operation');
+    await store.update(
+      'room-a',
+      'onboarding_templates',
+      'updated',
+      { title: 'Updated' },
+      { operationId: 'update-operation' },
+    );
+
+    expect(callAppPlatformTool.mock.calls.map(([tool, args, , , options]) => [tool, args.operationId, options])).toEqual([
+      ['mcpapp.db.create', 'create-operation', { replaySafe: true }],
+      ['mcpapp.db.update', 'update-operation', { replaySafe: true }],
+    ]);
   });
 
   it('keeps every operation bound to its explicit actor-derived room', async () => {
@@ -133,6 +160,7 @@ describe('onboarding store adapter', () => {
       expect.objectContaining({ collection: 'onboarding_assignments', limit: 10 }),
       'db:read',
       'verified-room',
+      { replaySafe: true },
     );
   });
 
@@ -147,6 +175,42 @@ describe('onboarding store adapter', () => {
     );
 
     expect(created).toEqual({ _id: 'mongo-1', id: 'mongo-1', title: 'Mẫu' });
+  });
+
+  it.each([
+    ['direct _id', { _id: 'mongo-get-direct', title: 'Direct' }, { _id: 'mongo-get-direct', id: 'mongo-get-direct', title: 'Direct' }],
+    ['wrapped _id', { record: { _id: 'mongo-get-wrapped', title: 'Wrapped' } }, { _id: 'mongo-get-wrapped', id: 'mongo-get-wrapped', title: 'Wrapped' }],
+    ['direct id', { id: 'hub-get-direct', title: 'Direct id' }, { id: 'hub-get-direct', title: 'Direct id' }],
+    ['wrapped id', { record: { id: 'hub-get-wrapped', title: 'Wrapped id' } }, { id: 'hub-get-wrapped', title: 'Wrapped id' }],
+  ])('accepts %s Hub records from get', async (_shape, response, expected) => {
+    callAppPlatformTool.mockResolvedValue(response);
+    const store = createOnboardingStore();
+
+    const record = await store.get<{ id: string; title: string }>(
+      'room-a',
+      'onboarding_templates',
+      expected.id,
+    );
+
+    expect(record).toEqual(expected);
+  });
+
+  it('keeps a wrapped null get result as not found', async () => {
+    callAppPlatformTool.mockResolvedValue({ record: null });
+    const store = createOnboardingStore();
+
+    await expect(
+      store.get('room-a', 'onboarding_templates', 'missing'),
+    ).resolves.toBeNull();
+  });
+
+  it('rejects a malformed wrapped get result even when the envelope has an id', async () => {
+    callAppPlatformTool.mockResolvedValue({ id: 'outer-envelope', record: 42 });
+    const store = createOnboardingStore();
+
+    await expect(
+      store.get('room-a', 'onboarding_templates', 'outer-envelope'),
+    ).rejects.toMatchObject({ code: 'STORE_MALFORMED_RESULT' });
   });
 
   it('translates equality filters to Hub where clauses and normalizes queried _id values', async () => {

@@ -1,6 +1,6 @@
 {
   "name": "ai.privos.mcp-app-onboarding-dev",
-  "version": "2.17.19",
+  "version": "2.20.0",
   "type": "module",
   "private": false,
   "description": "Onboard room members with required learning materials, knowledge checks, essay feedback, and Admin evaluations in PrivOS.",
@@ -52,18 +52,24 @@
     "@ant-design/icons": "^6.3.4",
     "@privos_ai/app-server": "^0.11.1",
     "dotenv": "^17.3.1",
+    "mammoth": "^1.13.0",
+    "pdfmake": "0.3.11",
     "tsx": "^4.0.0",
+    "unpdf": "^1.9.1",
     "ws": "^8.21.0"
   },
   "devDependencies": {
     "@privos_ai/app-react": "^0.6.0",
     "@types/express": "^5.0.6",
+    "@types/pdfmake": "0.3.3",
     "@types/react": "^18.0.0",
     "@types/react-dom": "^18.0.0",
+    "@types/react-test-renderer": "^18.3.1",
     "@types/ws": "^8.0.0",
     "@vitejs/plugin-react": "^4.0.0",
     "react": "^18.0.0",
     "react-dom": "^18.0.0",
+    "react-test-renderer": "^18.3.1",
     "typescript": "^5.0.0",
     "vite": "^5.0.0",
     "vitest": "^2.1.9"

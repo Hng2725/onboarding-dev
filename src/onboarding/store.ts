@@ -106,8 +106,10 @@ function malformed(operation: string): never {
 
 function recordResult<T extends StoreRecord>(value: unknown, operation: string): T {
   const envelope = asRecord(value);
-  const nestedRecord = envelope && asRecord(envelope.record);
+  const hasWrappedRecord = Boolean(envelope && Object.prototype.hasOwnProperty.call(envelope, 'record'));
+  const nestedRecord = hasWrappedRecord ? asRecord(envelope?.record) : undefined;
   const directRecord = envelope
+    && !hasWrappedRecord
     && (typeof envelope.id === 'string' || typeof envelope._id === 'string')
     ? envelope
     : undefined;
@@ -132,7 +134,9 @@ export function createOnboardingStore(caller: AppPlatformToolCaller = callAppPla
     ): Promise<T> {
       const args: StoreRecord = { collection, data };
       if (operationId) args.operationId = operationId;
-      const result = await caller('mcpapp.db.create', args, 'db:write', requiredRoom(roomId));
+      const result = operationId
+        ? await caller('mcpapp.db.create', args, 'db:write', requiredRoom(roomId), { replaySafe: true })
+        : await caller('mcpapp.db.create', args, 'db:write', requiredRoom(roomId));
       return recordResult<T>(result, 'mcpapp.db.create');
     },
 
@@ -146,14 +150,15 @@ export function createOnboardingStore(caller: AppPlatformToolCaller = callAppPla
         { collection, id },
         'db:read',
         requiredRoom(roomId),
+        { replaySafe: true },
       );
       const envelope = asRecord(result);
-      if (!envelope || !Object.prototype.hasOwnProperty.call(envelope, 'record')) {
-        return malformed('mcpapp.db.get');
-      }
-      if (envelope.record === null) return null;
-      const record = asRecord(envelope.record);
-      return record ? record as T : malformed('mcpapp.db.get');
+      if (
+        envelope
+        && Object.prototype.hasOwnProperty.call(envelope, 'record')
+        && envelope.record === null
+      ) return null;
+      return recordResult<T>(result, 'mcpapp.db.get');
     },
 
     async query<T extends StoreRecord>(
@@ -174,7 +179,13 @@ export function createOnboardingStore(caller: AppPlatformToolCaller = callAppPla
       if (options.orderBy) args.orderBy = options.orderBy;
       if (options.cursor) args.cursor = options.cursor;
       if (options.includeDeleted) args.includeDeleted = true;
-      const result = await caller('mcpapp.db.query', args, 'db:read', requiredRoom(roomId));
+      const result = await caller(
+        'mcpapp.db.query',
+        args,
+        'db:read',
+        requiredRoom(roomId),
+        { replaySafe: true },
+      );
       const envelope = asRecord(result);
       if (!envelope || !Array.isArray(envelope.records) || !envelope.records.every(asRecord)) {
         return malformed('mcpapp.db.query');
@@ -200,7 +211,9 @@ export function createOnboardingStore(caller: AppPlatformToolCaller = callAppPla
       const args: StoreRecord = { collection, id, data };
       if (options.expectedUpdatedAt) args.expectedUpdatedAt = options.expectedUpdatedAt;
       if (options.operationId) args.operationId = options.operationId;
-      const result = await caller('mcpapp.db.update', args, 'db:write', requiredRoom(roomId));
+      const result = options.operationId
+        ? await caller('mcpapp.db.update', args, 'db:write', requiredRoom(roomId), { replaySafe: true })
+        : await caller('mcpapp.db.update', args, 'db:write', requiredRoom(roomId));
       return recordResult<T>(result, 'mcpapp.db.update');
     },
 
@@ -228,6 +241,7 @@ export function createOnboardingStore(caller: AppPlatformToolCaller = callAppPla
         { collection, ...(where.length > 0 ? { where } : {}) },
         'db:read',
         requiredRoom(roomId),
+        { replaySafe: true },
       );
       const envelope = asRecord(result);
       if (!envelope || typeof envelope.count !== 'number' || !Number.isFinite(envelope.count)) {
@@ -246,6 +260,7 @@ export function createOnboardingStore(caller: AppPlatformToolCaller = callAppPla
         { collection, ...pipeline },
         'db:read',
         requiredRoom(roomId),
+        { replaySafe: true },
       );
       const envelope = asRecord(result);
       if (!envelope || !Object.prototype.hasOwnProperty.call(envelope, 'result')) {

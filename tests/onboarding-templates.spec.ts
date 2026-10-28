@@ -41,6 +41,7 @@ function setup() {
   let tick = 0;
   const store = new MemoryOnboardingStore();
   const service = createTemplateService(store, {
+    allowLegacyManualCreation: true,
     id: () => `stable-${++tick}`,
     now: () => `2026-10-20T00:00:${String(++tick).padStart(2, '0')}.000Z`,
   });
@@ -122,6 +123,18 @@ class MongoUniqueIndexStore extends NativeDateReadStore {
 }
 
 describe('onboarding template service', () => {
+  it('rejects new manual templates by default with a typed error', async () => {
+    const service = createTemplateService(new MemoryOnboardingStore());
+
+    await expect(service.createDraft(admin, draftInput)).rejects.toMatchObject({
+      name: 'TemplateServiceError',
+      code: 'MANUAL_TEMPLATE_CREATION_DISABLED',
+    });
+    await expect(service.cloneSystemTemplate(admin, 'privos-foundations', 1)).rejects.toMatchObject({
+      code: 'MANUAL_TEMPLATE_CREATION_DISABLED',
+    });
+  });
+
   it('lists system templates as published and locked and rejects every mutation', async () => {
     const { service } = setup();
     const listed = await service.list(admin);
@@ -153,6 +166,7 @@ describe('onboarding template service', () => {
   it('saves and publishes a cloned template when database datetimes hydrate as Date objects', async () => {
     let tick = 0;
     const service = createTemplateService(new MongoUniqueIndexStore(), {
+      allowLegacyManualCreation: true,
       id: () => `date-id-${++tick}`,
       now: () => `2026-10-20T00:01:${String(++tick).padStart(2, '0')}.000Z`,
     });

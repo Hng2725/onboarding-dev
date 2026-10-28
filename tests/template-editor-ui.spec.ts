@@ -250,14 +250,14 @@ describe('template detail and editor UI', () => {
     expect(markup).not.toContain('Clone');
   });
 
-  it('keeps system templates locked and offers delete for published and archived custom templates', () => {
+  it('keeps system templates locked and preserves old custom templates without manual editing', () => {
     const detailActions = (templatesModule as unknown as {
       templateDetailActions?: (template: { source: 'system' | 'custom'; status: 'draft' | 'published' | 'archived' }) => readonly string[];
     }).templateDetailActions;
 
     expect(detailActions).toBeTypeOf('function');
-    expect(detailActions!({ source: 'system', status: 'published' })).toEqual(['use', 'clone']);
-    expect(detailActions!({ source: 'custom', status: 'published' })).toEqual(['use', 'edit', 'archive', 'delete']);
+    expect(detailActions!({ source: 'system', status: 'published' })).toEqual(['use']);
+    expect(detailActions!({ source: 'custom', status: 'published' })).toEqual(['use', 'archive', 'delete']);
     expect(detailActions!({ source: 'custom', status: 'archived' })).toEqual(['delete']);
   });
 

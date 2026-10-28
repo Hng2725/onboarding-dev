@@ -13,19 +13,50 @@
  * body shape (`{ mcpAppId, toolName, arguments, roomId }`), same
  * bot-credential transport (`createAgentBotHubClient` from the SDK).
  */
-import { createAgentBotHubClient } from '@privos_ai/app-server';
+import { AgentBotHubUnreachableError, createAgentBotHubClient } from '@privos_ai/app-server';
 
 import { resolveHubOrigin } from './resolve-hub-origin';
 import { resolveOwnMcpAppId } from './resolve-own-mcp-app-id';
 
 const TOOL_CALL_PATH = '/api/v1/mcp-apps.tool-call';
 
+const HUB_RETRY_ATTEMPTS = 3;
+const HUB_RETRY_BASE_DELAY_MS = 200;
+
+export interface AppPlatformToolCallOptions {
+	readonly replaySafe?: boolean;
+}
+
 export type AppPlatformToolCaller = (
 	toolName: string,
 	args: Record<string, unknown>,
 	requiredScope: string,
 	roomId: string,
+	options?: AppPlatformToolCallOptions,
 ) => Promise<unknown>;
+
+const delay = (milliseconds: number): Promise<void> =>
+	new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+export async function withSelectiveHubRetry<T>(
+	operation: () => Promise<T>,
+	replaySafe: boolean,
+	sleep: (milliseconds: number) => Promise<void> = delay,
+): Promise<T> {
+	const maxAttempts = replaySafe ? HUB_RETRY_ATTEMPTS : 1;
+	for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+		try {
+			return await operation();
+		} catch (error) {
+			if (!(error instanceof AgentBotHubUnreachableError) || attempt >= maxAttempts - 1) {
+				throw error;
+			}
+			await sleep(HUB_RETRY_BASE_DELAY_MS * 2 ** attempt);
+		}
+	}
+
+	throw new AgentBotHubUnreachableError();
+}
 
 function asRecord(value: unknown): Record<string, unknown> {
 	return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -42,6 +73,7 @@ export async function callAppPlatformTool(
 	args: Record<string, unknown>,
 	requiredScope: string,
 	roomId: string,
+	options: AppPlatformToolCallOptions = {},
 ): Promise<unknown> {
 	const mcpAppId = await resolveOwnMcpAppId();
 	if (!mcpAppId) {
@@ -53,34 +85,36 @@ export async function callAppPlatformTool(
 	}
 
 	const roomHub = createAgentBotHubClient({ resolveHubOrigin });
-	const response = await roomHub.authorizedFetch(TOOL_CALL_PATH, {
-		method: 'POST',
-		requiredScope,
-		retryMode: 'never',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ mcpAppId, toolName, arguments: args, roomId }),
-	});
+	return withSelectiveHubRetry(async () => {
+		const response = await roomHub.authorizedFetch(TOOL_CALL_PATH, {
+			method: 'POST',
+			requiredScope,
+			retryMode: 'never',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ mcpAppId, toolName, arguments: args, roomId }),
+		});
 
-	const raw = await response.text();
-	let parsed: Record<string, unknown> = {};
-	try {
-		parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
-	} catch {
-		parsed = {};
-	}
-	if (!response.ok || parsed.success === false) {
-		const reason = typeof parsed.error === 'string' ? parsed.error : `HTTP ${response.status}`;
-		throw new Error(`${toolName} failed: ${reason}`);
-	}
+		const raw = await response.text();
+		let parsed: Record<string, unknown> = {};
+		try {
+			parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+		} catch {
+			parsed = {};
+		}
+		if (!response.ok || parsed.success === false) {
+			const reason = typeof parsed.error === 'string' ? parsed.error : `HTTP ${response.status}`;
+			throw new Error(`${toolName} failed: ${reason}`);
+		}
 
-	const content = Array.isArray(parsed.content) ? parsed.content : [];
-	const first = asRecord(content[0]);
-	if (typeof first.text !== 'string') {
-		throw new Error(`${toolName} returned a malformed tool result`);
-	}
-	try {
-		return JSON.parse(first.text);
-	} catch {
-		throw new Error(`${toolName} result is not valid JSON`);
-	}
+		const content = Array.isArray(parsed.content) ? parsed.content : [];
+		const first = asRecord(content[0]);
+		if (typeof first.text !== 'string') {
+			throw new Error(`${toolName} returned a malformed tool result`);
+		}
+		try {
+			return JSON.parse(first.text);
+		} catch {
+			throw new Error(`${toolName} result is not valid JSON`);
+		}
+	}, options.replaySafe === true);
 }

@@ -5,14 +5,19 @@ import type {
   AssignmentRecord,
   EmployeeType,
   LearnerAssignmentDto,
+  LearnerTemplateDto,
+  ModuleProgressRecord,
+  ModuleStateDto,
   ResourceProgressRecord,
   TemplateSnapshot,
+  TemplateSource,
 } from './contracts';
 import { createNotificationPort, type NotificationPort } from './notifications';
 import { EmployeeServiceError, type EmployeeService } from './employees';
 import type { OnboardingStore, StoreRecord } from './store';
 import type { AdminTemplateDetail, TemplateService } from './templates';
 import { canUnlockExercise } from './workflow';
+import { deriveModuleStates } from './module-learning';
 
 export interface AssignMemberInput {
   readonly memberId: string;
@@ -35,9 +40,10 @@ export interface MaterialProgressRecord extends ResourceProgressRecord {
 
 export interface AssignmentDetail {
   readonly assignment: AssignmentRecord;
-  readonly template: TemplateSnapshot;
+  readonly template: TemplateSnapshot | LearnerTemplateDto;
   readonly progress: readonly MaterialProgressRecord[];
   readonly moduleUnlocks: Readonly<Record<string, boolean>>;
+  readonly moduleStates?: readonly ModuleStateDto[];
 }
 
 export interface ReminderSummary {
@@ -84,7 +90,7 @@ interface AssignmentDbRecord extends StoreRecord {
   readonly id: string;
   readonly memberId: string;
   readonly employeeType: EmployeeType;
-  readonly templateSource: 'system' | 'custom';
+  readonly templateSource: TemplateSource;
   readonly templateId: string;
   readonly templateVersion: number;
   readonly templateSnapshot: TemplateSnapshot;
@@ -138,18 +144,29 @@ function snapshotOf(detail: AdminTemplateDetail): TemplateSnapshot {
     title: detail.title,
     description: detail.description,
     passingScore: detail.passingScore,
+    assessmentMode: detail.assessmentMode,
     modules: detail.modules,
+    content: detail.content,
   };
 }
 
-function learnerSafeSnapshot(snapshot: TemplateSnapshot): TemplateSnapshot {
+function learnerSafeSnapshot(snapshot: TemplateSnapshot): LearnerTemplateDto {
+  const content = snapshot.content
+    ? {
+      assessmentMode: snapshot.content.assessmentMode,
+      learningMode: snapshot.content.learningMode,
+      maxAttemptsPerModule: snapshot.content.maxAttemptsPerModule,
+      modules: snapshot.content.modules,
+    }
+    : undefined;
   return {
     ...snapshot,
+    ...(content ? { content } : {}),
     modules: snapshot.modules.map((module) => ({
       ...module,
       questions: module.questions.map((question) => {
         const { correctOptionIds: _answerKey, explanation: _explanation, ...safe } = question;
-        return safe;
+        return { ...safe, required: question.required ?? true };
       }),
     })),
   };
@@ -278,11 +295,21 @@ export function createAssignmentService(
       module.id,
       canUnlockExercise(module.resources, materialProgress),
     ]));
+    const moduleProgress = row.templateSnapshot.content?.assessmentMode === 'per_module'
+      ? (await store.query<ModuleProgressRecord & StoreRecord>(
+        roomId,
+        'onboarding_module_progress',
+        { filter: { assignmentId: row.id }, limit: 1000 },
+      )).records
+      : undefined;
     return {
       assignment: assignmentFrom(row, roomId),
       template: learnerSafe ? learnerSafeSnapshot(row.templateSnapshot) : row.templateSnapshot,
       progress: materialProgress,
       moduleUnlocks,
+      ...(moduleProgress
+        ? { moduleStates: deriveModuleStates(row.templateSnapshot, moduleProgress) }
+        : {}),
     };
   }
 
@@ -306,6 +333,21 @@ export function createAssignmentService(
   }
 
   async function progressPercent(row: AssignmentDbRecord, roomId: string): Promise<number> {
+    if (row.templateSnapshot.content?.assessmentMode === 'per_module') {
+      const progress = await store.query<ModuleProgressRecord & StoreRecord>(
+        roomId,
+        'onboarding_module_progress',
+        { filter: { assignmentId: row.id }, limit: 1000 },
+      );
+      const byModule = new Map(progress.records.map((item) => [item.moduleId, item]));
+      const earned = row.templateSnapshot.modules.reduce((sum, module) => {
+        const current = byModule.get(module.id);
+        return sum + (current?.lessonCompletedAt ? 0.5 : 0) + (current?.passedAt ? 0.5 : 0);
+      }, 0);
+      return row.templateSnapshot.modules.length === 0
+        ? 0
+        : Math.round(earned / row.templateSnapshot.modules.length * 100);
+    }
     const requiredResources = row.templateSnapshot.modules.flatMap((module) => module.resources)
       .filter((resource) => resource.required);
     const progressRows = await store.query<ProgressDbRecord>(roomId, 'onboarding_material_progress', {
@@ -374,6 +416,7 @@ export function createAssignmentService(
       }
       const rawMembers = await caller(
         'mcpapp.rooms.getMembers', { roomId: actor.roomId }, 'rooms:read', actor.roomId,
+        { replaySafe: true },
       );
       const members: readonly unknown[] = Array.isArray(rawMembers)
         ? rawMembers

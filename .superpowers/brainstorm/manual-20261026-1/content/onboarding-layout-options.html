@@ -1,0 +1,72 @@
+<style>
+  .layout-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;align-items:start}.layout-card{border:1px solid var(--border);border-radius:16px;overflow:hidden;background:var(--surface);cursor:pointer;transition:.18s ease}.layout-card:hover{transform:translateY(-2px);border-color:var(--accent)}.layout-card.selected{outline:3px solid color-mix(in srgb,var(--accent) 28%,transparent);border-color:var(--accent)}.layout-preview{padding:14px;background:#0f172a;color:#dbeafe;min-height:490px}.layout-meta{padding:16px}.layout-meta h3{margin:0 0 7px}.layout-meta p{margin:0;color:var(--muted);font-size:13px;line-height:1.55}.mini-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;font-size:11px;color:#94a3b8}.mini-title{font-size:16px;font-weight:800;color:white}.kind-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:12px}.kind{padding:9px 7px;border:1px solid #334155;border-radius:9px;background:#172033;font-size:9px}.kind.active{border-color:#818cf8;background:#25295a}.kind b,.kind span{display:block}.kind span{margin-top:3px;color:#94a3b8}.box{border:1px solid #334155;border-radius:11px;background:#151e31;padding:11px;margin-bottom:9px}.box-title{font-size:10px;font-weight:800;color:#e2e8f0;margin-bottom:8px}.two-col{display:grid;grid-template-columns:.8fr 1.2fr;gap:9px}.pill{display:inline-block;padding:4px 7px;border-radius:99px;background:#253054;color:#a5b4fc;font-size:8px}.progress-row{display:grid;grid-template-columns:17px 1fr auto;gap:7px;align-items:center;padding:7px 0;border-bottom:1px solid #253047;font-size:9px}.progress-row:last-child{border-bottom:0}.dot{display:grid;place-items:center;width:16px;height:16px;border-radius:50%;background:#253047;color:#94a3b8;font-size:8px}.done .dot{background:#14532d;color:#86efac}.current .dot{background:#4338ca;color:white}.progress-row small{color:#94a3b8}.actionbar{display:flex;justify-content:space-between;align-items:center;padding:9px 10px;border:1px solid #334155;border-radius:10px;background:#111827;font-size:9px}.primary{padding:7px 10px;border-radius:7px;background:#818cf8;color:#111827;font-weight:800}.secondary{padding:7px 9px;border-radius:7px;border:1px solid #475569;color:#cbd5e1}.horizontal-steps{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-bottom:10px}.hstep{height:5px;border-radius:99px;background:#334155}.hstep.on{background:#818cf8}.tabs{display:flex;gap:6px;margin-bottom:9px}.tab{padding:6px 8px;border-radius:7px;background:#202a3f;color:#94a3b8;font-size:9px}.tab.on{background:#312e81;color:#e0e7ff}.metric-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.metric{padding:8px;border-radius:8px;background:#1e293b;font-size:8px;color:#94a3b8}.metric b{display:block;color:white;font-size:13px}.pipeline{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.lane{min-height:245px;padding:8px;border:1px solid #334155;border-radius:9px;background:#121b2b}.lane h4{font-size:9px;margin:0 0 8px;color:#cbd5e1}.task{padding:7px;margin-bottom:6px;border-radius:7px;background:#202a3f;font-size:8px;color:#cbd5e1}.task.on{outline:1px solid #818cf8;background:#25295a}.recommend{display:inline-block;margin-bottom:8px;padding:4px 8px;border-radius:99px;background:#dcfce7;color:#166534;font-size:11px;font-weight:800}@media(max-width:1050px){.layout-grid{grid-template-columns:1fr}.layout-preview{min-height:auto}}
+</style>
+
+<h2>Chọn bố cục cho luồng tạo template AI</h2>
+<p class="subtitle">Cả ba phương án đều có: bắt buộc chọn Template 1 / Template 2 / Cả hai, báo lỗi rõ cho Template 2, hiển thị các mốc AI thật, và tách rõ “Tài liệu học” với “Câu hỏi”. Hãy chọn bố cục dễ theo dõi nhất.</p>
+
+<div class="layout-grid">
+  <div class="layout-card" data-choice="workspace" onclick="toggleSelect(this)">
+    <div class="layout-preview">
+      <div class="mini-head"><span>AI ONBOARDING · BƯỚC 3/5</span><span class="pill">Đang tạo</span></div>
+      <div class="mini-title">Tạo lộ trình onboarding</div>
+      <div class="kind-grid" style="margin-top:12px">
+        <div class="kind"><b>Template 1</b><span>Nhân sự thường</span></div>
+        <div class="kind"><b>Template 2</b><span>Chuyên sâu</span></div>
+        <div class="kind active"><b>Cả hai</b><span>Tạo 2 bản riêng</span></div>
+      </div>
+      <div class="two-col">
+        <div>
+          <div class="box"><div class="box-title">THÔNG TIN ĐẦU VÀO</div><div class="task">Tên template chung</div><div class="task">Phòng ban · Công nghệ</div><div class="task">Chức danh · Chuyên viên</div><div class="task">4 nhiệm vụ hợp lệ ✓</div></div>
+          <div class="box"><div class="box-title">KẾT QUẢ DỰ KIẾN</div><div class="metric-grid"><div class="metric"><b>2</b>template</div><div class="metric"><b>8</b>module</div><div class="metric"><b>24</b>câu hỏi</div></div></div>
+        </div>
+        <div class="box">
+          <div class="box-title">TIẾN TRÌNH AI</div>
+          <div class="progress-row done"><span class="dot">✓</span><span>Đọc và phân tích nguồn</span><small>Hoàn tất</small></div>
+          <div class="progress-row done"><span class="dot">✓</span><span>Lập cấu trúc module</span><small>Hoàn tất</small></div>
+          <div class="progress-row current"><span class="dot">3</span><span>Viết tài liệu học</span><small>Đang làm</small></div>
+          <div class="progress-row"><span class="dot">4</span><span>Tạo câu hỏi kiểm tra</span><small>Chờ</small></div>
+          <div class="progress-row"><span class="dot">5</span><span>Kiểm chứng với nguồn</span><small>Chờ</small></div>
+          <div class="progress-row"><span class="dot">6</span><span>Tạo bản nháp</span><small>Chờ</small></div>
+        </div>
+      </div>
+      <div class="tabs"><span class="tab on">Tài liệu học · 12 khối</span><span class="tab">Câu hỏi · 24 câu</span><span class="tab">Nguồn đối chiếu</span></div>
+      <div class="actionbar"><span>Tự động lưu · Có thể quay lại</span><span><span class="secondary">Hủy</span> <span class="primary">Đang tạo 54%</span></span></div>
+    </div>
+    <div class="layout-meta"><span class="recommend">Khuyến nghị</span><h3>A — Workspace hai cột</h3><p>Thông tin và hành động ở trái, tiến trình chi tiết ở phải. Cân bằng giữa gọn và minh bạch, phù hợp nhất với job AI chạy lâu.</p></div>
+  </div>
+
+  <div class="layout-card" data-choice="guided" onclick="toggleSelect(this)">
+    <div class="layout-preview">
+      <div class="mini-head"><span>AI ONBOARDING</span><span>Bước 3/5</span></div>
+      <div class="horizontal-steps"><i class="hstep on"></i><i class="hstep on"></i><i class="hstep on"></i><i class="hstep"></i><i class="hstep"></i></div>
+      <div class="mini-title">Bạn muốn tạo lộ trình nào?</div>
+      <div class="kind-grid" style="margin-top:12px"><div class="kind active"><b>Template 1</b><span>Thông thường</span></div><div class="kind"><b>Template 2</b><span>Chuyên sâu</span></div><div class="kind"><b>Cả hai</b><span>2 bản riêng</span></div></div>
+      <div class="box"><div class="box-title">THÔNG TIN TEMPLATE</div><div class="two-col"><div class="task">Tên template</div><div class="task">Phòng ban</div></div><div class="task">Chức danh</div><div class="task">Nhiệm vụ chính · 2/8 dòng</div></div>
+      <div class="box"><div class="box-title">AI ĐANG LÀM GÌ?</div><div class="progress-row done"><span class="dot">✓</span><span>Phân tích nguồn</span><small>18 giây</small></div><div class="progress-row current"><span class="dot">2</span><span>Viết tài liệu học</span><small>Đang làm</small></div><div class="progress-row"><span class="dot">3</span><span>Tạo câu hỏi</span><small>Tiếp theo</small></div><div class="progress-row"><span class="dot">4</span><span>Kiểm chứng</span><small>Sau đó</small></div></div>
+      <div class="tabs"><span class="tab on">Tài liệu học</span><span class="tab">Câu hỏi</span></div>
+      <div class="box"><div class="box-title">Module 1 · Làm quen hệ thống</div><div class="task">Tổng quan và mục tiêu</div><div class="task">Hướng dẫn từng bước</div><div class="task">Tổng kết</div></div>
+      <div class="actionbar"><span class="secondary">Quay lại</span><span class="primary">Tạo lộ trình</span></div>
+    </div>
+    <div class="layout-meta"><h3>B — Wizard một cột</h3><p>Dễ hiểu nhất cho người mới, mỗi bước chỉ có một việc chính. Ít thông tin trên một màn nhưng phải cuộn nhiều hơn.</p></div>
+  </div>
+
+  <div class="layout-card" data-choice="pipeline" onclick="toggleSelect(this)">
+    <div class="layout-preview">
+      <div class="mini-head"><span>AI ONBOARDING CONTROL CENTER</span><span class="pill">1 job đang chạy</span></div>
+      <div class="mini-title">Theo dõi pipeline tạo nội dung</div>
+      <div class="kind-grid" style="margin-top:12px"><div class="kind"><b>Template 1</b><span>Chưa chọn</span></div><div class="kind active"><b>Template 2</b><span>Đã chọn</span></div><div class="kind"><b>Cả hai</b><span>Chưa chọn</span></div></div>
+      <div class="metric-grid" style="margin-bottom:10px"><div class="metric"><b>5/6</b>nguồn</div><div class="metric"><b>4</b>module</div><div class="metric"><b>36%</b>tiến trình</div></div>
+      <div class="pipeline">
+        <div class="lane"><h4>1 · PHÂN TÍCH</h4><div class="task">Đọc PDF ✓</div><div class="task">Trích thuật ngữ ✓</div><div class="task">Lập kho kiến thức ✓</div></div>
+        <div class="lane"><h4>2 · TẠO NỘI DUNG</h4><div class="task on">Viết bài học · đang làm</div><div class="task">Tạo ví dụ</div><div class="task">Tạo câu hỏi</div></div>
+        <div class="lane"><h4>3 · KIỂM CHỨNG</h4><div class="task">Đối chiếu nguồn</div><div class="task">Sửa mâu thuẫn</div><div class="task">Tạo bản nháp</div></div>
+      </div>
+      <div class="box" style="margin-top:10px"><div class="box-title">BẢN NHÁP MODULE</div><div class="tabs"><span class="tab on">Tài liệu</span><span class="tab">Câu hỏi</span><span class="tab">Cờ xác minh</span></div><div class="task">01 · Quy trình đăng nhập và bảo mật</div><div class="task">02 · Thao tác nghiệp vụ chính</div></div>
+      <div class="actionbar"><span>Đã chạy 1 phút 14 giây</span><span class="secondary">Hủy job</span></div>
+    </div>
+    <div class="layout-meta"><h3>C — Bảng pipeline</h3><p>Nhìn toàn cảnh rất rõ và hợp người dùng kỹ thuật. Tuy nhiên mật độ cao, tốn không gian và hơi nặng cho tác vụ chỉ chạy thỉnh thoảng.</p></div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:18px">Nhấp vào phương án bạn thích; lựa chọn sẽ được ghi nhận. Có thể chọn lại nếu muốn so sánh.</p>

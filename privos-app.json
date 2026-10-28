@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "kind": "mcp-app",
   "name": "ai.privos.mcp-app-onboarding-dev",
-  "version": "2.17.19",
+  "version": "2.20.0",
   "title": "PrivOS Onboarding MCP App (Dev)",
   "description": "Onboard room members with required learning materials, knowledge checks, essay feedback, and Admin evaluations in PrivOS.",
   "icon": "/public/icon.svg",
@@ -70,6 +70,33 @@
       "executionContext": "user",
       "feature": "onboarding.resources.manage",
       "reason": "Upload Admin-authored onboarding resources to the current room."
+    },
+    {
+      "scope": "sandbox:generate",
+      "requirement": "optional",
+      "context": "room",
+      "executionContext": "user",
+      "feature": "onboarding.ai.generate",
+      "reason": "Generate source-grounded onboarding template drafts from Admin-provided room documents through PrivOS Sandbox.",
+      "degradedBehavior": "Admins cannot create new templates until AI generation permission is granted; existing templates remain available."
+    },
+    {
+      "scope": "sandbox:ai-chat",
+      "requirement": "optional",
+      "context": "room",
+      "executionContext": "user",
+      "feature": "onboarding.ai.fallback.read",
+      "reason": "Observe the exact Native AI Chat reply used when the Sandbox generation provider fails.",
+      "degradedBehavior": "Sandbox generation remains available, but failed provider attempts cannot fall back to Native AI Chat."
+    },
+    {
+      "scope": "sandbox:ai-chat:write",
+      "requirement": "optional",
+      "context": "room",
+      "executionContext": "user",
+      "feature": "onboarding.ai.fallback.write",
+      "reason": "Send and start a room-bound Native AI Chat generation only when retrying a failed Sandbox job.",
+      "degradedBehavior": "Sandbox generation remains available, but failed provider attempts cannot fall back to Native AI Chat."
     },
     {
       "scope": "db:read",
@@ -145,15 +172,68 @@
     {
       "name": "onboarding_admin_templates",
       "title": "Quản lý template onboarding",
-      "description": "Admin xem, tạo, cập nhật, nhân bản, xuất bản, lưu trữ hoặc xóa draft template tùy chỉnh.",
+      "description": "Admin xem, chỉnh sửa, xuất bản, lưu trữ hoặc xóa template onboarding; template mới được tạo bằng AI từ tài liệu Admin cung cấp.",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "action": { "type": "string", "enum": ["list", "get", "create", "update", "clone_system", "publish", "archive", "delete"] },
+          "action": { "type": "string", "enum": ["list", "get", "update", "publish", "archive", "delete"] },
           "templateId": { "type": "string" },
           "version": { "type": "number" },
           "expectedUpdatedAt": { "type": "string" },
           "draft": { "type": "object" }
+        },
+        "required": ["action"]
+      }
+    },
+    {
+      "name": "onboarding_admin_ai",
+      "title": "Tạo lộ trình onboarding bằng AI",
+      "description": "Admin quản lý tài liệu nguồn, điều phối job AI và rà soát template được tạo có dẫn chứng.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list_sources", "ingest_source", "add_admin_note", "delete_source", "get_source_section",
+              "start_job", "list_jobs", "get_job", "next_step", "record_dispatch", "submit_ai_output",
+              "report_ai_failure", "retry_job", "cancel_job", "record_attempt_cleanup", "get_review", "update_review", "resolve_flag"
+            ]
+          },
+          "operationId": { "type": "string" },
+          "fileName": { "type": "string" },
+          "mimeType": { "type": "string" },
+          "base64": { "type": "string" },
+          "fileId": { "type": "string" },
+          "systemName": { "type": "string" },
+          "softwareVersion": { "type": "string" },
+          "effectiveDate": { "type": "string" },
+          "title": { "type": "string" },
+          "text": { "type": "string" },
+          "sourceId": { "type": "string" },
+          "sourceIds": { "type": "array", "items": { "type": "string" } },
+          "sectionId": { "type": "string" },
+          "kind": { "type": "string" },
+          "job": { "type": "object" },
+          "jobId": { "type": "string" },
+          "inventoryJobId": { "type": "string" },
+          "templateKind": { "type": "string", "enum": ["normal", "advanced"] },
+          "roleProfile": { "type": "object" },
+          "workerId": { "type": "string" },
+          "callId": { "type": "string" },
+          "attemptRef": { "type": "string" },
+          "provider": { "type": "string", "enum": ["sandbox", "native_chat"] },
+          "state": { "type": "string", "enum": ["confirmed", "unknown"] },
+          "reason": { "type": "string", "enum": ["failed", "cancelled", "timeout", "dispatch_unknown"] },
+          "message": { "type": "string" },
+          "templateId": { "type": "string" },
+          "version": { "type": "number" },
+          "expectedUpdatedAt": { "type": "string" },
+          "ops": { "type": "array", "items": { "type": "object" } },
+          "flagId": { "type": "string" },
+          "resolutionAction": { "type": "string", "enum": ["choose_option", "add_note", "upload_doc", "remove", "accept"] },
+          "note": { "type": "string" },
+          "chosenEvidenceIndex": { "type": "number" }
         },
         "required": ["action"]
       }
@@ -165,12 +245,14 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "action": { "type": "string", "enum": ["list", "get", "list_members", "assign", "grant_retry", "send_due_reminders"] },
+          "action": { "type": "string", "enum": ["list", "get", "list_members", "list_employees", "add_employee", "assign", "grant_retry", "grant_module_retry", "question_stats", "send_due_reminders"] },
           "assignmentId": { "type": "string" },
           "memberId": { "type": "string" },
           "employeeType": { "type": "string", "enum": ["normal", "advanced"] },
           "templateId": { "type": "string" },
           "templateVersion": { "type": "number" },
+          "version": { "type": "number" },
+          "moduleId": { "type": "string" },
           "dueAt": { "type": "string" },
           "at": { "type": "string" }
         },
@@ -184,10 +266,11 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "action": { "type": "string", "enum": ["list", "get", "open_resource", "complete_resource", "start_attempt", "save_draft", "submit", "get_result", "get_feedback"] },
+          "action": { "type": "string", "enum": ["list", "get", "open_resource", "complete_resource", "start_attempt", "save_draft", "submit", "get_result", "get_feedback", "get_modules", "open_module", "complete_lesson", "start_module_quiz", "submit_module_quiz", "get_module_attempt"] },
           "memberId": { "type": "string" },
           "assignmentId": { "type": "string" },
           "resourceId": { "type": "string" },
+          "moduleId": { "type": "string" },
           "attemptId": { "type": "string" },
           "operationId": { "type": "string" },
           "answers": { "type": "array", "items": { "type": "object" } }

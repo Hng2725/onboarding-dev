@@ -7,6 +7,7 @@ const TOOL_NAMES = [
   'onboarding_dashboard',
   'onboarding_bootstrap',
   'onboarding_admin_templates',
+  'onboarding_admin_ai',
   'onboarding_admin_assignments',
   'onboarding_learning',
   'onboarding_reviews',
@@ -23,7 +24,7 @@ function callerIn(roomId: string): VerifiedActor {
 }
 
 describe('JSON-RPC onboarding handlers', () => {
-  it('initializes and exposes exactly the six onboarding tools', async () => {
+  it('initializes and exposes exactly the seven onboarding tools', async () => {
     const initialized = await handleMcpMessage('initialize', 1, {});
     expect(initialized.serverInfo).toMatchObject({
       name: 'ai.privos.mcp-app-onboarding-dev',

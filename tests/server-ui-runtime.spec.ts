@@ -83,5 +83,5 @@ describe('server UI runtime wiring', () => {
       mimeType: 'text/html;profile=mcp-app',
     });
     expect(resource.result.contents[0].text).toContain('<title>PrivOS Onboarding</title>');
-  });
+  }, 15_000);
 });

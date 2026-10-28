@@ -3,6 +3,7 @@ import {
   CloseOutlined,
   FileAddOutlined,
   PlusOutlined,
+  RobotOutlined,
   RocketOutlined,
   SearchOutlined,
   UploadOutlined,
@@ -45,6 +46,8 @@ import {
   type TemplateStatusFilter,
 } from './template-editor-ui';
 import { usePolling, type PollReason } from './polling';
+import { AiGeneratorPage } from './ai/ai-generator';
+import { ensureOnboardingRoomfiles } from './roomfiles';
 
 export {
   QuestionEditor,
@@ -193,7 +196,157 @@ export function templateOperationError(
   };
 }
 
-export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUseTemplate: () => void }) {
+export function TemplatesPage({
+  api,
+  onUseTemplate,
+  canGenerateWithAi = true,
+}: {
+  api: OnboardingApi;
+  onUseTemplate: () => void;
+  canGenerateWithAi?: boolean;
+}) {
+  const [items, setItems] = useState<readonly TemplateCatalogView[]>([]);
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<TemplateStatusFilter>('all');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const [notice, setNotice] = useState<InlineNoticeMessage | null>(null);
+  const [detailItem, setDetailItem] = useState<TemplateCatalogView | null>(null);
+  const detailCacheRef = useRef<ReadonlyMap<string, TemplateDetailCacheEntry>>(new Map());
+  const [detailCache, setDetailCache] = useState<ReadonlyMap<string, TemplateDetailCacheEntry>>(detailCacheRef.current);
+  const [detailActionError, setDetailActionError] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<TemplateCatalogView | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [reviewTarget, setReviewTarget] = useState<{ id: string; version: number } | undefined>();
+
+  const load = useCallback(async (reason: PollReason) => {
+    const initial = reason === 'initial';
+    if (initial) { setLoading(true); setError(null); }
+    try {
+      const nextItems = (await api.adminTemplates<{ templates: readonly TemplateCatalogView[] }>('list')).templates;
+      setItems(nextItems);
+      setDetailItem((current) => current
+        ? nextItems.find((item) => item.id === current.id && item.version === current.version) ?? null
+        : null);
+      const nextCache = await preloadTemplateDetails(nextItems, detailCacheRef.current, async (item) => (
+        await api.adminTemplates<{ template: AdminTemplateDetail }>('get', {
+          templateId: item.id,
+          version: item.version,
+        })
+      ).template);
+      detailCacheRef.current = nextCache;
+      setDetailCache(nextCache);
+      setError(null);
+    } catch (caught) {
+      if (initial) setError(caught instanceof Error ? caught : new Error('Không thể tải thư viện template.'));
+    } finally {
+      if (initial) setLoading(false);
+    }
+  }, [api]);
+
+  const refresh = usePolling(load);
+  const filteredItems = useMemo(() => filterTemplates(items, query, statusFilter), [items, query, statusFilter]);
+  const detailEntry = detailItem ? detailCache.get(templateDetailCacheKey(detailItem)) : undefined;
+  const detail = detailEntry?.detail ?? null;
+  const detailLoading = Boolean(detailItem && !detailEntry);
+  const detailError = detailActionError ?? detailEntry?.error ?? null;
+
+  async function retryDetail(item: TemplateCatalogView) {
+    const key = templateDetailCacheKey(item);
+    const next = new Map(detailCacheRef.current);
+    next.delete(key);
+    detailCacheRef.current = next;
+    setDetailCache(next);
+    try {
+      const result = await api.adminTemplates<{ template: AdminTemplateDetail }>('get', {
+        templateId: item.id,
+        version: item.version,
+      });
+      const loaded = new Map(detailCacheRef.current);
+      loaded.set(key, { detail: result.template, error: null });
+      detailCacheRef.current = loaded;
+      setDetailCache(loaded);
+    } catch (caught) {
+      setDetailActionError(caught instanceof Error ? caught.message : 'Không thể tải chi tiết template.');
+    }
+  }
+
+  async function runDetailAction(action: TemplateDetailAction) {
+    if (!detailItem || !detail) return;
+    setNotice(null);
+    try {
+      if (action === 'use') {
+        setDetailItem(null);
+        onUseTemplate();
+        return;
+      }
+      if (action === 'edit') {
+        setReviewTarget({ id: detail.id, version: detail.version });
+        setDetailItem(null);
+        setAiOpen(true);
+        return;
+      }
+      if (action === 'archive') {
+        await api.adminTemplates('archive', { templateId: detail.id, version: detail.version });
+        setNotice({ message: 'Đã lưu trữ phiên bản template.', tone: 'success' });
+      }
+      if (action === 'delete') {
+        setPendingDelete(detailItem);
+        setDetailItem(null);
+        return;
+      }
+      setDetailItem(null);
+      await refresh();
+    } catch (caught) {
+      setNotice(templateOperationError(caught));
+    }
+  }
+
+  async function confirmDelete() {
+    if (!pendingDelete || deleting) return;
+    setDeleting(true);
+    try {
+      await api.adminTemplates('delete', {
+        templateId: pendingDelete.id,
+        version: pendingDelete.version,
+      });
+      setPendingDelete(null);
+      setNotice({ message: 'Đã xóa template.', tone: 'success' });
+      await refresh();
+    } catch (caught) {
+      setNotice(templateOperationError(caught, 'Không thể xóa template.'));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  if (loading) return <LoadingState label="Đang tải thư viện template…" />;
+  if (error) return <ErrorState error={error} onRetry={() => void refresh()} />;
+
+  return <div className="page-stack">
+    <section className="page-heading">
+      <div><span className="section-kicker">THƯ VIỆN NỘI DUNG</span><h2>Template onboarding</h2><p>AI tạo lộ trình từ tài liệu của room; Admin rà soát, chỉnh sửa rồi mới xuất bản.</p></div>
+      <button
+        className="button button-primary"
+        type="button"
+        disabled={!canGenerateWithAi}
+        title={canGenerateWithAi ? undefined : 'Cần cấp quyền Sandbox hoặc Native AI Chat cho app.'}
+        onClick={() => { setReviewTarget(undefined); setAiOpen(true); }}
+      ><RobotOutlined /> Tạo bằng AI</button>
+    </section>
+    <InlineNotice notice={notice} onDismiss={() => setNotice(null)} />
+    <TemplateLibraryToolbar query={query} status={statusFilter} count={filteredItems.length} total={items.length} onQueryChange={setQuery} onStatusChange={setStatusFilter} />
+    {filteredItems.length > 0
+      ? <section className="template-grid">{filteredItems.map((item) => <TemplateCard item={item} key={item.id + '@' + item.version} onOpen={() => { setDetailActionError(null); setDetailItem(item); }} />)}</section>
+      : <section className="template-search-empty"><SearchOutlined /><strong>Không tìm thấy template</strong><p>Thử tìm bằng một tên khác.</p></section>}
+    {detailItem && <TemplateModalLayer><div className="dialog-backdrop template-detail-backdrop" role="presentation" onMouseDown={() => setDetailItem(null)}><TemplateDetailPanel detail={detail} loading={detailLoading} error={detailError} onClose={() => setDetailItem(null)} onRetry={() => void retryDetail(detailItem)} onAction={(action) => void runDetailAction(action)} /></div></TemplateModalLayer>}
+    {aiOpen && <TemplateModalLayer><div className="dialog-backdrop ai-generator-backdrop" role="presentation"><AiGeneratorPage api={api} canGenerateWithAi={canGenerateWithAi} initialTemplate={reviewTarget} onClose={() => setAiOpen(false)} onComplete={() => { setAiOpen(false); setNotice({ message: 'Đã xuất bản template AI.', tone: 'success' }); void refresh(); }} /></div></TemplateModalLayer>}
+    {pendingDelete && <TemplateModalLayer><ConfirmDialog open title="Xóa template?" description="Chỉ có thể xóa template chưa được gán cho nhân sự." confirmLabel="Xóa template" busy={deleting} busyLabel="Đang xóa…" onCancel={() => { if (!deleting) setPendingDelete(null); }} onConfirm={() => void confirmDelete()} /></TemplateModalLayer>}
+  </div>;
+}
+
+export function LegacyTemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUseTemplate: () => void }) {
   const app = usePrivosApp();
   const { roomId } = usePrivosContext();
   const [items, setItems] = useState<readonly TemplateCatalogView[]>([]);
@@ -373,8 +526,16 @@ export function TemplatesPage({ api, onUseTemplate }: { api: OnboardingApi; onUs
     setUploading(true);
     setEditorMessage(null);
     try {
+      const folders = await ensureOnboardingRoomfiles(app, roomId);
       // `files:write` is used only when an admin explicitly uploads template material to this room.
-      const result = await app.uploadFile({ channelId: roomId, fileName: file.name, base64Data: await fileBase64(file), mimeType: file.type || undefined, duplicateAction: 'keep_both' });
+      const result = await app.uploadFile({
+        channelId: roomId,
+        folderId: folders.documentsId,
+        fileName: file.name,
+        base64Data: await fileBase64(file),
+        mimeType: file.type || undefined,
+        duplicateAction: 'keep_both',
+      });
       const uploaded = normalizeUploadedResource(result);
       const resource: TemplateResourceInput = { title: uploaded.title, kind: 'file', required: true, fileId: uploaded.fileId };
       const module = draft.modules[moduleIndex];

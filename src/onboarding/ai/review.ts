@@ -1,0 +1,888 @@
+import { createHash } from 'node:crypto';
+
+import type { OnboardingActor } from '../auth';
+import type {
+  QuestionOption,
+  SourceRef,
+  TemplateContentSnapshot,
+  TemplateResource,
+  VerificationFlag,
+} from '../contracts';
+import type { OnboardingStore, StoreRecord } from '../store';
+import {
+  TemplateServiceError,
+  type AdminTemplateDetail,
+  type TemplateDraftInput,
+  type TemplateService,
+} from '../templates';
+import { normalizeForMatch } from './grounding';
+import { createSourceService } from './sources';
+
+export type AiReviewServiceErrorCode =
+  | 'ADMIN_REQUIRED'
+  | 'REVIEW_NOT_FOUND'
+  | 'REVIEW_CONFLICT'
+  | 'REVIEW_INVALID'
+  | 'FLAG_NOT_FOUND'
+  | 'FLAG_ACTION_INVALID'
+  | 'MODULE_MIN_QUESTIONS';
+
+export class AiReviewServiceError extends Error {
+  readonly code: AiReviewServiceErrorCode;
+
+  constructor(code: AiReviewServiceErrorCode, message: string) {
+    super(message);
+    this.name = 'AiReviewServiceError';
+    this.code = code;
+  }
+}
+
+export type AiReviewOperation =
+  | {
+    readonly kind: 'update_block';
+    readonly moduleId: string;
+    readonly blockId: string;
+    readonly title?: string;
+    readonly body?: string;
+    readonly steps?: readonly { readonly order: number; readonly text: string }[];
+  }
+  | { readonly kind: 'remove_block'; readonly moduleId: string; readonly blockId: string }
+  | {
+    readonly kind: 'update_question';
+    readonly questionId: string;
+    readonly prompt?: string;
+    readonly options?: readonly QuestionOption[];
+    readonly correctOptionId?: string;
+    readonly explanation?: string;
+  }
+  | { readonly kind: 'remove_question'; readonly questionId: string }
+  | { readonly kind: 'remove_module'; readonly moduleId: string }
+  | {
+    readonly kind: 'upsert_generated_resource';
+    readonly moduleId: string;
+    readonly resource: TemplateResource;
+  }
+  | {
+    readonly kind: 'set_settings';
+    readonly passingScore?: number;
+    readonly maxAttemptsPerModule?: number | null;
+    readonly learningMode?: 'sequential' | 'free';
+  };
+
+export interface UpdateAiReviewInput {
+  readonly templateId: string;
+  readonly version: number;
+  readonly expectedUpdatedAt: string;
+  readonly ops: readonly AiReviewOperation[];
+}
+
+export interface ResolveAiFlagInput {
+  readonly templateId: string;
+  readonly version: number;
+  readonly flagId: string;
+  readonly action: 'choose_option' | 'add_note' | 'upload_doc' | 'remove' | 'accept';
+  readonly note?: string;
+  readonly chosenEvidenceIndex?: number;
+  readonly expectedUpdatedAt?: string;
+}
+
+export interface AiReviewService {
+  getReview(actor: OnboardingActor, templateId: string, version: number): Promise<AdminTemplateDetail>;
+  updateReview(actor: OnboardingActor, input: UpdateAiReviewInput): Promise<AdminTemplateDetail>;
+  resolveFlag(actor: OnboardingActor, input: ResolveAiFlagInput): Promise<AdminTemplateDetail>;
+}
+
+export interface AiReviewServiceOptions {
+  readonly now?: () => string;
+}
+
+interface TemplateContentDbRecord extends StoreRecord {
+  readonly id: string;
+  readonly templateId: string;
+  readonly templateVersion: number;
+  readonly content: TemplateContentSnapshot;
+  readonly flags: readonly VerificationFlag[];
+  readonly updatedAt: string;
+}
+
+interface SourceDbRecord extends StoreRecord {
+  readonly id: string;
+  readonly sourceId: string;
+  readonly kind: 'document' | 'admin_note';
+  readonly status: 'ready' | 'failed';
+  readonly sections?: readonly {
+    readonly id: string;
+    readonly page?: number;
+    readonly text: string;
+  }[];
+  readonly deletedAt?: string;
+}
+
+type AiDetail = AdminTemplateDetail & {
+  readonly content: TemplateContentSnapshot;
+  readonly flags: readonly VerificationFlag[];
+  readonly jobId: string;
+  readonly sourceIds: readonly string[];
+};
+
+function requireAdmin(actor: OnboardingActor): void {
+  if (actor.access !== 'admin') {
+    throw new AiReviewServiceError('ADMIN_REQUIRED', 'Admin access is required.');
+  }
+}
+
+function requireAi(detail: AdminTemplateDetail): asserts detail is AiDetail {
+  if (
+    detail.source !== 'ai_generated'
+    || !detail.content
+    || !detail.flags
+    || !detail.jobId
+    || !detail.sourceIds
+  ) {
+    throw new AiReviewServiceError('REVIEW_NOT_FOUND', 'The AI template review was not found.');
+  }
+}
+
+function draftFrom(
+  detail: AdminTemplateDetail,
+  modules = detail.modules,
+  passingScore = detail.passingScore,
+): TemplateDraftInput {
+  return {
+    title: detail.title,
+    description: detail.description,
+    employeeType: detail.employeeType,
+    passingScore,
+    maxAttempts: detail.maxAttempts,
+    modules: modules.map((module) => ({
+      id: module.id,
+      key: module.key,
+      title: module.title,
+      description: module.description,
+      resources: module.resources.map((resource) => ({ ...resource })),
+      questions: module.questions.map((question) => ({ ...question })),
+    })),
+  };
+}
+
+function pendingContent(
+  content: TemplateContentSnapshot,
+  flags: readonly VerificationFlag[],
+): TemplateContentSnapshot {
+  const pending = new Set(flags
+    .filter((flag) => flag.severity === 'warning' && flag.status === 'open')
+    .map((flag) => flag.location.blockId)
+    .filter((id): id is string => Boolean(id)));
+  return {
+    ...content,
+    modules: content.modules.map((module) => ({
+      ...module,
+      blocks: module.blocks.map((block) => ({
+        ...block,
+        pendingVerification: pending.has(block.id),
+      })),
+    })),
+  };
+}
+
+function structuralErrors(
+  detail: Pick<AdminTemplateDetail, 'employeeType' | 'modules' | 'roleProfile'>,
+  content: TemplateContentSnapshot,
+): readonly string[] {
+  const errors: string[] = [];
+  const range = detail.employeeType === 'normal' ? { min: 4, max: 8 } : { min: 5, max: 8 };
+  if (detail.modules.length < range.min || detail.modules.length > range.max) {
+    errors.push('Template module count is outside the allowed range.');
+  }
+  if (detail.employeeType === 'advanced' && !detail.roleProfile) {
+    errors.push('Advanced templates require a role profile.');
+  }
+  const contentByModule = new Map(content.modules.map((module) => [module.moduleId, module]));
+  const metadata = new Map(content.questionMeta.map((item) => [item.questionId, item]));
+  for (const module of detail.modules) {
+    const moduleContent = contentByModule.get(module.id);
+    if (!moduleContent) {
+      errors.push('Module ' + module.id + ' has no lesson content.');
+      continue;
+    }
+    if (
+      moduleContent.objectives.length < 2
+      || moduleContent.objectives.length > 4
+      || moduleContent.estimatedMinutes <= 0
+    ) {
+      errors.push('Module ' + module.id + ' has invalid objectives or duration.');
+    }
+    const summaries = moduleContent.blocks.filter((block) => block.kind === 'summary');
+    if (
+      summaries.length !== 1
+      || moduleContent.blocks[moduleContent.blocks.length - 1]?.kind !== 'summary'
+    ) {
+      errors.push('Module ' + module.id + ' requires one final summary block.');
+    }
+    if (
+      detail.employeeType === 'advanced'
+      && !moduleContent.blocks.some((block) => block.kind === 'scenario')
+    ) {
+      errors.push('Advanced module ' + module.id + ' requires a scenario block.');
+    }
+    if (module.questions.length < 3 || module.questions.length > 5) {
+      errors.push('Module ' + module.id + ' requires three to five questions.');
+    }
+    const blockIds = new Set(moduleContent.blocks.map((block) => block.id));
+    for (const block of moduleContent.blocks) {
+      if (block.kind !== 'summary' && block.sourceRefs.length === 0) {
+        errors.push('Block ' + block.id + ' requires source evidence.');
+      }
+    }
+    for (const question of module.questions) {
+      const meta = metadata.get(question.id);
+      if (
+        question.type !== 'single_choice'
+        || question.options?.length !== 4
+        || question.correctOptionIds?.length !== 1
+        || !question.options.some((option) => option.id === question.correctOptionIds?.[0])
+        || !question.explanation?.trim()
+      ) {
+        errors.push('Question ' + question.id + ' is structurally invalid.');
+      }
+      if (
+        !meta
+        || meta.sourceRefs.length === 0
+        || meta.blockIds.length === 0
+        || meta.blockIds.some((blockId) => !blockIds.has(blockId))
+      ) {
+        errors.push('Question ' + question.id + ' has invalid evidence metadata.');
+      }
+    }
+  }
+  if (
+    content.modules.length !== detail.modules.length
+    || content.questionMeta.length !== detail.modules.flatMap((module) => module.questions).length
+  ) {
+    errors.push('Lesson and question content are out of sync.');
+  }
+  return errors;
+}
+
+function touchedBy(flag: VerificationFlag, operation: AiReviewOperation): boolean {
+  if (operation.kind === 'set_settings' || operation.kind === 'upsert_generated_resource') return false;
+  if ('moduleId' in operation && flag.location.moduleId === operation.moduleId) {
+    if (operation.kind === 'remove_module') return true;
+    if ('blockId' in operation) return flag.location.blockId === operation.blockId;
+  }
+  return 'questionId' in operation && flag.location.questionId === operation.questionId;
+}
+
+function reopenTouchedFlags(
+  flags: readonly VerificationFlag[],
+  operations: readonly AiReviewOperation[],
+): readonly VerificationFlag[] {
+  return flags.map((flag) => {
+    if (flag.status === 'open' || !operations.some((operation) => touchedBy(flag, operation))) {
+      return flag;
+    }
+    const { resolution: _resolution, ...reopened } = flag;
+    return { ...reopened, status: 'open' as const };
+  });
+}
+
+function revisionId(prefix: string, templateId: string, version: number, oldId: string): string {
+  return prefix + '-' + createHash('sha256')
+    .update(templateId + '\u0000' + String(version) + '\u0000' + oldId)
+    .digest('hex')
+    .slice(0, 24);
+}
+
+function remapRevision(
+  templateId: string,
+  version: number,
+  modules: AdminTemplateDetail['modules'],
+  content: TemplateContentSnapshot,
+  flags: readonly VerificationFlag[],
+): {
+  readonly modules: AdminTemplateDetail['modules'];
+  readonly content: TemplateContentSnapshot;
+  readonly flags: readonly VerificationFlag[];
+} {
+  const moduleIds = new Map(modules.map((module) => [
+    module.id, revisionId('ai-mod', templateId, version, module.id),
+  ]));
+  const blockIds = new Map(content.modules.flatMap((module) => module.blocks).map((block) => [
+    block.id, revisionId('ai-block', templateId, version, block.id),
+  ]));
+  const questionIds = new Map(modules.flatMap((module) => module.questions).map((question) => [
+    question.id, revisionId('ai-q', templateId, version, question.id),
+  ]));
+  const optionIds = new Map(modules.flatMap((module) => module.questions).flatMap((question) =>
+    (question.options ?? []).map((option) => [
+      option.id,
+      revisionId('ai-opt', templateId, version, question.id + ':' + option.id),
+    ] as const)));
+  return {
+    modules: modules.map((module) => ({
+      ...module,
+      id: moduleIds.get(module.id) ?? module.id,
+      questions: module.questions.map((question) => ({
+        ...question,
+        id: questionIds.get(question.id) ?? question.id,
+        options: question.options?.map((option) => ({
+          ...option,
+          id: optionIds.get(option.id) ?? option.id,
+        })),
+        correctOptionIds: question.correctOptionIds?.map((id) => optionIds.get(id) ?? id),
+      })),
+    })),
+    content: {
+      ...content,
+      modules: content.modules.map((module) => ({
+        ...module,
+        moduleId: moduleIds.get(module.moduleId) ?? module.moduleId,
+        blocks: module.blocks.map((block) => ({
+          ...block,
+          id: blockIds.get(block.id) ?? block.id,
+        })),
+      })),
+      questionMeta: content.questionMeta.map((meta) => ({
+        ...meta,
+        questionId: questionIds.get(meta.questionId) ?? meta.questionId,
+        blockIds: meta.blockIds.map((id) => blockIds.get(id) ?? id),
+      })),
+    },
+    flags: flags.map((flag) => ({
+      ...flag,
+      id: revisionId('ai-flag', templateId, version, flag.id),
+      location: {
+        ...flag.location,
+        ...(flag.location.moduleId
+          ? { moduleId: moduleIds.get(flag.location.moduleId) ?? flag.location.moduleId }
+          : {}),
+        ...(flag.location.blockId
+          ? { blockId: blockIds.get(flag.location.blockId) ?? flag.location.blockId }
+          : {}),
+        ...(flag.location.questionId
+          ? { questionId: questionIds.get(flag.location.questionId) ?? flag.location.questionId }
+          : {}),
+      },
+    })),
+  };
+}
+
+function evidenceIsActive(ref: SourceRef, source: SourceDbRecord | undefined): boolean {
+  if (!source || source.deletedAt || source.status !== 'ready' || source.kind !== ref.kind) return false;
+  const section = source.sections?.find((item) => item.id === ref.sectionId);
+  return Boolean(
+    section
+    && normalizeForMatch(section.text).includes(normalizeForMatch(ref.quote))
+    && (ref.page === undefined || ref.page === section.page),
+  );
+}
+
+async function loadSources(
+  store: OnboardingStore,
+  roomId: string,
+  refs: readonly SourceRef[],
+): Promise<ReadonlyMap<string, SourceDbRecord>> {
+  const ids = [...new Set(refs.map((ref) => ref.sourceId))];
+  const entries = await Promise.all(ids.map(async (sourceId) => {
+    const result = await store.query<SourceDbRecord>(roomId, 'onboarding_sources', {
+      filter: { sourceId },
+      limit: 1,
+      includeDeleted: true,
+    });
+    return [sourceId, result.records[0]] as const;
+  }));
+  return new Map(
+    entries.filter((entry): entry is readonly [string, SourceDbRecord] => Boolean(entry[1])),
+  );
+}
+
+async function reopenInvalidEvidence(
+  store: OnboardingStore,
+  actor: OnboardingActor,
+  detail: AiDetail,
+  now: () => string,
+): Promise<AiDetail> {
+  const candidates = detail.flags.filter((flag) =>
+    flag.status !== 'open'
+    && (flag.resolution?.action === 'choose_option' || flag.resolution?.action === 'add_note'));
+  if (candidates.length === 0) return detail;
+  const sources = await loadSources(store, actor.roomId, candidates.flatMap((flag) => flag.evidence));
+  let changed = false;
+  const flags = detail.flags.map((flag) => {
+    if (!candidates.includes(flag)) return flag;
+    const resolutionEvidence = flag.resolution?.action === 'add_note'
+      ? flag.evidence.filter((ref) =>
+        ref.kind === 'admin_note' && ref.verifiedBy === flag.resolution?.by)
+      : flag.evidence.filter((ref) =>
+        ref.verifiedBy === flag.resolution?.by && Boolean(ref.verifiedAt));
+    if (
+      resolutionEvidence.length > 0
+      && resolutionEvidence.some((ref) => evidenceIsActive(ref, sources.get(ref.sourceId)))
+    ) return flag;
+    changed = true;
+    const { resolution: _resolution, ...reopened } = flag;
+    return { ...reopened, status: 'open' as const };
+  });
+  if (!changed) return detail;
+  const rows = await store.query<TemplateContentDbRecord>(actor.roomId, 'onboarding_template_content', {
+    filter: { templateId: detail.id, templateVersion: detail.version },
+    limit: 1,
+  });
+  const row = rows.records[0];
+  if (!row) return detail;
+  const timestamp = now();
+  const content = pendingContent(detail.content, flags);
+  await store.update(actor.roomId, 'onboarding_template_content', row.id, {
+    flags, content, updatedAt: timestamp,
+  }, { expectedUpdatedAt: row.updatedAt });
+  const templateRows = await store.query<StoreRecord>(actor.roomId, 'onboarding_templates', {
+    filter: { templateId: detail.id, version: detail.version },
+    limit: 1,
+  });
+  if (templateRows.records[0]) {
+    await store.update(actor.roomId, 'onboarding_templates', String(templateRows.records[0].id), {
+      updatedAt: timestamp,
+    });
+  }
+  return { ...detail, flags, content, updatedAt: timestamp };
+}
+
+export function createAiPublishGuard(
+  store: OnboardingStore,
+): (actor: OnboardingActor, detail: AdminTemplateDetail) => Promise<void> {
+  return async (actor, detail) => {
+    if (detail.source !== 'ai_generated') return;
+    requireAi(detail);
+    if (detail.flags.some((flag) => flag.severity === 'blocking' && flag.status === 'open')) {
+      throw new TemplateServiceError(
+        'TEMPLATE_FLAGS_BLOCKING',
+        'Resolve every blocking verification flag before publishing.',
+      );
+    }
+    const errors = structuralErrors(detail, detail.content);
+    if (errors.length > 0) throw new TemplateServiceError('TEMPLATE_INVALID', errors[0]);
+    const refs = [
+      ...detail.content.modules.flatMap((module) => module.blocks)
+        .filter((block) => block.kind !== 'summary')
+        .flatMap((block) => block.sourceRefs),
+      ...detail.content.questionMeta.flatMap((meta) => meta.sourceRefs),
+    ];
+    const sources = await loadSources(store, actor.roomId, refs);
+    if (refs.some((ref) => !evidenceIsActive(ref, sources.get(ref.sourceId)))) {
+      throw new TemplateServiceError('TEMPLATE_INVALID', 'AI template evidence is no longer valid.');
+    }
+  };
+}
+
+function applyReviewOperations(
+  detail: AiDetail,
+  operations: readonly AiReviewOperation[],
+): {
+  readonly modules: AdminTemplateDetail['modules'];
+  readonly content: TemplateContentSnapshot;
+  readonly passingScore?: number;
+} {
+  let modules = detail.modules.map((module) => ({
+    ...module,
+    resources: module.resources.map((resource) => ({ ...resource })),
+    questions: module.questions.map((question) => ({ ...question })),
+  }));
+  let content: TemplateContentSnapshot = {
+    ...detail.content,
+    modules: detail.content.modules.map((module) => ({
+      ...module,
+      blocks: module.blocks.map((block) => ({ ...block })),
+    })),
+    questionMeta: detail.content.questionMeta.map((meta) => ({ ...meta })),
+  };
+  let passingScore = detail.passingScore;
+  for (const operation of operations) {
+    if (operation.kind === 'update_block') {
+      let found = false;
+      content = {
+        ...content,
+        modules: content.modules.map((module) => module.moduleId !== operation.moduleId
+          ? module
+          : {
+            ...module,
+            blocks: module.blocks.map((block) => {
+              if (block.id !== operation.blockId) return block;
+              found = true;
+              return {
+                ...block,
+                ...(operation.title === undefined ? {} : { title: operation.title.trim() }),
+                ...(operation.body === undefined ? {} : { body: operation.body.trim() }),
+                ...(operation.steps === undefined ? {} : { steps: operation.steps }),
+              };
+            }),
+          }),
+      };
+      if (!found) throw new AiReviewServiceError('REVIEW_INVALID', 'The lesson block was not found.');
+    } else if (operation.kind === 'remove_block') {
+      content = {
+        ...content,
+        modules: content.modules.map((module) => module.moduleId !== operation.moduleId
+          ? module
+          : { ...module, blocks: module.blocks.filter((block) => block.id !== operation.blockId) }),
+      };
+    } else if (operation.kind === 'update_question') {
+      let found = false;
+      modules = modules.map((module) => ({
+        ...module,
+        questions: module.questions.map((question) => {
+          if (question.id !== operation.questionId) return question;
+          found = true;
+          return {
+            ...question,
+            ...(operation.prompt === undefined ? {} : { prompt: operation.prompt.trim() }),
+            ...(operation.options === undefined ? {} : { options: operation.options }),
+            ...(operation.explanation === undefined
+              ? {}
+              : { explanation: operation.explanation.trim() }),
+            correctOptionIds: operation.correctOptionId === undefined
+              ? question.correctOptionIds
+              : [operation.correctOptionId],
+          };
+        }),
+      }));
+      if (!found) throw new AiReviewServiceError('REVIEW_INVALID', 'The question was not found.');
+    } else if (operation.kind === 'remove_question') {
+      const owner = modules.find((module) =>
+        module.questions.some((question) => question.id === operation.questionId));
+      if (!owner) throw new AiReviewServiceError('REVIEW_INVALID', 'The question was not found.');
+      if (owner.questions.length <= 3) {
+        throw new AiReviewServiceError(
+          'MODULE_MIN_QUESTIONS',
+          'A module must retain at least three questions.',
+        );
+      }
+      modules = modules.map((module) => ({
+        ...module,
+        questions: module.questions.filter((question) => question.id !== operation.questionId),
+      }));
+      content = {
+        ...content,
+        questionMeta: content.questionMeta.filter((meta) => meta.questionId !== operation.questionId),
+      };
+    } else if (operation.kind === 'remove_module') {
+      const removedQuestions = new Set(
+        modules.find((module) => module.id === operation.moduleId)?.questions.map((item) => item.id) ?? [],
+      );
+      modules = modules.filter((module) => module.id !== operation.moduleId);
+      content = {
+        ...content,
+        modules: content.modules.filter((module) => module.moduleId !== operation.moduleId),
+        questionMeta: content.questionMeta.filter((meta) => !removedQuestions.has(meta.questionId)),
+      };
+    } else if (operation.kind === 'upsert_generated_resource') {
+      const resource = operation.resource;
+      const moduleExists = modules.some((module) => module.id === operation.moduleId);
+      if (!moduleExists) {
+        throw new AiReviewServiceError('REVIEW_INVALID', 'The resource module was not found.');
+      }
+      if (
+        resource.kind !== 'file'
+        || resource.required !== true
+        || !resource.id.trim()
+        || !resource.title.trim()
+        || !resource.fileId?.trim()
+      ) {
+        throw new AiReviewServiceError(
+          'REVIEW_INVALID',
+          'Generated lesson resources require a stable ID, title, required file kind, and file ID.',
+        );
+      }
+      if (modules.some((module) =>
+        module.id !== operation.moduleId
+        && module.resources.some((entry) => entry.id === resource.id.trim()))) {
+        throw new AiReviewServiceError('REVIEW_INVALID', 'The generated resource ID is already in use.');
+      }
+      const normalized: TemplateResource = {
+        ...resource,
+        id: resource.id.trim(),
+        title: resource.title.trim(),
+        description: resource.description?.trim(),
+        fileId: resource.fileId.trim(),
+      };
+      modules = modules.map((module) => {
+        if (module.id !== operation.moduleId) return module;
+        const exists = module.resources.some((entry) => entry.id === normalized.id);
+        return {
+          ...module,
+          resources: exists
+            ? module.resources.map((entry) => entry.id === normalized.id ? normalized : entry)
+            : [...module.resources, normalized],
+        };
+      });
+    } else {
+      if (
+        operation.passingScore !== undefined
+        && (!Number.isFinite(operation.passingScore)
+          || operation.passingScore < 0
+          || operation.passingScore > 100)
+      ) {
+        throw new AiReviewServiceError('REVIEW_INVALID', 'Passing score must be from 0 to 100.');
+      }
+      if (
+        operation.maxAttemptsPerModule !== undefined
+        && operation.maxAttemptsPerModule !== null
+        && (!Number.isInteger(operation.maxAttemptsPerModule)
+          || operation.maxAttemptsPerModule < 1)
+      ) {
+        throw new AiReviewServiceError('REVIEW_INVALID', 'Module attempts must be positive or null.');
+      }
+      passingScore = operation.passingScore ?? passingScore;
+      content = {
+        ...content,
+        learningMode: operation.learningMode ?? content.learningMode,
+        maxAttemptsPerModule: operation.maxAttemptsPerModule === undefined
+          ? content.maxAttemptsPerModule
+          : operation.maxAttemptsPerModule,
+      };
+    }
+  }
+  return { modules, content, passingScore };
+}
+
+export function createAiReviewService(
+  store: OnboardingStore,
+  templates: TemplateService,
+  options: AiReviewServiceOptions = {},
+): AiReviewService {
+  const now = options.now ?? (() => new Date().toISOString());
+  const sources = createSourceService(store, { now });
+
+  async function audit(
+    actor: OnboardingActor,
+    action: string,
+    targetId: string,
+    metadata: StoreRecord,
+  ): Promise<void> {
+    const occurredAt = now();
+    const operationId = action + ':' + targetId + ':' + occurredAt;
+    await store.create(actor.roomId, 'onboarding_audit_events', {
+      actorId: actor.userId,
+      action,
+      targetType: 'template',
+      targetId,
+      metadata,
+      operationId,
+      occurredAt,
+    }, operationId);
+  }
+
+  async function reviewDetail(
+    actor: OnboardingActor,
+    templateId: string,
+    version: number,
+  ): Promise<AiDetail> {
+    requireAdmin(actor);
+    const detail = await templates.getAdminDetail(actor, templateId, version);
+    requireAi(detail);
+    return reopenInvalidEvidence(store, actor, detail, now);
+  }
+
+  async function save(
+    actor: OnboardingActor,
+    detail: AiDetail,
+    expectedUpdatedAt: string,
+    modules: AdminTemplateDetail['modules'],
+    content: TemplateContentSnapshot,
+    flags: readonly VerificationFlag[],
+    passingScore = detail.passingScore,
+  ): Promise<AdminTemplateDetail> {
+    let nextModules = modules;
+    let nextContent = pendingContent(content, flags);
+    let nextFlags = flags;
+    if (detail.status === 'published') {
+      const catalog = await templates.list(actor);
+      const nextVersion = Math.max(...catalog
+        .filter((item) => item.id === detail.id)
+        .map((item) => item.version)) + 1;
+      const remapped = remapRevision(
+        detail.id,
+        nextVersion,
+        nextModules,
+        nextContent,
+        nextFlags,
+      );
+      nextModules = remapped.modules;
+      nextContent = remapped.content;
+      nextFlags = remapped.flags;
+    }
+    const errors = structuralErrors({ ...detail, modules: nextModules }, nextContent);
+    if (errors.length > 0) {
+      if (errors.some((error) => error.includes('three to five questions'))) {
+        throw new AiReviewServiceError('MODULE_MIN_QUESTIONS', errors[0]);
+      }
+      throw new AiReviewServiceError('REVIEW_INVALID', errors[0]);
+    }
+    try {
+      return await templates.updateAiDraft(actor, {
+        templateId: detail.id,
+        version: detail.version,
+        expectedUpdatedAt,
+        draft: draftFrom(detail, nextModules, passingScore),
+        content: nextContent,
+        flags: nextFlags,
+        roleProfile: detail.roleProfile,
+        sourceIds: detail.sourceIds,
+        jobId: detail.jobId,
+        promptVersion: detail.promptVersion,
+        generationNotes: detail.generationNotes,
+      });
+    } catch (error) {
+      if (error instanceof TemplateServiceError && error.code === 'TEMPLATE_CONFLICT') {
+        throw new AiReviewServiceError('REVIEW_CONFLICT', error.message);
+      }
+      throw error;
+    }
+  }
+
+  return {
+    async getReview(actor, templateId, version) {
+      return reviewDetail(actor, templateId, version);
+    },
+
+    async updateReview(actor, input) {
+      const detail = await reviewDetail(actor, input.templateId, input.version);
+      if (detail.updatedAt !== input.expectedUpdatedAt) {
+        throw new AiReviewServiceError('REVIEW_CONFLICT', 'Template changed after this review loaded it.');
+      }
+      if (input.ops.length === 0) return detail;
+      const updatedState = applyReviewOperations(detail, input.ops);
+      const flags = reopenTouchedFlags(detail.flags, input.ops);
+      const updated = await save(
+        actor,
+        detail,
+        input.expectedUpdatedAt,
+        updatedState.modules,
+        updatedState.content,
+        flags,
+        updatedState.passingScore,
+      );
+      await audit(actor, 'ai_template.manual_edit', updated.id, {
+        fromVersion: detail.version,
+        toVersion: updated.version,
+        operationKinds: input.ops.map((operation) => operation.kind),
+      });
+      return updated;
+    },
+
+    async resolveFlag(actor, input) {
+      const detail = await reviewDetail(actor, input.templateId, input.version);
+      if (detail.status !== 'draft') {
+        throw new AiReviewServiceError('REVIEW_INVALID', 'Create a draft revision before resolving flags.');
+      }
+      if (input.expectedUpdatedAt && detail.updatedAt !== input.expectedUpdatedAt) {
+        throw new AiReviewServiceError('REVIEW_CONFLICT', 'Template changed after this review loaded it.');
+      }
+      const flag = detail.flags.find((item) => item.id === input.flagId);
+      if (!flag) throw new AiReviewServiceError('FLAG_NOT_FOUND', 'The verification flag was not found.');
+      const note = input.note?.trim();
+      const timestamp = now();
+      let modules = detail.modules;
+      let content = detail.content;
+      let evidence = [...flag.evidence];
+      let status: VerificationFlag['status'] = 'resolved';
+
+      if (input.action === 'accept') {
+        if (flag.severity !== 'warning') {
+          throw new AiReviewServiceError('FLAG_ACTION_INVALID', 'Only warning flags can be accepted.');
+        }
+        status = 'dismissed';
+      } else if (input.action === 'choose_option') {
+        if (flag.type !== 'conflict') {
+          throw new AiReviewServiceError('FLAG_ACTION_INVALID', 'Only conflict flags support choosing evidence.');
+        }
+        const index = input.chosenEvidenceIndex;
+        if (index === undefined || index < 0 || index >= evidence.length) {
+          throw new AiReviewServiceError('FLAG_ACTION_INVALID', 'Choose a valid evidence option.');
+        }
+        evidence = evidence.map((ref, evidenceIndex) => evidenceIndex === index
+          ? { ...ref, verifiedBy: actor.userId, verifiedAt: timestamp }
+          : ref);
+      } else if (input.action === 'add_note') {
+        if (!note) throw new AiReviewServiceError('FLAG_ACTION_INVALID', 'A resolution note is required.');
+        const summary = await sources.addAdminNote(actor, {
+          operationId: 'flag-note:' + detail.id + ':' + detail.version + ':' + flag.id,
+          title: 'Xác minh ' + flag.id,
+          text: note,
+        });
+        const rows = await store.query<SourceDbRecord>(actor.roomId, 'onboarding_sources', {
+          filter: { sourceId: summary.sourceId },
+          limit: 1,
+        });
+        const section = rows.records[0]?.sections?.[0];
+        if (!section) throw new AiReviewServiceError('REVIEW_INVALID', 'The Admin note was not persisted.');
+        const ref: SourceRef = {
+          kind: 'admin_note',
+          sourceId: summary.sourceId,
+          sectionId: section.id,
+          ...(section.page === undefined ? {} : { page: section.page }),
+          quote: section.text.slice(0, 300),
+          verifiedBy: actor.userId,
+          verifiedAt: timestamp,
+        };
+        evidence.push(ref);
+        content = {
+          ...content,
+          modules: content.modules.map((module) => ({
+            ...module,
+            blocks: module.blocks.map((block) => block.id === flag.location.blockId
+              ? { ...block, sourceRefs: [...block.sourceRefs, ref] }
+              : block),
+          })),
+          questionMeta: content.questionMeta.map((meta) => meta.questionId === flag.location.questionId
+            ? { ...meta, sourceRefs: [...meta.sourceRefs, ref] }
+            : meta),
+        };
+      } else if (input.action === 'remove') {
+        const operation: AiReviewOperation | undefined = flag.location.questionId
+          ? { kind: 'remove_question', questionId: flag.location.questionId }
+          : flag.location.blockId && flag.location.moduleId
+            ? { kind: 'remove_block', moduleId: flag.location.moduleId, blockId: flag.location.blockId }
+            : flag.location.moduleId
+              ? { kind: 'remove_module', moduleId: flag.location.moduleId }
+              : undefined;
+        if (!operation) {
+          throw new AiReviewServiceError('FLAG_ACTION_INVALID', 'The flag has no removable content target.');
+        }
+        const state = applyReviewOperations(detail, [operation]);
+        modules = state.modules;
+        content = state.content;
+      } else {
+        throw new AiReviewServiceError(
+          'FLAG_ACTION_INVALID',
+          'Upload the document as a source before resolving the flag.',
+        );
+      }
+
+      const resolution: NonNullable<VerificationFlag['resolution']> = {
+        action: input.action,
+        ...(note ? { note } : {}),
+        by: actor.userId,
+        at: timestamp,
+      };
+      const flags = detail.flags.map((item) => item.id === flag.id
+        ? { ...item, evidence, status, resolution }
+        : item);
+      const updated = await save(
+        actor,
+        detail,
+        detail.updatedAt,
+        modules,
+        content,
+        flags,
+      );
+      await audit(actor, 'ai_flag.resolved', updated.id, {
+        flagId: flag.id,
+        before: flag.status,
+        after: status,
+        action: input.action,
+        note,
+      });
+      return updated;
+    },
+  };
+}

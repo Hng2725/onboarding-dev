@@ -19,6 +19,7 @@ export interface BootstrapCapabilities {
   readonly canReview: boolean;
   readonly canLearn: boolean;
   readonly canUploadFiles: boolean;
+  readonly canGenerateWithAi: boolean;
   readonly notifications: 'best_effort';
 }
 
@@ -63,10 +64,62 @@ export function reconcileDraft(
   return localDraft.revision > serverDraft.revision ? 'confirm' : 'server';
 }
 
-function errorMessage(value: unknown): string | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+export class OnboardingApiError extends Error {
+  readonly code: string;
+  readonly data?: unknown;
+
+  constructor(code: string, message: string, data?: unknown) {
+    super(message);
+    this.name = 'OnboardingApiError';
+    this.code = code;
+    this.data = data;
+  }
+}
+
+export function canUseAiGeneration(
+  serverCapability: boolean,
+  ...hostCapabilities: readonly {
+    readonly resolved: boolean;
+    readonly granted: boolean;
+  }[]
+): boolean {
+  return serverCapability && hostCapabilities.some(
+    (capability) => capability.resolved && capability.granted,
+  );
+}
+
+export function resolveHostCapability(
+  effectiveScopes: readonly string[] | undefined,
+  scope: string,
+): { readonly resolved: boolean; readonly granted: boolean; readonly scope: string } {
+  return {
+    resolved: Array.isArray(effectiveScopes),
+    granted: Array.isArray(effectiveScopes) && effectiveScopes.includes(scope),
+    scope,
+  };
+}
+
+function errorPayload(value: unknown): { code: string; message: string; data?: unknown } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { code: 'ONBOARDING_ERROR', message: 'Yêu cầu onboarding thất bại.' };
+  }
   const record = value as Record<string, unknown>;
-  return [record.error, record.message].find((candidate): candidate is string => typeof candidate === 'string');
+  const nestedError = record.error && typeof record.error === 'object' && !Array.isArray(record.error)
+    ? record.error as Record<string, unknown>
+    : undefined;
+  const data = record.data && typeof record.data === 'object' && !Array.isArray(record.data)
+    ? record.data as Record<string, unknown>
+    : undefined;
+  const code = [record.code, data?.code, nestedError?.code]
+    .find((candidate): candidate is string => typeof candidate === 'string' && Boolean(candidate.trim()))
+    ?? 'ONBOARDING_ERROR';
+  const message = [
+    typeof record.error === 'string' ? record.error : undefined,
+    record.message,
+    nestedError?.message,
+  ].find((candidate): candidate is string => typeof candidate === 'string' && Boolean(candidate.trim()))
+    ?? 'Yêu cầu onboarding thất bại.';
+  return { code, message, ...(record.data === undefined ? {} : { data: record.data }) };
 }
 
 export function parseToolResult<T>(result: ToolResult): T {
@@ -78,7 +131,10 @@ export function parseToolResult<T>(result: ToolResult): T {
   } catch {
     throw new Error('Kết quả JSON từ PrivOS không hợp lệ.');
   }
-  if (result.isError) throw new Error(errorMessage(parsed) ?? 'Yêu cầu onboarding thất bại.');
+  if (result.isError) {
+    const error = errorPayload(parsed);
+    throw new OnboardingApiError(error.code, error.message, error.data);
+  }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error('Kết quả từ PrivOS không hợp lệ.');
   }
@@ -106,6 +162,10 @@ export class OnboardingApi {
 
   adminAssignments<T>(action: string, args: Record<string, unknown> = {}): Promise<T> {
     return this.call('onboarding_admin_assignments', { ...args, action });
+  }
+
+  adminAi<T>(action: string, args: Record<string, unknown> = {}): Promise<T> {
+    return this.call('onboarding_admin_ai', { ...args, action });
   }
 
   learning<T>(action: string, args: Record<string, unknown> = {}): Promise<T> {

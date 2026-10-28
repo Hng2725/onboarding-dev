@@ -16,13 +16,18 @@ import {
 import type { ReactNode, ReactPortal } from 'react';
 import { createPortal } from 'react-dom';
 
-import type { EmployeeType, QuestionType, TemplateStatus } from '../../onboarding/contracts';
+import type {
+  EmployeeType,
+  QuestionType,
+  TemplateSource,
+  TemplateStatus,
+} from '../../onboarding/contracts';
 import type { AdminTemplateDetail, TemplateQuestionInput } from '../../onboarding/templates';
 
 export interface TemplateCatalogView {
   readonly id: string;
   readonly version: number;
-  readonly source: 'system' | 'custom';
+  readonly source: TemplateSource;
   readonly status: TemplateStatus;
   readonly employeeType: EmployeeType;
   readonly title: string;
@@ -141,7 +146,11 @@ export async function preloadTemplateDetails(
 export type TemplateDetailAction = 'use' | 'clone' | 'edit' | 'delete' | 'archive';
 
 export function templateDetailActions(template: Pick<TemplateCatalogView, 'source' | 'status'>): readonly TemplateDetailAction[] {
-  if (template.source === 'system') return ['use', 'clone'];
+  if (template.source === 'system') return ['use'];
+  if (template.source === 'custom') {
+    if (template.status === 'published') return ['use', 'archive', 'delete'];
+    return ['delete'];
+  }
   if (template.status === 'draft') return ['edit', 'delete'];
   if (template.status === 'published') return ['use', 'edit', 'archive', 'delete'];
   return ['delete'];
@@ -157,7 +166,9 @@ export function TemplateCard({ item, onOpen }: { item: TemplateCatalogView; onOp
       <button className="template-card-open" type="button" onClick={onOpen} aria-label={`Xem chi tiết ${item.title}`}>
         <span className="template-card-head">
           <span className={`template-source source-${item.source}`}>
-            {item.source === 'system' ? <><LockOutlined /> Hệ thống</> : 'Tùy chỉnh'}
+            {item.source === 'system'
+              ? <><LockOutlined /> Hệ thống</>
+              : item.source === 'ai_generated' ? 'AI tạo' : 'Tùy chỉnh'}
           </span>
           <span className={`template-status template-${item.status}`}>{statusLabel(item.status)}</span>
         </span>

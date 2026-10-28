@@ -23,6 +23,7 @@ describe('OnboardingApi', () => {
           canReview: false,
           canLearn: true,
           canUploadFiles: false,
+          canGenerateWithAi: false,
           notifications: 'best_effort',
         },
         summary: { assignmentCount: 0, activeCount: 0, completedCount: 0 },

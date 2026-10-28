@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseToolResult, reconcileDraft } from '../src/ui/onboarding/api';
+import {
+  OnboardingApiError,
+  canUseAiGeneration,
+  parseToolResult,
+  reconcileDraft,
+  resolveHostCapability,
+} from '../src/ui/onboarding/api';
 import {
   LEARNER_EMPTY_STATE,
   assignmentStatusLabel,
@@ -47,11 +53,53 @@ describe('onboarding UI models', () => {
     expect(reconcileDraft(null, { revision: 1 })).toBe('local');
   });
 
+  it('enables AI generation only after the optional host scope is resolved and granted', () => {
+    expect(canUseAiGeneration(true, { resolved: false, granted: false })).toBe(false);
+    expect(canUseAiGeneration(true, { resolved: true, granted: false })).toBe(false);
+    expect(canUseAiGeneration(true, { resolved: true, granted: true })).toBe(true);
+    expect(canUseAiGeneration(
+      true,
+      { resolved: true, granted: false },
+      { resolved: true, granted: true },
+    )).toBe(true);
+    expect(canUseAiGeneration(false, { resolved: true, granted: true })).toBe(false);
+  });
+
+  it('derives every AI capability from the same resolved host scope list', () => {
+    const effectiveScopes = ['files:read', 'sandbox:generate'];
+
+    expect(resolveHostCapability(effectiveScopes, 'sandbox:generate')).toEqual({
+      resolved: true,
+      granted: true,
+      scope: 'sandbox:generate',
+    });
+    expect(resolveHostCapability(effectiveScopes, 'sandbox:ai-chat')).toEqual({
+      resolved: true,
+      granted: false,
+      scope: 'sandbox:ai-chat',
+    });
+    expect(resolveHostCapability(undefined, 'sandbox:generate')).toEqual({
+      resolved: false,
+      granted: false,
+      scope: 'sandbox:generate',
+    });
+  });
+
   it('parses JSON text results and rejects malformed or error results', () => {
     expect(parseToolResult<{ ok: boolean }>({ content: [{ type: 'text', text: '{"ok":true}' }] })).toEqual({ ok: true });
     expect(() => parseToolResult({ content: [{ type: 'resource' }] })).toThrow('không hợp lệ');
     expect(() => parseToolResult({ isError: true, content: [{ type: 'text', text: '{"error":"blocked"}' }] }))
       .toThrow('blocked');
+    try {
+      parseToolResult({
+        isError: true,
+        content: [{ type: 'text', text: '{"message":"too large","data":{"code":"SOURCE_TOO_LARGE"}}' }],
+      });
+      throw new Error('Expected typed API error.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(OnboardingApiError);
+      expect(error).toMatchObject({ code: 'SOURCE_TOO_LARGE', message: 'too large' });
+    }
     expect(() => parseToolResult({ content: [{ type: 'text', text: 'not-json' }] })).toThrow('JSON');
   });
 });

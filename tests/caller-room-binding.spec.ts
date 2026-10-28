@@ -21,7 +21,8 @@ function unreachableServices(): OnboardingServiceBundle {
     employees: { list: unreachable, getByMemberId: unreachable, add: unreachable },
     templates: {
       list: unreachable, getAdminDetail: unreachable, getLearnerSnapshot: unreachable,
-      createDraft: unreachable, updateDraft: unreachable, cloneSystemTemplate: unreachable,
+      createDraft: unreachable, updateDraft: unreachable, createAiDraft: unreachable,
+      updateAiDraft: unreachable, cloneSystemTemplate: unreachable,
       publish: unreachable, archive: unreachable, deleteDraft: unreachable,
     },
     assignments: {
@@ -36,6 +37,23 @@ function unreachableServices(): OnboardingServiceBundle {
       listEssayQueue: unreachable, saveEssayFeedback: unreachable, listEvaluationQueue: unreachable,
       publishEvaluation: unreachable, getPublishedFeedback: unreachable,
     },
+    sources: {
+      listSources: unreachable, ingestSource: unreachable, addAdminNote: unreachable,
+      deleteSource: unreachable, getSourceSection: unreachable,
+    },
+    aiJobs: {
+      startJob: unreachable, listJobs: unreachable, getJob: unreachable, nextStep: unreachable,
+      recordDispatch: unreachable, submitAiOutput: unreachable, reportAiFailure: unreachable,
+      retryJob: unreachable, cancelJob: unreachable, recordAttemptCleanup: unreachable,
+    },
+    aiReview: {
+      getReview: unreachable, updateReview: unreachable, resolveFlag: unreachable,
+    },
+    moduleLearning: {
+      getModules: unreachable, openModule: unreachable, completeLesson: unreachable,
+      startModuleQuiz: unreachable, submitModuleQuiz: unreachable, getModuleAttempt: unreachable,
+      grantModuleRetry: unreachable, questionStats: unreachable,
+    },
   };
 }
 
@@ -45,6 +63,7 @@ describe('onboarding tools are bound to the verified caller and room', () => {
   it.each([
     ['onboarding_bootstrap', { action: 'load' }],
     ['onboarding_admin_templates', { action: 'list' }],
+    ['onboarding_admin_ai', { action: 'list_sources' }],
     ['onboarding_admin_assignments', { action: 'list' }],
     ['onboarding_learning', { action: 'list' }],
     ['onboarding_reviews', { action: 'list_essays' }],

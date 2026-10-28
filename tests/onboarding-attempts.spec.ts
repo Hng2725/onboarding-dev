@@ -16,6 +16,7 @@ function setup() {
   let sequence = 0;
   const store = new MemoryOnboardingStore();
   const templates = createTemplateService(store, {
+    allowLegacyManualCreation: true,
     id: () => `stable-${++sequence}`,
     now: () => `2026-10-20T00:00:${String(++sequence).padStart(2, '0')}.000Z`,
   });

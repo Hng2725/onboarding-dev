@@ -205,6 +205,7 @@ export function createEmployeeService(
 
       const rawMembers = await caller(
         'mcpapp.rooms.getMembers', { roomId: actor.roomId }, 'rooms:read', actor.roomId,
+        { replaySafe: true },
       );
       const members: readonly unknown[] = Array.isArray(rawMembers)
         ? rawMembers

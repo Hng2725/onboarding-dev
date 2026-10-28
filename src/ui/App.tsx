@@ -8,10 +8,20 @@ import {
   TeamOutlined,
 } from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { PrivosAppProvider, usePrivosApp, usePrivosContext } from '@privos_ai/app-react';
+import {
+  PrivosAppProvider,
+  usePrivosApp,
+  usePrivosContext,
+} from '@privos_ai/app-react';
 
 import { ThemeProvider } from './theme-provider';
-import { OnboardingApi, type AdminBootstrapSummary, type BootstrapResult } from './onboarding/api';
+import {
+  OnboardingApi,
+  canUseAiGeneration,
+  resolveHostCapability,
+  type AdminBootstrapSummary,
+  type BootstrapResult,
+} from './onboarding/api';
 import { AppShell } from './onboarding/AppShell';
 import { AdminDashboard } from './onboarding/admin-dashboard';
 import { EmptyState, ErrorState, LoadingState } from './onboarding/components';
@@ -22,6 +32,7 @@ import { defaultRouteForAccess, routesForAccess, type OnboardingRoute } from './
 import { ResultsPage } from './onboarding/results';
 import { EssayFeedbackPage, EvaluationsPage } from './onboarding/reviews';
 import { TemplatesPage } from './onboarding/templates';
+import { ensureOnboardingRoomfiles } from './onboarding/roomfiles';
 
 function StatCard({ icon, label, value, tone }: { icon: React.ReactNode; label: string; value: number; tone: string }) {
   return (
@@ -36,7 +47,7 @@ function AdminFoundation({ summary, route }: { summary: AdminBootstrapSummary; r
   if (route !== 'admin-overview') {
     const copy: Record<string, [string, string]> = {
       employees: ['Quản lý nhân sự', 'Gán onboarding thủ công, phân loại nhân sự và theo dõi tiến độ trong room.'],
-      templates: ['Thư viện template', 'Dùng template PrivOS có sẵn hoặc xây nội dung riêng từ tài liệu của room.'],
+      templates: ['Thư viện template', 'Dùng template có sẵn hoặc để AI xây nội dung từ tài liệu của room.'],
       'essay-feedback': ['Nhận xét tự luận', 'Đọc câu trả lời và phản hồi riêng cho từng câu tự luận đã nộp.'],
       evaluations: ['Đánh giá chung', 'Tổng hợp kết quả và công bố kết luận Đạt, Không đạt hoặc Làm lại.'],
     };
@@ -72,11 +83,11 @@ function MountedRoute({ id, activeRoute, children }: { id: OnboardingRoute; acti
   return <section className="route-panel" data-onboarding-route={id} hidden={!active} aria-hidden={active ? undefined : true}>{children}</section>;
 }
 
-export function AdminWorkspace({ api, summary, route, onNavigate }: { api: OnboardingApi; summary: AdminBootstrapSummary; route: OnboardingRoute; onNavigate: (route: OnboardingRoute) => void }) {
+export function AdminWorkspace({ api, summary, route, onNavigate, canGenerateWithAi = true }: { api: OnboardingApi; summary: AdminBootstrapSummary; route: OnboardingRoute; onNavigate: (route: OnboardingRoute) => void; canGenerateWithAi?: boolean }) {
   return <>
     <MountedRoute id="admin-overview" activeRoute={route}><AdminDashboard api={api} onNavigate={(target) => onNavigate(target)} /></MountedRoute>
     <MountedRoute id="employees" activeRoute={route}><EmployeesPage api={api} /></MountedRoute>
-    <MountedRoute id="templates" activeRoute={route}><TemplatesPage api={api} onUseTemplate={() => onNavigate('employees')} /></MountedRoute>
+    <MountedRoute id="templates" activeRoute={route}><TemplatesPage api={api} canGenerateWithAi={canGenerateWithAi} onUseTemplate={() => onNavigate('employees')} /></MountedRoute>
     <MountedRoute id="essay-feedback" activeRoute={route}><EssayFeedbackPage api={api} /></MountedRoute>
     <MountedRoute id="evaluations" activeRoute={route}><EvaluationsPage api={api} /></MountedRoute>
     {!['admin-overview', 'employees', 'templates', 'essay-feedback', 'evaluations'].includes(route) && (
@@ -101,6 +112,13 @@ export function LearnerWorkspace({ api, route, onNavigate }: { api: OnboardingAp
 function OnboardingRoot() {
   const app = usePrivosApp();
   const context = usePrivosContext();
+  const aiCapability = resolveHostCapability(context.effectiveScopes, 'sandbox:generate');
+  const aiChatReadCapability = resolveHostCapability(context.effectiveScopes, 'sandbox:ai-chat');
+  const aiChatWriteCapability = resolveHostCapability(context.effectiveScopes, 'sandbox:ai-chat:write');
+  const nativeAiCapability = {
+    resolved: aiChatReadCapability.resolved && aiChatWriteCapability.resolved,
+    granted: aiChatReadCapability.granted && aiChatWriteCapability.granted,
+  };
   const api = useMemo(() => new OnboardingApi(app), [app]);
   const [bootstrap, setBootstrap] = useState<BootstrapResult | null>(null);
   const [error, setError] = useState<Error | null>(null);
@@ -120,8 +138,13 @@ function OnboardingRoot() {
   }, [api]);
 
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (bootstrap?.role !== 'admin' || !bootstrap.roomId) return;
+    // Folder preparation is best-effort during startup; upload actions await the same
+    // cached promise and surface a useful error if Roomfiles is unavailable.
+    void ensureOnboardingRoomfiles(app, bootstrap.roomId).catch(() => undefined);
+  }, [app, bootstrap?.role, bootstrap?.roomId]);
   useEffect(() => { window.__privosUiBooted = true; }, []);
-
   return (
     <ThemeProvider hostTheme={context.theme}>
       {!bootstrap && !error && <div className="bootstrap-screen"><LoadingState /></div>}
@@ -129,7 +152,17 @@ function OnboardingRoot() {
       {bootstrap && route && (
         <AppShell bootstrap={bootstrap} roomName={context.roomName} activeRoute={route} onNavigate={setRoute}>
           {bootstrap.role === 'admin'
-            ? <AdminWorkspace api={api} summary={bootstrap.summary as AdminBootstrapSummary} route={route} onNavigate={setRoute} />
+            ? <AdminWorkspace
+                api={api}
+                summary={bootstrap.summary as AdminBootstrapSummary}
+                route={route}
+                onNavigate={setRoute}
+                canGenerateWithAi={canUseAiGeneration(
+                  bootstrap.capabilities.canGenerateWithAi,
+                  aiCapability,
+                  nativeAiCapability,
+                )}
+              />
             : <LearnerWorkspace api={api} route={route} onNavigate={setRoute} />}
         </AppShell>
       )}

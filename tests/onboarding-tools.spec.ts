@@ -4,6 +4,7 @@ import type { VerifiedActor } from '@privos_ai/app-server';
 import {
   DATA_TOOL_NAMES,
   createOnboardingToolHandler,
+  sourceFileMetadataFrom,
   type OnboardingServiceBundle,
 } from '../src/onboarding/tools';
 
@@ -32,6 +33,7 @@ function services(): OnboardingServiceBundle {
     templates: {
       list: vi.fn().mockResolvedValue([{ id: 'privos-foundations', version: 1 }]),
       getAdminDetail: vi.fn(), getLearnerSnapshot: vi.fn(), createDraft: vi.fn(), updateDraft: vi.fn(),
+      createAiDraft: vi.fn(), updateAiDraft: vi.fn(),
       cloneSystemTemplate: vi.fn(), publish: vi.fn(), archive: vi.fn(), deleteDraft: vi.fn(),
     },
     assignments: {
@@ -50,10 +52,82 @@ function services(): OnboardingServiceBundle {
       listEvaluationQueue: vi.fn().mockResolvedValue([{ attemptId: 'attempt-1' }]),
       publishEvaluation: vi.fn(), getPublishedFeedback: vi.fn(),
     },
+    sources: {
+      listSources: vi.fn().mockResolvedValue([{ sourceId: 'source-1', fileName: 'guide.md' }]),
+      ingestSource: vi.fn().mockResolvedValue({ sourceId: 'source-2', fileName: 'guide.pdf' }),
+      addAdminNote: vi.fn().mockResolvedValue({ sourceId: 'source-3', fileName: 'Ghi chú' }),
+      deleteSource: vi.fn().mockResolvedValue(undefined),
+      getSourceSection: vi.fn().mockResolvedValue({
+        fileName: 'guide.md',
+        section: { id: 'section-1', text: 'Nội dung' },
+      }),
+    },
+    aiJobs: {
+      startJob: vi.fn().mockResolvedValue({ jobId: 'job-1', status: 'running' }),
+      listJobs: vi.fn().mockResolvedValue([{ jobId: 'job-1', status: 'running' }]),
+      getJob: vi.fn().mockResolvedValue({ jobId: 'job-1', status: 'running' }),
+      nextStep: vi.fn().mockResolvedValue({ kind: 'wait' }),
+      recordDispatch: vi.fn().mockResolvedValue({ jobId: 'job-1', status: 'running' }),
+      submitAiOutput: vi.fn().mockResolvedValue({ jobId: 'job-1', status: 'running' }),
+      reportAiFailure: vi.fn().mockResolvedValue({ jobId: 'job-1', status: 'failed' }),
+      retryJob: vi.fn().mockResolvedValue({ jobId: 'job-1', status: 'running' }),
+      cancelJob: vi.fn().mockResolvedValue({ jobId: 'job-1', status: 'cancelled' }),
+      recordAttemptCleanup: vi.fn().mockResolvedValue({ jobId: 'job-1', status: 'cancelled' }),
+    },
+    aiReview: {
+      getReview: vi.fn().mockResolvedValue({ id: 'template-1', version: 1 }),
+      updateReview: vi.fn().mockResolvedValue({ id: 'template-1', version: 1 }),
+      resolveFlag: vi.fn().mockResolvedValue({ id: 'template-1', version: 1 }),
+    },
+    moduleLearning: {
+      dashboardSummary: vi.fn().mockResolvedValue({ needsSupportModules: 2, openFlags: 3 }),
+      getModules: vi.fn().mockResolvedValue([{ moduleId: 'module-1', status: 'available' }]),
+      openModule: vi.fn().mockResolvedValue({ moduleId: 'module-1', status: 'learning' }),
+      completeLesson: vi.fn().mockResolvedValue({ moduleId: 'module-1', status: 'quiz_ready' }),
+      startModuleQuiz: vi.fn().mockResolvedValue({ attemptId: 'module-attempt-1', questions: [] }),
+      submitModuleQuiz: vi.fn().mockResolvedValue({ attemptId: 'module-attempt-1', score: 100 }),
+      getModuleAttempt: vi.fn().mockResolvedValue({ attemptId: 'module-attempt-1', score: 100 }),
+      grantModuleRetry: vi.fn().mockResolvedValue({ moduleId: 'module-1', status: 'quiz_failed' }),
+      questionStats: vi.fn().mockResolvedValue([{ questionId: 'question-1', correctRate: 50 }]),
+    },
   };
 }
 
 describe('onboarding tool dispatcher', () => {
+  it('normalizes only matching room-file metadata for AI source verification', () => {
+    expect(sourceFileMetadataFrom({
+      file: {
+        _id: 'file-1',
+        name: 'guide.pdf',
+        mimetype: 'application/pdf',
+        size: 2048,
+      },
+    }, 'file-1')).toEqual({
+      fileId: 'file-1',
+      fileName: 'guide.pdf',
+      mimeType: 'application/pdf',
+      size: 2048,
+    });
+    expect(sourceFileMetadataFrom({
+      file: { _id: 'other-file', name: 'guide.pdf', size: 2048 },
+    }, 'file-1')).toBeNull();
+  });
+
+  it('normalizes live Roomfiles snake_case metadata without treating an extension as MIME', () => {
+    expect(sourceFileMetadataFrom({
+      file: {
+        _id: 'file-2',
+        name: 'employee-guide.docx',
+        file_size: 5115,
+        file_type: 'docx',
+      },
+    }, 'file-2')).toEqual({
+      fileId: 'file-2',
+      fileName: 'employee-guide.docx',
+      size: 5115,
+    });
+  });
+
   it('rejects missing and unknown actions for every data tool before touching services', async () => {
     const bundle = services();
     const handle = createOnboardingToolHandler(() => bundle);
@@ -137,10 +211,182 @@ describe('onboarding tool dispatcher', () => {
       .rejects.toMatchObject({ data: { code: 'ADMIN_REQUIRED' } });
     await expect(handle('onboarding_admin_assignments', { action: 'list' }, verified({ room_roles: ['leader'] })))
       .rejects.toMatchObject({ data: { code: 'ADMIN_REQUIRED' } });
+    await expect(handle('onboarding_admin_ai', { action: 'list_sources' }, verified()))
+      .rejects.toMatchObject({ data: { code: 'ADMIN_REQUIRED' } });
 
     expect(bundle.prepare).not.toHaveBeenCalled();
     expect(bundle.templates.list).not.toHaveBeenCalled();
     expect(bundle.assignments.listAdmin).not.toHaveBeenCalled();
+  });
+
+  it('dispatches every Admin AI family with validated server-owned arguments', async () => {
+    const bundle = services();
+    const handle = createOnboardingToolHandler(() => bundle);
+    const actor = verified({ room_roles: ['owner'] }, 'admin-1');
+
+    await expect(handle('onboarding_admin_ai', { action: 'list_sources' }, actor))
+      .resolves.toMatchObject({ sources: [{ sourceId: 'source-1' }] });
+    await handle('onboarding_admin_ai', {
+      action: 'add_admin_note', operationId: 'op-note', title: 'Ghi chú', text: 'Nội dung',
+    }, actor);
+    await handle('onboarding_admin_ai', {
+      action: 'start_job', job: {
+        kind: 'inventory', operationId: 'op-job', sourceIds: ['source-1'],
+      },
+    }, actor);
+    await handle('onboarding_admin_ai', {
+      action: 'next_step', jobId: 'job-1', workerId: 'tab-1',
+    }, actor);
+    await handle('onboarding_admin_ai', {
+      action: 'update_review', templateId: 'template-1', version: 1,
+      expectedUpdatedAt: '2026-10-23T00:00:00.000Z', ops: [],
+    }, actor);
+
+    expect(bundle.sources.addAdminNote).toHaveBeenCalledWith(
+      expect.objectContaining({ access: 'admin', roomId: 'room-a' }),
+      { operationId: 'op-note', title: 'Ghi chú', text: 'Nội dung' },
+    );
+    expect(bundle.aiJobs.startJob).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'admin-1' }),
+      { kind: 'inventory', operationId: 'op-job', sourceIds: ['source-1'] },
+    );
+    expect(bundle.aiJobs.nextStep).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'admin-1' }),
+      { jobId: 'job-1', workerId: 'tab-1' },
+    );
+    expect(bundle.aiReview.updateReview).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'admin-1' }),
+      {
+        templateId: 'template-1', version: 1,
+        expectedUpdatedAt: '2026-10-23T00:00:00.000Z', ops: [],
+      },
+    );
+  });
+
+  it('passes the AI provider through record_dispatch', async () => {
+    const bundle = services();
+    const handle = createOnboardingToolHandler(() => bundle);
+    const actor = verified({ room_roles: ['owner'] }, 'admin-1');
+
+    await handle('onboarding_admin_ai', {
+      action: 'record_dispatch', jobId: 'job-1', workerId: 'tab-1', callId: 'A1',
+      attemptRef: 'native-chat:s:m', provider: 'native_chat',
+    }, actor);
+
+    expect(bundle.aiJobs.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'admin-1' }),
+      {
+        jobId: 'job-1', workerId: 'tab-1', callId: 'A1',
+        attemptRef: 'native-chat:s:m', provider: 'native_chat',
+      },
+    );
+  });
+
+  it('passes structured provider diagnostics through report_ai_failure', async () => {
+    const bundle = services();
+    const handle = createOnboardingToolHandler(() => bundle);
+    const actor = verified({ room_roles: ['owner'] }, 'admin-1');
+
+    await handle('onboarding_admin_ai', {
+      action: 'report_ai_failure', jobId: 'job-1', workerId: 'tab-1', callId: 'B-lessons',
+      kind: 'failed', message: 'Provider credentials rejected',
+      providerErrorCode: 'MODEL_PROVIDER_CREDENTIALS_REJECTED', providerPhase: 'model-call',
+    }, actor);
+
+    expect(bundle.aiJobs.reportAiFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'admin-1' }),
+      {
+        jobId: 'job-1', workerId: 'tab-1', callId: 'B-lessons', kind: 'failed',
+        message: 'Provider credentials rejected',
+        providerErrorCode: 'MODEL_PROVIDER_CREDENTIALS_REJECTED',
+        providerPhase: 'model-call',
+      },
+    );
+  });
+
+  it('records provider attempt cleanup with a bounded state', async () => {
+    const bundle = services();
+    const handle = createOnboardingToolHandler(() => bundle);
+    const actor = verified({ room_roles: ['owner'] }, 'admin-1');
+
+    await handle('onboarding_admin_ai', {
+      action: 'record_attempt_cleanup', jobId: 'job-1', callId: 'A1',
+      attemptRef: 'native-chat:s:m', state: 'unknown', message: 'Chưa xác nhận',
+    }, actor);
+    await expect(handle('onboarding_admin_ai', {
+      action: 'record_attempt_cleanup', jobId: 'job-1', callId: 'A1',
+      attemptRef: 'native-chat:s:m', state: 'pending',
+    }, actor)).rejects.toThrow(/state/i);
+
+    expect(bundle.aiJobs.recordAttemptCleanup).toHaveBeenCalledTimes(1);
+    expect(bundle.aiJobs.recordAttemptCleanup).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'admin-1' }),
+      {
+        jobId: 'job-1', callId: 'A1', attemptRef: 'native-chat:s:m',
+        state: 'unknown', message: 'Chưa xác nhận',
+      },
+    );
+  });
+
+  it('rejects an unknown provider at the tool boundary', async () => {
+    const bundle = services();
+    const handle = createOnboardingToolHandler(() => bundle);
+    const actor = verified({ room_roles: ['owner'] }, 'admin-1');
+
+    await expect(handle('onboarding_admin_ai', {
+      action: 'record_dispatch', jobId: 'job-1', workerId: 'tab-1', callId: 'A1',
+      attemptRef: 'attempt-1', provider: 'openai',
+    }, actor)).rejects.toThrow(/provider/i);
+    expect(bundle.aiJobs.recordDispatch).not.toHaveBeenCalled();
+  });
+
+  it('dispatches learner module actions only for the verified learner', async () => {
+    const bundle = services();
+    const handle = createOnboardingToolHandler(() => bundle);
+    const actor = verified();
+
+    await expect(handle('onboarding_learning', {
+      action: 'get_modules', assignmentId: 'assignment-1', memberId: 'member-1',
+    }, actor)).resolves.toMatchObject({ modules: [{ moduleId: 'module-1' }] });
+    await handle('onboarding_learning', {
+      action: 'submit_module_quiz',
+      assignmentId: 'assignment-1',
+      moduleId: 'module-1',
+      attemptId: 'module-attempt-1',
+      operationId: 'op-submit',
+      answers: [{ questionId: 'question-1', selectedOptionId: 'option-1' }],
+    }, actor);
+
+    expect(bundle.moduleLearning.submitModuleQuiz).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'member-1', access: 'learner' }),
+      {
+        assignmentId: 'assignment-1',
+        moduleId: 'module-1',
+        attemptId: 'module-attempt-1',
+        operationId: 'op-submit',
+        answers: [{ questionId: 'question-1', selectedOptionId: 'option-1' }],
+      },
+    );
+  });
+
+  it('dispatches Admin module retry and question statistics', async () => {
+    const bundle = services();
+    const handle = createOnboardingToolHandler(() => bundle);
+    const actor = verified({ room_roles: ['owner'] }, 'admin-1');
+
+    await handle('onboarding_admin_assignments', {
+      action: 'grant_module_retry', assignmentId: 'assignment-1', moduleId: 'module-1',
+    }, actor);
+    await handle('onboarding_admin_assignments', {
+      action: 'question_stats', templateId: 'template-1', version: 1,
+    }, actor);
+
+    expect(bundle.moduleLearning.grantModuleRetry).toHaveBeenCalledWith(
+      expect.objectContaining({ access: 'admin' }), 'assignment-1', 'module-1',
+    );
+    expect(bundle.moduleLearning.questionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ access: 'admin' }), 'template-1', 1,
+    );
   });
 
   it('dispatches employee list and add actions with the verified Admin actor', async () => {

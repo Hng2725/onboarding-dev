@@ -31,6 +31,7 @@ describe('manifest', () => {
       'onboarding_dashboard',
       'onboarding_bootstrap',
       'onboarding_admin_templates',
+      'onboarding_admin_ai',
       'onboarding_admin_assignments',
       'onboarding_learning',
       'onboarding_reviews',
@@ -38,6 +39,7 @@ describe('manifest', () => {
     expect(manifest.tools[0].ui?.resourceUri).toBe('ui://ai.privos.mcp-app-onboarding-dev/form.html');
     expect(manifest.permissions.map((permission) => permission.scope)).toEqual([
       'basic:information', 'bot:room:join', 'rooms:roles:read', 'rooms:read', 'notifications:write', 'files:read', 'files:write',
+      'sandbox:generate', 'sandbox:ai-chat', 'sandbox:ai-chat:write',
       'db:read', 'db:write', 'db:schema:read', 'db:schema:write',
     ]);
     expect(manifest.permissions.find((permission) => permission.scope === 'bot:room:join')).toMatchObject({
@@ -47,6 +49,22 @@ describe('manifest', () => {
     });
     expect(manifest.permissions.find((permission) => permission.scope === 'notifications:write')?.degradedBehavior)
       .toContain('remain saved');
+    expect(manifest.permissions.find((permission) => permission.scope === 'sandbox:generate')).toMatchObject({
+      requirement: 'optional',
+      context: 'room',
+      executionContext: 'user',
+      degradedBehavior: expect.stringContaining('cannot create'),
+    });
+    expect(manifest.permissions.find((permission) => permission.scope === 'sandbox:ai-chat')).toMatchObject({
+      requirement: 'optional',
+      context: 'room',
+      executionContext: 'user',
+    });
+    expect(manifest.permissions.find((permission) => permission.scope === 'sandbox:ai-chat:write')).toMatchObject({
+      requirement: 'optional',
+      context: 'room',
+      executionContext: 'user',
+    });
     expect(JSON.stringify(manifest)).not.toContain('hr_');
     expect(JSON.stringify(manifest)).not.toContain('demo tab');
   });

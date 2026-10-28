@@ -1,6 +1,6 @@
 export type EmployeeType = 'normal' | 'advanced';
 export type QuestionType = 'single_choice' | 'multiple_choice' | 'essay';
-export type TemplateSource = 'system' | 'custom';
+export type TemplateSource = 'system' | 'custom' | 'ai_generated';
 export type TemplateStatus = 'draft' | 'published' | 'archived';
 export type AssignmentStatus =
   | 'assigned'
@@ -14,6 +14,315 @@ export type AssignmentStatus =
 export type AttemptStatus = 'draft' | 'submitted' | 'auto_scored' | 'reviewed';
 export type FinalConclusion = 'passed' | 'failed' | 'retry';
 export type ResourceKind = 'markdown' | 'file' | 'link' | 'video';
+export type AssessmentMode = 'final_exam' | 'per_module';
+export type QuestionLevel = 'recall' | 'procedure' | 'scenario';
+export type Department =
+  | 'it'
+  | 'marketing'
+  | 'hr'
+  | 'sales'
+  | 'finance'
+  | 'operations'
+  | 'other';
+
+export interface SourceRef {
+  readonly kind: 'document' | 'admin_note';
+  readonly sourceId: string;
+  readonly sectionId: string;
+  readonly page?: number;
+  readonly quote: string;
+  readonly verifiedBy?: string;
+  readonly verifiedAt?: string;
+}
+
+export interface LessonBlock {
+  readonly id: string;
+  readonly kind: 'concept' | 'steps' | 'scenario' | 'tip' | 'warning' | 'summary';
+  readonly title?: string;
+  readonly body: string;
+  readonly steps?: readonly {
+    readonly order: number;
+    readonly text: string;
+  }[];
+  readonly sourceRefs: readonly SourceRef[];
+  readonly pendingVerification: boolean;
+}
+
+export interface ModuleContent {
+  readonly moduleId: string;
+  readonly frameKey: string;
+  readonly objectives: readonly string[];
+  readonly estimatedMinutes: number;
+  readonly blocks: readonly LessonBlock[];
+}
+
+export interface QuestionMeta {
+  readonly questionId: string;
+  readonly level: QuestionLevel;
+  readonly sourceRefs: readonly SourceRef[];
+  readonly blockIds: readonly string[];
+}
+
+export interface TemplateContentSnapshot {
+  readonly assessmentMode: 'per_module';
+  readonly learningMode: 'sequential' | 'free';
+  readonly maxAttemptsPerModule: number | null;
+  readonly modules: readonly ModuleContent[];
+  readonly questionMeta: readonly QuestionMeta[];
+}
+
+export interface RoleProfile {
+  readonly department: Department;
+  readonly departmentLabel?: string;
+  readonly jobTitle: string;
+  readonly responsibilities: readonly string[];
+  readonly systemRole?: string;
+  readonly seniority?: 'junior' | 'mid' | 'senior' | 'manager';
+}
+
+export type FlagType =
+  | 'missing'
+  | 'conflict'
+  | 'ambiguous'
+  | 'outdated'
+  | 'unsupported'
+  | 'audience_unclear'
+  | 'low_quality_source'
+  | 'generation_error';
+
+export interface VerificationFlag {
+  readonly id: string;
+  readonly type: FlagType;
+  readonly severity: 'blocking' | 'warning';
+  readonly message: string;
+  readonly questionForAdmin: string;
+  readonly location: {
+    readonly moduleId?: string;
+    readonly blockId?: string;
+    readonly questionId?: string;
+    readonly featureId?: string;
+  };
+  readonly evidence: readonly SourceRef[];
+  readonly status: 'open' | 'resolved' | 'dismissed';
+  readonly resolution?: {
+    readonly action: 'choose_option' | 'add_note' | 'upload_doc' | 'remove' | 'accept';
+    readonly note?: string;
+    readonly by: string;
+    readonly at: string;
+  };
+}
+
+export interface SourceSection {
+  readonly id: string;
+  readonly headingPath: readonly string[];
+  readonly page?: number;
+  readonly text: string;
+}
+
+export interface SourceRecord {
+  readonly id: string;
+  readonly roomId: string;
+  readonly sourceId: string;
+  readonly kind: 'document' | 'admin_note';
+  readonly fileId?: string;
+  readonly fileName: string;
+  readonly mimeType?: string;
+  readonly checksum: string;
+  readonly systemName: string;
+  readonly softwareVersion?: string;
+  readonly effectiveDate?: string;
+  readonly status: 'ready' | 'failed';
+  readonly errorCode?: string;
+  readonly sections?: readonly SourceSection[];
+  readonly textLength?: number;
+  readonly createdBy: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly deletedAt?: string;
+}
+
+export type AiProvider = 'sandbox' | 'native_chat';
+
+export const AI_PROVIDERS: readonly AiProvider[] = ['sandbox', 'native_chat'];
+
+export type AiAttemptCleanupState = 'pending' | 'confirmed' | 'unknown';
+
+export interface AiCallRecord {
+  readonly callId: string;
+  readonly stage: 'A' | 'B' | 'C' | 'D';
+  readonly repairOf?: string;
+  readonly operationId: string;
+  readonly status: 'pending' | 'dispatched' | 'completed' | 'invalid' | 'failed';
+  readonly attemptRef?: string;
+  readonly provider?: AiProvider;
+  readonly promptChars?: number;
+  readonly systemContextChars?: number;
+  readonly cleanupState?: AiAttemptCleanupState;
+  readonly cleanupMessage?: string;
+  readonly cleanupUpdatedAt?: string;
+  readonly errors?: readonly string[];
+  readonly providerErrorCode?: string;
+  readonly providerPhase?: string;
+  readonly diagnosticError?: string;
+  readonly rawExcerpt?: string;
+  readonly startedAt?: string;
+  readonly finishedAt?: string;
+}
+
+export interface AiJobRecord {
+  readonly id: string;
+  readonly roomId: string;
+  readonly jobId: string;
+  readonly kind: 'inventory' | 'template';
+  readonly status: 'running' | 'completed' | 'failed' | 'cancelled';
+  readonly templateKind?: EmployeeType;
+  readonly roleProfile?: RoleProfile;
+  readonly title?: string;
+  readonly sourceIds?: readonly string[];
+  readonly inventoryJobId?: string;
+  readonly promptVersion: string;
+  readonly calls: readonly AiCallRecord[];
+  readonly stageOutputs: Readonly<Record<string, unknown>>;
+  readonly result?: unknown;
+  readonly pumpLeaseUntil?: string;
+  readonly pumpedBy?: string;
+  readonly errorCode?: string;
+  readonly errorMessage?: string;
+  readonly operationId: string;
+  readonly createdBy: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface TemplateContentRecord {
+  readonly id: string;
+  readonly roomId: string;
+  readonly templateId: string;
+  readonly templateVersion: number;
+  readonly content: TemplateContentSnapshot;
+  readonly flags: readonly VerificationFlag[];
+  readonly roleProfile?: RoleProfile;
+  readonly sourceIds?: readonly string[];
+  readonly jobId: string;
+  readonly promptVersion?: string;
+  readonly generationNotes?: readonly string[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ModuleProgressRecord {
+  readonly id: string;
+  readonly roomId: string;
+  readonly assignmentId: string;
+  readonly memberId: string;
+  readonly moduleId: string;
+  readonly openedAt?: string;
+  readonly lessonCompletedAt?: string;
+  readonly passedAt?: string;
+  readonly attemptCount: number;
+  readonly bestScore?: number;
+  readonly extraAttempts: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ModuleAttemptAnswer {
+  readonly questionId: string;
+  readonly selectedOptionId: string;
+  readonly correct: boolean;
+}
+
+export interface ModuleAttemptRecord {
+  readonly id: string;
+  readonly roomId: string;
+  readonly assignmentId: string;
+  readonly memberId: string;
+  readonly moduleId: string;
+  readonly ordinal: number;
+  readonly status: 'started' | 'submitted';
+  readonly questionOrder?: readonly string[];
+  readonly optionOrder?: Readonly<Record<string, readonly string[]>>;
+  readonly answers?: readonly ModuleAttemptAnswer[];
+  readonly correctCount?: number;
+  readonly totalCount?: number;
+  readonly score?: number;
+  readonly passed?: boolean;
+  readonly operationId?: string;
+  readonly startedAt?: string;
+  readonly submittedAt?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export type ModuleLearningStatus =
+  | 'locked'
+  | 'available'
+  | 'learning'
+  | 'quiz_ready'
+  | 'quiz_failed'
+  | 'passed'
+  | 'needs_support';
+
+export interface ModuleStateDto {
+  readonly moduleId: string;
+  readonly title: string;
+  readonly order: number;
+  readonly status: ModuleLearningStatus;
+  readonly bestScore?: number;
+  readonly attemptsUsed: number;
+  readonly attemptsAllowed: number | null;
+}
+
+export interface ModuleQuizQuestionDto {
+  readonly id: string;
+  readonly prompt: string;
+  readonly options: readonly QuestionOption[];
+}
+
+export interface ModuleQuizStartDto {
+  readonly attemptId: string;
+  readonly moduleId: string;
+  readonly ordinal: number;
+  readonly questions: readonly ModuleQuizQuestionDto[];
+}
+
+export interface ModuleQuizAnswerInput {
+  readonly questionId: string;
+  readonly selectedOptionId: string;
+}
+
+export interface ModuleQuizResultItemDto {
+  readonly questionId: string;
+  readonly prompt: string;
+  readonly options: readonly QuestionOption[];
+  readonly selectedOptionId: string;
+  readonly correctOptionId: string;
+  readonly correct: boolean;
+  readonly explanation: string;
+  readonly sourceRefs: readonly SourceRef[];
+  readonly blockIds: readonly string[];
+}
+
+export interface ModuleQuizResultDto {
+  readonly attemptId: string;
+  readonly moduleId: string;
+  readonly ordinal: number;
+  readonly score: number;
+  readonly passed: boolean;
+  readonly passingScore: number;
+  readonly correctCount: number;
+  readonly totalCount: number;
+  readonly attemptsUsed: number;
+  readonly attemptsAllowed: number | null;
+  readonly items: readonly ModuleQuizResultItemDto[];
+}
+
+export interface ModuleQuestionStatDto {
+  readonly questionId: string;
+  readonly correctCount: number;
+  readonly attemptCount: number;
+  readonly correctPercent: number;
+}
 
 export interface QuestionOption {
   readonly id: string;
@@ -70,15 +379,18 @@ export interface TemplateSnapshot {
   readonly title: string;
   readonly description: string;
   readonly passingScore?: number;
+  readonly assessmentMode?: AssessmentMode;
   readonly modules: readonly TemplateModule[];
+  readonly content?: TemplateContentSnapshot;
 }
 
 export interface LearnerTemplateModuleDto extends Omit<TemplateModule, 'questions'> {
   readonly questions: readonly LearnerQuestionDto[];
 }
 
-export interface LearnerTemplateDto extends Omit<TemplateSnapshot, 'modules'> {
+export interface LearnerTemplateDto extends Omit<TemplateSnapshot, 'modules' | 'content'> {
   readonly modules: readonly LearnerTemplateModuleDto[];
+  readonly content?: Omit<TemplateContentSnapshot, 'questionMeta'>;
 }
 
 export type AdminTemplateDto = TemplateSnapshot;
