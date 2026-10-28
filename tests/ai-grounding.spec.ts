@@ -6,6 +6,7 @@ import {
   normalizeForMatch,
   unsupportedEmphasizedTerms,
 } from '../src/onboarding/ai/grounding';
+import { buildFallbackLesson } from '../src/onboarding/ai/fallback-lessons';
 
 function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
   return {
@@ -32,6 +33,20 @@ function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
 }
 
 describe('AI source grounding', () => {
+  it('grounds fallback quotes against the exact selected source section', () => {
+    const record = source();
+    const section = record.sections![0];
+    const result = buildFallbackLesson({
+      outline: { moduleLocalId: 'm1', frameKey: 'core', order: 1, title: 'Guide', description: '', estimatedMinutes: 5, objectives: [], featureIds: [], sourceSectionIds: [section.id], responsibilityIndexes: [] },
+      sections: [section],
+    });
+    expect(result.kind).toBe('draft');
+    if (result.kind !== 'draft') return;
+    for (const block of result.module.blocks.filter((item) => item.kind !== 'summary')) {
+      expect(block.sourceRefs).toHaveLength(1);
+      expect(groundSourceRef(block.sourceRefs[0], [record]).ok).toBe(true);
+    }
+  });
   it('normalizes Vietnamese case, curly quotes, markdown emphasis, and whitespace', () => {
     expect(normalizeForMatch('  “GỬI   **Duyệt**”  ')).toBe('"gửi duyệt"');
   });
