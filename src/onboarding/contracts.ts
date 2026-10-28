@@ -72,9 +72,9 @@ export interface TemplateContentSnapshot {
 }
 
 export interface RoleProfile {
-  readonly department: Department;
+  readonly department?: Department;
   readonly departmentLabel?: string;
-  readonly jobTitle: string;
+  readonly jobTitle?: string;
   readonly responsibilities: readonly string[];
   readonly systemRole?: string;
   readonly seniority?: 'junior' | 'mid' | 'senior' | 'manager';

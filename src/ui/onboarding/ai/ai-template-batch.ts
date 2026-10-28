@@ -1,3 +1,4 @@
+import { normalizeForMatch } from '../../../onboarding/ai/grounding';
 import type { AiJobRecord, EmployeeType, RoleProfile } from '../../../onboarding/contracts';
 import type { AdminTemplateDetail } from '../../../onboarding/templates';
 
@@ -5,8 +6,6 @@ export type TemplateSelection = EmployeeType | 'both' | null;
 
 export interface TemplateRequestErrors {
   readonly selection?: string;
-  readonly departmentLabel?: string;
-  readonly jobTitle?: string;
   readonly responsibilities?: string;
 }
 
@@ -30,9 +29,6 @@ export function templateKindsForSelection(selection: TemplateSelection): readonl
 
 export function validateTemplateRequest(input: {
   readonly selection: TemplateSelection;
-  readonly department?: RoleProfile['department'];
-  readonly departmentLabel?: string;
-  readonly jobTitle: string;
   readonly responsibilities: string;
 }): TemplateRequestErrors {
   if (!input.selection) {
@@ -45,13 +41,7 @@ export function validateTemplateRequest(input: {
     .map((line) => line.trim())
     .filter(Boolean);
   return {
-    ...(input.department === 'other' && !input.departmentLabel?.trim()
-      ? { departmentLabel: 'Nhập tên phòng ban khi chọn Khác.' }
-      : {}),
-    ...(!input.jobTitle.trim()
-      ? { jobTitle: 'Nhập chức danh cho nhân sự chuyên sâu.' }
-      : {}),
-    ...(responsibilities.length < 2 || responsibilities.length > 8
+    ...(responsibilities.length < 2 || responsibilities.length > 8 || new Set(responsibilities.map(normalizeForMatch)).size !== responsibilities.length
       ? { responsibilities: 'Nhập từ 2 đến 8 nhiệm vụ chính, mỗi nhiệm vụ một dòng.' }
       : {}),
   };
@@ -151,9 +141,6 @@ export function templateJobRequest(input: {
   readonly kind: EmployeeType;
   readonly inventoryJobId: string;
   readonly baseTitle: string;
-  readonly department: RoleProfile['department'];
-  readonly departmentLabel?: string;
-  readonly jobTitle: string;
   readonly responsibilities: string;
   readonly operationId: string;
 }): TemplateStartJobRequest {
@@ -168,11 +155,6 @@ export function templateJobRequest(input: {
     ...(input.kind === 'advanced'
       ? {
           roleProfile: {
-            department: input.department,
-            ...(input.department === 'other' && input.departmentLabel?.trim()
-              ? { departmentLabel: input.departmentLabel.trim() }
-              : {}),
-            jobTitle: input.jobTitle.trim(),
             responsibilities,
           },
         }
@@ -186,9 +168,6 @@ export function templateJobRequest(input: {
 
 export async function generateValidatedTemplateRuns(input: {
   readonly selection: TemplateSelection;
-  readonly department?: RoleProfile['department'];
-  readonly departmentLabel?: string;
-  readonly jobTitle: string;
   readonly responsibilities: string;
   readonly runs: readonly AiTemplateRun[];
   readonly generateOne: (run: AiTemplateRun) => Promise<AiTemplateRun>;

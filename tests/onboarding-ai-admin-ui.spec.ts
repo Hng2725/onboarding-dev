@@ -872,14 +872,10 @@ describe('AI job milestones', () => {
 describe('AI template request workspace', () => {
   const commonProps = {
     templateTitle: '',
-    department: 'operations' as const,
-    jobTitle: '',
     responsibilities: '',
     responsibilityCount: 0,
     onSelect: () => undefined,
     onTemplateTitleChange: () => undefined,
-    onDepartmentChange: () => undefined,
-    onJobTitleChange: () => undefined,
     onResponsibilitiesChange: () => undefined,
   };
 
@@ -902,13 +898,15 @@ describe('AI template request workspace', () => {
       ...commonProps,
       selection: 'advanced',
       errors: {
-        jobTitle: 'Nhập chức danh cho nhân sự chuyên sâu.',
         responsibilities: 'Nhập từ 2 đến 8 nhiệm vụ chính, mỗi nhiệm vụ một dòng.',
       },
     }));
 
     expect(html).toContain('aria-invalid="true"');
-    expect(html).toContain('aria-describedby="ai-job-title-error"');
+    expect(html).not.toContain('Phòng ban');
+    expect(html).not.toContain('Tên phòng ban');
+    expect(html).not.toContain('Chức danh');
+    expect(html).toContain('<textarea');
     expect(html).toContain('aria-describedby="ai-responsibilities-error"');
     expect(html).toContain('0/8 nhiệm vụ hợp lệ');
   });

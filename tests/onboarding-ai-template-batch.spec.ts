@@ -29,7 +29,6 @@ describe('AI template batch selection', () => {
     expect(templateKindsForSelection(null)).toEqual([]);
     expect(validateTemplateRequest({
       selection: null,
-      jobTitle: '',
       responsibilities: '',
     })).toEqual({ selection: 'Chọn ít nhất một loại lộ trình.' });
   });
@@ -45,64 +44,44 @@ describe('AI template batch selection', () => {
   it('does not require role fields for a normal template', () => {
     expect(validateTemplateRequest({
       selection: 'normal',
-      jobTitle: '   ',
       responsibilities: '\n  \n',
     })).toEqual({});
   });
 
   it.each(['advanced', 'both'] as const)(
-    'requires a title and between two and eight responsibilities for %s',
+    'requires two to eight unique responsibilities for %s',
     (selection) => {
       const missing = validateTemplateRequest({
         selection,
-        jobTitle: '   ',
         responsibilities: '\n',
       });
-      expect(missing.jobTitle).toBe('Nhập chức danh cho nhân sự chuyên sâu.');
       expect(missing.responsibilities).toBe('Nhập từ 2 đến 8 nhiệm vụ chính, mỗi nhiệm vụ một dòng.');
 
       expect(validateTemplateRequest({
         selection,
-        jobTitle: 'Chuyên viên vận hành',
         responsibilities: 'Một nhiệm vụ',
       }).responsibilities).toBe('Nhập từ 2 đến 8 nhiệm vụ chính, mỗi nhiệm vụ một dòng.');
 
       expect(validateTemplateRequest({
         selection,
-        jobTitle: 'Chuyên viên vận hành',
         responsibilities: Array.from({ length: 9 }, (_, index) => `Nhiệm vụ ${index + 1}`).join('\n'),
       }).responsibilities).toBe('Nhập từ 2 đến 8 nhiệm vụ chính, mỗi nhiệm vụ một dòng.');
 
       expect(validateTemplateRequest({
         selection,
-        jobTitle: 'Chuyên viên vận hành',
         responsibilities: '  Nhiệm vụ một  \n\nNhiệm vụ hai',
       })).toEqual({});
 
       expect(validateTemplateRequest({
         selection,
-        jobTitle: 'Chuyên viên vận hành',
         responsibilities: Array.from({ length: 8 }, (_, index) => `Nhiệm vụ ${index + 1}`).join('\n'),
       })).toEqual({});
     },
   );
 
-  it('requires and forwards a custom department label when department is other', () => {
-    expect(validateTemplateRequest({
-      selection: 'advanced',
-      department: 'other',
-      departmentLabel: '   ',
-      jobTitle: 'Chuyên viên vận hành',
-      responsibilities: 'Xử lý sự cố\nBảo đảm an toàn',
-    }).departmentLabel).toBe('Nhập tên phòng ban khi chọn Khác.');
-
-    expect(validateTemplateRequest({
-      selection: 'advanced',
-      department: 'other',
-      departmentLabel: '  Dịch vụ khách hàng ',
-      jobTitle: 'Chuyên viên vận hành',
-      responsibilities: 'Xử lý sự cố\nBảo đảm an toàn',
-    })).toEqual({});
+  it('rejects duplicate responsibilities', () => {
+    expect(validateTemplateRequest({ selection: 'advanced', responsibilities: 'A\n A ' }).responsibilities).toBeDefined();
+    expect(validateTemplateRequest({ selection: 'advanced', responsibilities: 'A\nB' })).toEqual({});
   });
   it('derives distinct titles only when both templates are selected', () => {
     expect(templateTitleForKind('   ', 'normal', 'normal')).toBeUndefined();
@@ -275,8 +254,6 @@ describe('AI template batch resume and request building', () => {
   it('builds normal and advanced requests with distinct titles for both', () => {
     const common = {
       inventoryJobId: 'inventory-1',
-      department: 'operations' as const,
-      jobTitle: '  Chuyên viên vận hành ',
       responsibilities: ' Kiểm soát đơn hàng \n\n Đào tạo quy trình ',
     };
 
@@ -305,8 +282,6 @@ describe('AI template batch resume and request building', () => {
       inventoryJobId: 'inventory-1',
       templateKind: 'advanced',
       roleProfile: {
-        department: 'operations',
-        jobTitle: 'Chuyên viên vận hành',
         responsibilities: ['Kiểm soát đơn hàng', 'Đào tạo quy trình'],
       },
       title: 'Hội nhập vận hành',
@@ -329,28 +304,13 @@ describe('AI template batch resume and request building', () => {
     }).title).toBe('Hội nhập vận hành – Template 2');
   });
 
-  it('includes the trimmed custom department label in an advanced request', () => {
-    expect(templateJobRequest({
-      selection: 'advanced',
-      kind: 'advanced',
-      inventoryJobId: 'inventory-1',
-      baseTitle: '',
-      department: 'other',
-      departmentLabel: '  Dịch vụ khách hàng ',
-      jobTitle: 'Chuyên viên vận hành',
-      responsibilities: 'Xử lý sự cố\nBảo đảm an toàn',
-      operationId: 'operation-advanced-other',
-    }).roleProfile).toEqual({
-      department: 'other',
-      departmentLabel: 'Dịch vụ khách hàng',
-      jobTitle: 'Chuyên viên vận hành',
-      responsibilities: ['Xử lý sự cố', 'Bảo đảm an toàn'],
-    });
+  it('builds a responsibilities-only advanced profile', () => {
+    expect(templateJobRequest({ selection: 'advanced', kind: 'advanced', inventoryJobId: 'inventory-1', baseTitle: '', responsibilities: 'A\nB', operationId: 'op-1' }).roleProfile).toEqual({ responsibilities: ['A', 'B'] });
   });
   it.each([
-    { selection: null, jobTitle: '', responsibilities: '' },
-    { selection: 'advanced' as const, jobTitle: '', responsibilities: 'Một nhiệm vụ' },
-    { selection: 'both' as const, jobTitle: 'Chuyên viên', responsibilities: '' },
+    { selection: null, responsibilities: '' },
+    { selection: 'advanced' as const, responsibilities: 'Một nhiệm vụ' },
+    { selection: 'both' as const, responsibilities: '' },
   ])('does not reach job generation for invalid input %#', async (input) => {
     let calls = 0;
     const result = await generateValidatedTemplateRuns({

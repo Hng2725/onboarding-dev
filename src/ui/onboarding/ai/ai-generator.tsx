@@ -15,7 +15,6 @@ import type {
   AiJobRecord,
   AiProvider,
   EmployeeType,
-  RoleProfile,
   VerificationFlag,
 } from '../../../onboarding/contracts';
 import type { SourceSummary } from '../../../onboarding/ai/sources';
@@ -322,7 +321,7 @@ export function generationErrorMessage(error: unknown): string {
     SOURCE_TYPE_UNSUPPORTED: 'Định dạng tài liệu chưa được hỗ trợ.',
     SOURCE_NO_TEXT: 'Không tìm thấy lớp chữ trong tài liệu; phiên bản này chưa hỗ trợ OCR.',
     SOURCE_DUPLICATE: 'Tài liệu này đã có trong danh sách nguồn.',
-    ROLE_PROFILE_INVALID: 'Hồ sơ vai trò chưa đủ chức danh và từ 2 đến 8 nhiệm vụ.',
+    ROLE_PROFILE_INVALID: 'Hồ sơ vai trò cần từ 2 đến 8 nhiệm vụ duy nhất.',
     AI_DISPATCH_UNKNOWN: 'Không xác định được trạng thái lần gọi AI. Hãy bấm Thử lại để tạo một lần gọi an toàn mới.',
     AI_TIMEOUT: 'AI xử lý quá thời gian. Hãy thử lại job.',
     AI_OUTPUT_INVALID: 'AI chưa tạo được cấu trúc hợp lệ sau các lần tự sửa.',
@@ -702,32 +701,20 @@ export function aiPublishProgressText(progress: AiPublishFileProgress): string {
 export function AiTemplateSelection({
   selection,
   templateTitle,
-  department,
-  departmentLabel,
-  jobTitle,
   responsibilities,
   responsibilityCount,
   errors,
   onSelect,
   onTemplateTitleChange,
-  onDepartmentChange,
-  onDepartmentLabelChange,
-  onJobTitleChange,
   onResponsibilitiesChange,
 }: {
   readonly selection: TemplateSelection;
   readonly templateTitle: string;
-  readonly department: RoleProfile['department'];
-  readonly departmentLabel: string;
-  readonly jobTitle: string;
   readonly responsibilities: string;
   readonly responsibilityCount: number;
   readonly errors: TemplateRequestErrors;
   readonly onSelect: (selection: Exclude<TemplateSelection, null>) => void;
   readonly onTemplateTitleChange: (value: string) => void;
-  readonly onDepartmentChange: (value: RoleProfile['department']) => void;
-  readonly onDepartmentLabelChange: (value: string) => void;
-  readonly onJobTitleChange: (value: string) => void;
   readonly onResponsibilitiesChange: (value: string) => void;
 }) {
   const advanced = selection === 'advanced' || selection === 'both';
@@ -786,46 +773,6 @@ export function AiTemplateSelection({
       </label>
       {advanced && (
         <div className="ai-role-form">
-          <label className="form-field">
-            <span>Phòng ban</span>
-            <select
-              value={department}
-              onChange={(event) => onDepartmentChange(event.target.value as RoleProfile['department'])}
-            >
-              <option value="it">Công nghệ</option>
-              <option value="marketing">Marketing</option>
-              <option value="hr">Nhân sự</option>
-              <option value="sales">Kinh doanh</option>
-              <option value="finance">Tài chính</option>
-              <option value="operations">Vận hành</option>
-              <option value="other">Khác</option>
-            </select>
-          </label>
-          {department === 'other' && (
-            <label className="form-field">
-              <span>Tên phòng ban *</span>
-              <input
-                value={departmentLabel}
-                aria-invalid={Boolean(errors.departmentLabel)}
-                aria-describedby={errors.departmentLabel ? 'ai-department-label-error' : undefined}
-                onChange={(event) => onDepartmentLabelChange(event.target.value)}
-                placeholder="Ví dụ: Dịch vụ khách hàng"
-              />
-              {errors.departmentLabel && (
-                <small className="ai-field-error" id="ai-department-label-error">{errors.departmentLabel}</small>
-              )}
-            </label>
-          )}
-          <label className="form-field">
-            <span>Chức danh *</span>
-            <input
-              value={jobTitle}
-              aria-invalid={Boolean(errors.jobTitle)}
-              aria-describedby={errors.jobTitle ? 'ai-job-title-error' : undefined}
-              onChange={(event) => onJobTitleChange(event.target.value)}
-            />
-            {errors.jobTitle && <small className="ai-field-error" id="ai-job-title-error">{errors.jobTitle}</small>}
-          </label>
           <label className="form-field form-wide">
             <span>Nhiệm vụ chính * (2–8 dòng)</span>
             <textarea
@@ -881,9 +828,6 @@ export function AiGeneratorPage({
   const [templateRuns, setTemplateRuns] = useState<readonly AiTemplateRun[]>([]);
   const [templateSelection, setTemplateSelection] = useState<TemplateSelection>(null);
   const [templateTitle, setTemplateTitle] = useState('');
-  const [department, setDepartment] = useState<RoleProfile['department']>('other');
-  const [departmentLabel, setDepartmentLabel] = useState('');
-  const [jobTitle, setJobTitle] = useState('');
   const [responsibilities, setResponsibilities] = useState('');
   const [publishTargets, setPublishTargets] = useState<readonly AiPublishTarget[]>([]);
   const [publishProgress, setPublishProgress] = useState<AiPublishFileProgress | null>(null);
@@ -1056,9 +1000,6 @@ export function AiGeneratorPage({
           setTemplateSelection(restoredRuns.length > 1 ? 'both' : restoredRuns[0].kind);
           const advancedProfile = restoredRuns.find((run) => run.kind === 'advanced')?.job?.roleProfile;
           if (advancedProfile) {
-            setDepartment(advancedProfile.department);
-            setDepartmentLabel(advancedProfile.departmentLabel ?? '');
-            setJobTitle(advancedProfile.jobTitle);
             setResponsibilities(advancedProfile.responsibilities.join('\n'));
           }
           if (roomId) {
@@ -1271,9 +1212,6 @@ export function AiGeneratorPage({
     try {
       const result = await generateValidatedTemplateRuns({
         selection: templateSelection,
-        department,
-        departmentLabel,
-        jobTitle,
         responsibilities,
         runs: templateRuns,
         generateOne: async (current) => {
@@ -1287,9 +1225,6 @@ export function AiGeneratorPage({
                   kind: current.kind,
                   inventoryJobId: inventoryJob.jobId,
                   baseTitle: templateTitle,
-                  department,
-                  departmentLabel,
-                  jobTitle,
                   responsibilities,
                   operationId: crypto.randomUUID(),
                 }))).job;
@@ -1318,7 +1253,7 @@ export function AiGeneratorPage({
         onUpdate: setTemplateRuns,
       });
       if (Object.keys(result.errors).length > 0) {
-        const message = result.errors.selection ?? result.errors.departmentLabel ?? result.errors.jobTitle ?? result.errors.responsibilities;
+        const message = result.errors.selection ?? result.errors.responsibilities;
         setNotice({ message: message ?? 'Kiểm tra lại thông tin tạo lộ trình.', tone: 'error' });
         return;
       }
@@ -1523,11 +1458,8 @@ export function AiGeneratorPage({
   const roleResponsibilities = responsibilities.split(/\r?\n/u).map((item) => item.trim()).filter(Boolean);
   const requestErrors = useMemo(() => validateTemplateRequest({
     selection: templateSelection,
-    department,
-    departmentLabel,
-    jobTitle,
     responsibilities,
-  }), [department, departmentLabel, jobTitle, responsibilities, templateSelection]);
+  }), [responsibilities, templateSelection]);
   const requestHasErrors = Object.keys(requestErrors).length > 0;
   const activeTemplateIndex = activeTemplateRun
     ? templateRuns.findIndex((run) => run.kind === activeTemplateRun.kind)
@@ -1627,17 +1559,11 @@ export function AiGeneratorPage({
               <AiTemplateSelection
                 selection={templateSelection}
                 templateTitle={templateTitle}
-                department={department}
-                departmentLabel={departmentLabel}
-                jobTitle={jobTitle}
                 responsibilities={responsibilities}
                 responsibilityCount={roleResponsibilities.length}
                 errors={requestErrors}
                 onSelect={chooseTemplateSelection}
                 onTemplateTitleChange={setTemplateTitle}
-                onDepartmentChange={setDepartment}
-                onDepartmentLabelChange={setDepartmentLabel}
-                onJobTitleChange={setJobTitle}
                 onResponsibilitiesChange={setResponsibilities}
               />
               <div className="ai-output-summary">

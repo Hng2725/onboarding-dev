@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { Department, FlagType, RoleProfile } from '../contracts';
+import type { FlagType, RoleProfile } from '../contracts';
 import { normalizeForMatch, type RawSourceRef } from './grounding';
 
 export interface InventorySummary {
@@ -433,22 +433,6 @@ export function mergeInventoryChunks(chunks: readonly InventoryChunk[]): Feature
 
 export function validateRoleProfile(profile: RoleProfile): readonly RoleProfileError[] {
   const errors: RoleProfileError[] = [];
-  const departments: readonly Department[] = [
-    'it', 'marketing', 'hr', 'sales', 'finance', 'operations', 'other',
-  ];
-  if (!departments.includes(profile.department)) {
-    errors.push({ code: 'ROLE_DEPARTMENT_INVALID', path: 'department', message: 'Invalid department.' });
-  }
-  if (profile.department === 'other' && !profile.departmentLabel?.trim()) {
-    errors.push({
-      code: 'ROLE_DEPARTMENT_LABEL_REQUIRED',
-      path: 'departmentLabel',
-      message: 'A label is required for the other department.',
-    });
-  }
-  if (!profile.jobTitle.trim()) {
-    errors.push({ code: 'ROLE_JOB_TITLE_REQUIRED', path: 'jobTitle', message: 'Job title is required.' });
-  }
   const responsibilities = profile.responsibilities.map((item) => item.trim()).filter(Boolean);
   if (
     responsibilities.length < 2
@@ -495,7 +479,7 @@ export function flagsForAdvancedRole(
     flags.push(flag(
       'missing',
       'blocking',
-      'Tài liệu chưa mô tả quyền hạn cho chức danh "' + profile.jobTitle + '".',
+      'Tài liệu chưa mô tả quyền hạn cho vai trò chuyên sâu.',
       'Vai trò này được xem, sửa hoặc duyệt những dữ liệu nào?',
       [],
     ));

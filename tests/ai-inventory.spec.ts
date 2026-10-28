@@ -71,16 +71,12 @@ describe('feature inventory', () => {
     ]);
   });
 
-  it('validates required advanced-role details and department-other labels', () => {
-    expect(validateRoleProfile({
-      department: 'other',
-      jobTitle: '',
-      responsibilities: ['Một nhiệm vụ'],
-    })).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: 'ROLE_DEPARTMENT_LABEL_REQUIRED' }),
-      expect.objectContaining({ code: 'ROLE_JOB_TITLE_REQUIRED' }),
-      expect.objectContaining({ code: 'ROLE_RESPONSIBILITY_COUNT' }),
-    ]));
+  it('validates only two to eight unique responsibilities, including legacy profiles', () => {
+    expect(validateRoleProfile({ responsibilities: ['Task A', 'Task B'] })).toEqual([]);
+    expect(validateRoleProfile({ department: 'other', departmentLabel: 'Operations', jobTitle: 'Specialist', responsibilities: ['A', 'B'] })).toEqual([]);
+    for (const responsibilities of [['A'], ['A', ' A '], Array.from({ length: 9 }, (_, i) => `Task ${i}`)]) {
+      expect(validateRoleProfile({ responsibilities })).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'ROLE_RESPONSIBILITY_COUNT' })]));
+    }
   });
 
   it('creates stable missing flags when role permissions and responsibilities lack sourced features', () => {

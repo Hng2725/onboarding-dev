@@ -142,6 +142,10 @@ describe('AI generator lifecycle', () => {
       await Promise.resolve();
     });
 
+    const textarea = renderer.root.findByType('textarea');
+    expect(textarea.props.value).toBe(failedTemplateJob.roleProfile?.responsibilities.join('\n'));
+    expect(renderer.root.findAllByType('select')).toHaveLength(0);
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('Chức danh');
     const [retryButton] = renderer.root.findAllByProps({ className: 'button button-primary' });
     expect(retryButton).toBeDefined();
     expect(retryButton.props.disabled).toBe(false);
