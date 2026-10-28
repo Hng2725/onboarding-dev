@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { EmployeeType, OutlineEdit, TemplateOutline, TemplateOutlineModule } from '../contracts';
 import { normalizeForMatch, type RawSourceRef } from './grounding';
 import type { FeatureInventory } from './inventory';
+import { validateOutlineMetadata } from './outline-validation';
 import { ADVANCED_FRAMES, NORMAL_FRAMES, type GeneratedFlag, type GeneratedTaskCoverage } from './validate';
 
 const usableSections = (refs: readonly RawSourceRef[]): string[] =>
@@ -80,6 +81,8 @@ export function applyTemplateOutlineEdits(outline: TemplateOutline, edits: reado
     }
   }
   active = active.map((m, order) => ({ ...m, order }));
+  const metadataErrors = validateOutlineMetadata(active);
+  if (metadataErrors.length) throw new Error(metadataErrors[0].message);
   const allIds = new Set(outline.modules.map((m) => m.moduleLocalId));
   const flags = outline.flags.filter((f) => !(f.type === 'missing' && (f.message.startsWith('Missing module for responsibility:') || (f.message === 'Missing source sections for module.' && f.location.moduleLocalId && !active.some((m) => m.moduleLocalId === f.location.moduleLocalId)))));
   active.filter((m) => !m.sourceSectionIds.some((id) => id.trim()) && (!allIds.has(m.moduleLocalId) || !flags.some((f) => f.type === 'missing' && f.severity === 'blocking' && f.location.moduleLocalId === m.moduleLocalId))).forEach((m) => flags.push(missingSource(m.moduleLocalId)));

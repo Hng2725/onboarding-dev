@@ -18,6 +18,19 @@ const sections: readonly SourceSection[] = [
 ];
 
 describe('source-only fallback lesson', () => {
+  it.each([[], [''], ['  '], ['Setup']].map((headingPath) => ({ headingPath })))('keeps every emitted sentence and step in the selected source with headings $headingPath', ({ headingPath }) => {
+    const source = { id: 'section-a', headingPath, text: 'Open settings. Check the account.\n\n- Select the account.\n2. Review access.' };
+    const result = buildFallbackLesson({ outline: { ...outline, sourceSectionIds: ['section-a'] }, sections: [source] });
+    expect(result.kind).toBe('draft');
+    if (result.kind !== 'draft') throw new Error('Expected grounded fallback');
+    const allowed = normalizeForMatch(source.text + '\n' + headingPath.join('\n'));
+    for (const block of result.module.blocks) {
+      for (const sentence of block.body.split(/[.\n]/u).map(normalizeForMatch).filter(Boolean)) expect(allowed).toContain(sentence);
+      for (const step of block.steps ?? []) expect(normalizeForMatch(source.text)).toContain(normalizeForMatch(step.text));
+      expect(block.sourceRefs.every((ref) => ref.sectionId === source.id && normalizeForMatch(source.text).includes(normalizeForMatch(ref.quote)))).toBe(true);
+    }
+    expect(result.module.questions).toEqual([]);
+  });
   it('maps paragraphs, bullets, and ordered steps deterministically with section-local references', () => {
     const first = buildFallbackLesson({ outline, sections });
     expect(first).toEqual(buildFallbackLesson({ outline, sections: [...sections].reverse() }));

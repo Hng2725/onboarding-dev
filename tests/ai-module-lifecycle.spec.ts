@@ -99,6 +99,11 @@ describe('module lifecycle transitions', () => {
 });
 
 describe('persisted module jobs', () => {
+  it.each([{ responsibilityIndexes: null }, { sourceSectionIds: null }, { sourceSectionIds: [123] }])('returns a validation conflict for malformed outline arrays %j without persisting', async (patch) => {
+    const { service, job } = await setup('advanced');
+    await expect(service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: [{ type: 'update', moduleLocalId: active(job).outline.moduleLocalId, patch: patch as never }] })).rejects.toMatchObject({ code: 'OPERATION_CONFLICT' });
+    expect((await service.getJob(admin, job.jobId)).outline).toEqual(job.outline);
+  });
   it('rejects malformed skeleton metadata and schema-invalid fallback even when it is source-only', async () => {
     const { service, job } = await setup();
     for (const patch of [{ title: 123 }, { estimatedMinutes: -1 }, { objectives: [null] }]) {

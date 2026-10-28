@@ -44,7 +44,7 @@ Tất cả route Admin và Learner được mount ngay khi workspace mở. Mỗi
 
 ## Dữ liệu
 
-Schema bootstrap đăng ký 17 collection room-scoped:
+Schema bootstrap đăng ký 19 collection room-scoped:
 
 - catalog: templates, modules, resources, questions;
 - nhân sự và học cũ: employees, assignments, material progress, attempts, answers;
@@ -61,10 +61,25 @@ Assignment AI dùng `assessmentMode: per_module`. Mỗi module đi qua `availabl
 
 Một resource bắt buộc chỉ hoàn thành sau khi đã được mở thành công. Bài tập chỉ mở khi mọi resource bắt buộc trong mọi module có cả `openedAt` và `completedAt`.
 
-Nguồn AI hỗ trợ PDF có text, DOCX, Markdown, TXT và HTML, giới hạn 2 MiB/file. Không OCR. `sandbox:generate` là quyền optional; thiếu quyền sẽ khóa tạo AI và không fallback về tạo tay. Job/lease/operation ID cho phép refresh-resume và ngăn dispatch trùng; mỗi call lưu `provider`, kích thước prompt/context do server đo và trạng thái dọn dẹp.
+AI sources support text PDFs, DOCX, Markdown, TXT and HTML, up to 2 MiB per file, without OCR. Generation requires Sandbox or both Native AI Chat scopes. Job/lease/operation IDs protect refresh-resume and duplicate dispatch; each call records provider, server-measured request size, and cleanup status.
 
-Hủy job tách hai trạng thái: server job `cancelled` (ngay lập tức) và xác nhận dừng ở PrivOS cho từng attempt (`record_attempt_cleanup`: `pending` → `confirmed`/`unknown`). Attempt Native chưa xác nhận của chính Admin khóa lượt Native mới. Job template mới kiểm tra bài học trước khi tạo câu hỏi và chỉ sửa các module lỗi (`__repairMode: module`); job cũ giữ nhánh sửa toàn bộ.
 
 ## Kiểm thử
 
 Domain tests nằm trong `tests/onboarding-*.spec.ts`. Contract/runtime tests kiểm tra manifest, actor-room binding, relay verification, permissions, UI bundle và packaging. Chạy toàn bộ bằng `npm test` sau `npm run typecheck:strict-unused`.
+
+## Module drafting and operator recovery
+
+New template jobs use `pipelineVersion: module_v2`. Inventory remains source-based; Template 2 requests only 2-8 unique responsibilities. The backend owns immutable module IDs and authoritative frames. Every outline revision requires Admin approval before dispatch. Reordering preserves approved content; changing a module skeleton or selected source invalidates affected versions.
+
+The compact outline and two-pane editor use lesson/question cards, flags, and separate global/module milestones. Lesson states include `queued`, `drafting`, `review_ready`, `fallback_review`, `manual_required`, `approved`, and `stale`. Questions remain `blocked` until lesson approval, then progress through draft/review/approval or become `stale` after a lesson edit. An `awaiting_admin` job remains active.
+
+One module is processed at a time. Failed lesson generation produces a deterministic source-only fallback; zero usable source produces a blocking manual placeholder. An advanced fallback does not invent a scenario. Admin-authored content uses explicit manual provenance. Three to five questions must be approved against the exact current lesson version. Historical approvals never satisfy the current publish gate.
+
+A room/project lease serializes provider attempts. At most one transient retry and one schema repair are allowed per module; project-busy responses use bounded backoff. Closing is not cancellation. Reopening adopts an already-dispatched attempt with its persisted provider and original deadline, or waits for explicit Continue. It does not auto-start the next module/template. Explicit Cancel records server cancellation and requests provider cleanup; unknown outcomes remain reserved until terminal evidence permits release.
+
+Both requires Template 1 review, explicit navigation to Template 2 review, and one sequential publish. Current approved pairs materialize to drafts first. Readiness is rechecked before artifact work. PDFs and JSON are checkpointed, so reconnect/retry resumes unfinished work and completed publish is idempotent. The modal remains open on partial failure. Artifacts stay at `Onboarding-app/Created templates/<template-name>/` and open through in-app file preview. Existing assignments keep their snapshot; legacy jobs retain their prior pipeline.
+
+Schema bootstrap registers and reads all 19 room-scoped collections with `mcpapp.db.registerCollection` and `mcpapp.db.getSchema`. Additions: `onboarding_ai_room_leases` (unique `leaseKey`) and `onboarding_ai_publications` (unique `batchId`, owner/time index). Updates forward `expectedUpdatedAt`; the live database must enforce atomic updates and unique indexes. Memory-store tests alone do not establish external atomicity.
+
+Before local handoff, run the compatible full suite, strict-unused typecheck, and production build/manifest lint, rebuild Compose `app`, verify `/ready` and healthy/relay status, and reload the existing browser tab. Live races, reconnect, Roomfiles replacement, and modal behavior require recorded host evidence.

@@ -2,6 +2,21 @@
 
 This project follows Semantic Versioning. `package.json`, `package-lock.json`, `privos-app.json` and this file must describe the same release.
 
+## [Unreleased]
+
+### Added
+
+- Responsibilities-only Template 2, deterministic editable outlines with mandatory approval, and one-module-at-a-time review.
+- Source-only fallback lessons and blocking manual placeholders preserve completed work after provider failure.
+- Versioned approvals and audit history, room/project leases, bounded retries/backoff, and reconnect adoption without automatic cancellation or later dispatch.
+- Sequential Both review and resumable/idempotent publication with PDF/JSON checkpoints at the existing English Roomfiles path.
+- Mixed AI/fallback/manual and Both integration regressions, eight-responsibility coverage, source-only invariants, and prompt/schema/UTF-8 boundary tests.
+
+### Fixed
+
+- Malformed outline array metadata returns a validation conflict before structural traversal and cannot be persisted.
+- Long outline, lesson, question, and citation reviews use keyboard-accessible collapsible cards and bounded scroll regions with visible actions; new cards stay open while being edited.
+
 ## [2.20.0] - 2026-10-24
 
 ### Added

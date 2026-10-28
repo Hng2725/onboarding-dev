@@ -2,6 +2,38 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { expect, it } from 'vitest';
 import { AiModuleWorkspace } from '../src/ui/onboarding/ai/ai-module-workspace';
+import { approvedModuleJob } from './helpers/approved-module-fixture';
+
+it('keeps a new question open while its prompt is typed', () => {
+  const original = approvedModuleJob().moduleRuns![0];
+  const run = { ...original, questionDraft: [{ ...original.questionDraft![0], prompt: '' }] };
+  let view!: TestRenderer.ReactTestRenderer;
+  act(() => { view = TestRenderer.create(createElement(AiModuleWorkspace, { runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false, onSelect: () => {}, onAction: () => {}, onSources: () => {} })); });
+  const card = () => view.root.findAllByType('details').filter((node) => node.props.className === 'ai-content-card').at(-1)!;
+  expect(card().props.open).toBe(true);
+  act(() => card().findAllByType('textarea').find((node) => node.props.value === '')!.props.onChange({ target: { value: 'Which source?' } }));
+  expect(card().props.open).toBe(true);
+});
+
+it('collapses long lesson/question cards and citations while keeping versioned actions outside scroll regions', () => {
+  const original = approvedModuleJob().moduleRuns![0];
+  const lesson = original.lessonDraft!;
+  const run = { ...original, lessonState: 'review_ready' as const, lessonDraft: { ...lesson, blocks: Array.from({ length: 20 }, (_, index) => ({ ...lesson.blocks[0], localId: `block-${index}`, title: `Section ${index + 1}` })) } };
+  const onAction = vi.fn();
+  const view = TestRenderer.create(createElement(AiModuleWorkspace, { runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false, onSelect: () => {}, onAction, onSources: () => {} }));
+  const disclosures = view.root.findAllByType('details');
+  expect(disclosures.filter((node) => node.props.className === 'ai-content-card')).toHaveLength(23);
+  expect(disclosures.every((node) => !node.props.open)).toBe(true);
+  expect(disclosures.filter((node) => node.props.className === 'ai-source-details')).toHaveLength(23);
+  const summaries = view.root.findAllByType('summary');
+  expect(summaries.flatMap((node) => node.findAllByType('strong')).map((node) => node.children.join(''))).toContain('20. Section 20');
+  const regions = view.root.findAll((node) => node.props.role === 'region' && node.props.className === 'ai-review-scroll');
+  expect(regions.map((node) => node.props['aria-label'])).toEqual(['Nội dung bài học', 'Nội dung câu hỏi']);
+  expect(regions.every((node) => node.props.tabIndex === 0)).toBe(true);
+  expect(regions.flatMap((node) => node.findAllByType('button')).some((button) => button.children.join('') === 'Duyệt bài học')).toBe(false);
+  act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Duyệt bài học')!.props.onClick());
+  expect(onAction).toHaveBeenCalledWith('approve_module_lesson', { moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion });
+});
 
 it('shows manual source requirement and blocks approval without content', () => {
   const run = { outline: { moduleLocalId: 'm', frameKey: 't1-core', order: 0, title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [] }, outlineRevision: 1, lessonState: 'manual_required' as const, lessonVersion: 0, questionState: 'blocked' as const, questionVersion: 0 };

@@ -4,6 +4,18 @@ import { expect, it, vi } from 'vitest';
 import TestRenderer, { act } from 'react-test-renderer';
 import { AiOutlineReview } from '../src/ui/onboarding/ai/ai-outline-review';
 
+it('keeps eight outline cards collapsed with named keyboard-scrollable review and visible approval', () => {
+  const modules = ['t2-role', 't2-permissions', 't2-task-1', 't2-task-2', 't2-task-3', 't2-task-4', 't2-task-5', 't2-task-6'].map((frameKey, order) => ({ moduleLocalId: `m${order}`, frameKey, order, title: `Module ${order}`, description: '', estimatedMinutes: 10, objectives: ['Goal'], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] }));
+  const view = TestRenderer.create(createElement(AiOutlineReview, { outline: { revision: 1, modules, taskCoverage: [], flags: [] }, templateKind: 'advanced', responsibilities: ['A', 'B'], busy: false, onEdit: () => {}, onApprove: () => {} }));
+  const cards = view.root.findAllByType('details');
+  expect(cards).toHaveLength(8);
+  expect(cards.every((card) => !card.props.open)).toBe(true);
+  expect(view.root.findAllByType('summary').map((node) => node.findByType('strong').children.join(''))).toContain('8. Module 7');
+  const region = view.root.find((node) => node.props.role === 'region' && node.props['aria-label'] === 'Các module trong khung');
+  expect(region.props.tabIndex).toBe(0);
+  expect(region.findAllByType('button').some((button) => button.children.join('') === 'Duyệt khung và bắt đầu viết')).toBe(false);
+});
+
 it('shows outline details and prevents approval of invalid frame order', () => {
   const outline = { revision: 3, modules: [{ moduleLocalId: 'm', frameKey: 'unknown', order: 0, title: 'Module A', description: '', estimatedMinutes: 10, objectives: ['Objective'], featureIds: [], sourceSectionIds: ['source-1'], responsibilityIndexes: [] }], taskCoverage: [], flags: [] };
   const html = renderToStaticMarkup(createElement(AiOutlineReview, { outline, templateKind: 'normal', responsibilities: [], busy: false, onEdit: () => {}, onApprove: () => {} }));

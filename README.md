@@ -27,7 +27,6 @@ Admin có năm khu vực: Tổng quan, Nhân sự, Template, Nhận xét tự lu
 - Admin có thể thêm ghi chú xác minh làm nguồn, xem trích dẫn theo section/trang và xử lý cờ thiếu dữ liệu, xung đột hoặc nội dung chưa chắc chắn.
 - Quyền `sandbox:generate` là optional. Hai quyền `sandbox:ai-chat` và `sandbox:ai-chat:write` cho phép Thử lại qua Native AI Chat khi Sandbox provider trả `AI_FAILED`; không có quyền AI nào thì nút tạo bị vô hiệu hóa.
 - Job AI được lưu ở server, có thể tiếp tục sau khi refresh và chống chạy trùng bằng operation ID/lease. Mỗi lượt gọi lưu provider (`sandbox`/`native_chat`), nên refresh luôn tiếp tục đúng attempt cũ qua đúng provider; hạn 15 phút tính từ lúc dispatch lần đầu.
-- Bài học được kiểm tra ngay sau bước tạo bài học. Khi lỗi chỉ nằm trong vài module, lượt tự sửa chỉ gửi và nhận lại các module đó rồi ghép theo `localId`; job tạo trước bản 2.20.0 vẫn dùng cách sửa cũ.
 - Hủy job gồm hai phần tách biệt: server job chuyển `cancelled` ngay, còn tiến trình AI nền ở PrivOS được yêu cầu dừng và kiểm tra trạng thái tối đa 15 giây. Kết quả lưu theo từng attempt (`pending` → `confirmed` hoặc `unknown`). Khi tiến trình Native của chính Admin chưa được xác nhận dừng, app khóa lượt Native mới và hiện nút **Kiểm tra lại trạng thái**.
 - Context gửi cho AI được ngắt dòng (≤ 400 ký tự/dòng) vì agent đọc file của PrivOS cắt các dòng quá dài.
 
@@ -43,7 +42,7 @@ Backend cung cấp bảy data/UI MCP tools được khai báo trong [`privos-app
 - `onboarding_learning`
 - `onboarding_reviews`
 
-Dữ liệu được lưu trong 17 collection App Database theo room. File onboarding nằm trong File service của room. Trình duyệt chỉ giữ theme, bản nháp khôi phục và ID job để tiếp tục; App Database vẫn là nguồn dữ liệu chính.
+Dữ liệu được lưu trong 19 collection App Database theo room. File onboarding nằm trong File service của room. Trình duyệt chỉ giữ theme, bản nháp khôi phục và ID job để tiếp tục; App Database vẫn là nguồn dữ liệu chính.
 
 Mọi request backend lấy user và room từ actor đã được PrivOS xác minh. Backend không tin `memberId`, `roomId` hoặc role do UI tự khai báo. Learner DTO loại answer key và các trường nội bộ; learner chỉ đọc được assignment, attempt và feedback của chính mình.
 
@@ -104,3 +103,18 @@ Automated tests xác minh policy, workflow, schema, tools, UI model, manifest v�
 - xác nhận template cũ vẫn chạy luồng bài thi cuối chương trình.
 
 Xem [`PRIVACY.md`](PRIVACY.md), [`TERMS.md`](TERMS.md) và [`PUBLISHING.md`](PUBLISHING.md) trước khi phát hành.
+
+## Safe module drafting (module_v2)
+
+1. Upload or select sources, analyze them, then choose Template 1, Template 2, or Both. Template 2 requires only 2-8 distinct responsibilities (one per line); Department and Job Title are not requested. Old records retain readable optional role metadata.
+2. Review the deterministic outline before generating any lesson. Template 1 has 4-8 modules; Template 2 has 5-8. Edit titles, objectives, sources, order, and responsibility coverage, then explicitly approve the current outline revision.
+3. Draft and review one module at a time. Approve its lesson before generating 3-5 questions, then approve those questions before moving on. The workspace uses editable cards and separate module/global milestones; waiting for Admin review is not generation completion.
+4. Provider failure preserves earlier modules. A source-only fallback reuses selected text and headings without inventing facts or a scenario. With no usable source, a blocking manual placeholder requires Admin content and approval. Questions remain blocked until that lesson is approved.
+5. Editing an approved lesson invalidates its approval and marks its questions stale. Prior approvals remain in audit history. Only the latest approved lesson and questions tied to that exact version can be materialized or published.
+6. Both proceeds through Template 1 review, an explicit Next to Template 2, and a single resumable publish. Publication prepares lesson PDFs, publishes each template, and saves JSON in order. Repeating a completed publish does not duplicate completed artifacts. The modal closes only after every target and artifact succeeds.
+
+Close/reopen or refresh adopts a dispatched attempt through its recorded provider; it neither cancels that attempt nor starts later work automatically. Use Continue explicitly to resume waiting work, and Cancel explicitly to cancel. A room/project lease permits only one live provider attempt. Transient failures receive at most one automatic retry per module and malformed output at most one schema repair; project-busy responses use bounded backoff and eventually require Admin action. Unknown provider outcomes remain fenced until reconciled.
+
+Artifacts retain the English Roomfiles path `Onboarding-app/Created templates/<template-name>/` and open in the app. New room-scoped collections `onboarding_ai_room_leases` and `onboarding_ai_publications` use existing database permissions; no additional scope is needed.
+
+For a Windows linked worktree whose WSL Git cannot resolve the Windows `.git` pointer, run `npm test -- --exclude tests/packaging.spec.ts`, `npm run typecheck:strict-unused`, and `npm run build`. Packaging must still run from a compatible checkout before release. Deploy the existing local service with `docker compose up -d --build app`, then verify `/ready`, container health, relay connection, and the live host UI.

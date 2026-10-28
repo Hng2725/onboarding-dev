@@ -13,6 +13,8 @@ import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { generatedTemplate } from './helpers/ai-template-fixture';
 import { seedAiSource } from './helpers/ai-template-fixture';
 import { approvedModuleJob } from './helpers/approved-module-fixture';
+import { generateValidatedTemplateRuns, moveReviewIndex, reviewAdvanceState } from '../src/ui/onboarding/ai/ai-template-batch';
+import { publishAiTemplateBatch } from '../src/ui/onboarding/ai/ai-publish-batch';
 
 const admin: OnboardingActor = { userId: 'admin-1', roomId: 'room-a', access: 'admin' };
 const learner: OnboardingActor = { userId: 'member-1', roomId: 'room-a', access: 'learner' };
@@ -51,6 +53,120 @@ function correctAnswers(started: {
 }
 
 describe('AI onboarding integration', () => {
+  it('runs responsibilities-only outline approval through AI, fallback, manual review, versioned questions and materialization', async () => {
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    await store.create(admin.roomId, 'onboarding_ai_jobs', {
+      jobId: 'inventory-safe', kind: 'inventory', status: 'completed', sourceIds: ['source-1'], promptVersion: 'test', calls: [], stageOutputs: {},
+      result: { systemSummary: { purpose: 'Orders', modules: [], sourceRefs: [{ sectionId: 'source-1#s1', quote: sourceQuote }] }, features: [], glossary: [], flags: [] },
+      operationId: 'inventory-safe', createdBy: admin.userId, createdAt: '2026-10-28T01:00:00.000Z', updatedAt: '2026-10-28T01:00:00.000Z',
+    });
+    const jobs = createAiJobService(store);
+    let job = await jobs.startJob(admin, { kind: 'template', inventoryJobId: 'inventory-safe', templateKind: 'advanced', roleProfile: { responsibilities: ['Create orders', 'Review orders'] }, operationId: 'advanced-safe' });
+    expect(job.roleProfile).toEqual({ responsibilities: ['Create orders', 'Review orders'] });
+    expect(await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'worker' })).toMatchObject({ kind: 'awaiting_admin' });
+    expect(job.calls).toEqual([]);
+    job = await jobs.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: job.outline!.modules.map((module, index) => ({ type: 'update', moduleLocalId: module.moduleLocalId, patch: { sourceSectionIds: index === 2 ? [] : ['source-1#s1'] } })) });
+    job = await jobs.approveOutline(admin, { jobId: job.jobId, expectedRevision: 2 });
+    for (let index = 0; index < job.moduleRuns!.length; index += 1) {
+      const run = job.moduleRuns![index];
+      const args = { jobId: job.jobId, moduleLocalId: run.outline.moduleLocalId };
+      const step = await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'worker' });
+      const sample = generatedTemplate.modules[0];
+      const blocks = sample.blocks.map((block, blockIndex) => ({ ...block, localId: `safe-${index}-b${blockIndex}`, kind: block.kind === 'concept' ? 'scenario' as const : block.kind, sourceRefs: index === 2 ? [] : block.sourceRefs }));
+      if (index === 2) {
+        expect(step.kind).toBe('awaiting_admin');
+        job = await jobs.getJob(admin, job.jobId);
+        expect(job.moduleRuns![index]).toMatchObject({ lessonState: 'manual_required', questionState: 'blocked' });
+        await expect(jobs.approveModuleLesson(admin, { ...args, expectedVersion: job.moduleRuns![index].lessonVersion })).rejects.toThrow();
+        job = await jobs.updateModuleLesson(admin, { ...args, expectedVersion: job.moduleRuns![index].lessonVersion, module: { ...sample, localId: args.moduleLocalId, frameKey: run.outline.frameKey, featureIds: run.outline.featureIds, blocks, questions: [] } });
+      } else {
+        if (step.kind !== 'ai_call') throw new Error('Expected one lesson call');
+        expect((await jobs.getJob(admin, job.jobId)).calls.filter((call) => call.status === 'pending' || call.status === 'running')).toHaveLength(1);
+        expect(await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'other-tab' })).toMatchObject({ kind: 'wait' });
+        job = index === 1
+          ? await jobs.reportAiFailure(admin, { jobId: job.jobId, workerId: 'worker', callId: step.callId, kind: 'failed' })
+          : await jobs.submitAiOutput(admin, { jobId: job.jobId, workerId: 'worker', callId: step.callId, text: JSON.stringify({ title: sample.title, description: sample.description, objectives: sample.objectives, estimatedMinutes: sample.estimatedMinutes, blocks, flags: [] }) });
+        expect(job.moduleRuns![index].lessonProvenance).toBe(index === 1 ? 'fallback' : 'ai');
+        if (index === 1) expect(job.moduleRuns![0]).toMatchObject({ lessonState: 'approved', questionState: 'approved' });
+      }
+      expect(await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'worker' })).toMatchObject({ kind: 'awaiting_admin' });
+      job = await jobs.approveModuleLesson(admin, { ...args, expectedVersion: job.moduleRuns![index].lessonVersion });
+      const questions = sample.questions.map((question, questionIndex) => ({ ...question, localId: `safe-${index}-q${questionIndex}`, blockIds: [job.moduleRuns![index].lessonDraft!.blocks[0].localId], sourceRefs: index === 2 ? [] : question.sourceRefs }));
+      if (index === 2) {
+        job = await jobs.updateModuleQuestions(admin, { ...args, expectedVersion: job.moduleRuns![index].questionVersion, questions });
+      } else {
+        const qstep = await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'worker' });
+        if (qstep.kind !== 'ai_call') throw new Error('Expected questions after lesson approval');
+        job = await jobs.submitAiOutput(admin, { jobId: job.jobId, workerId: 'worker', callId: qstep.callId, text: JSON.stringify({ questions, flags: [] }) });
+      }
+      job = await jobs.approveModuleQuestions(admin, { ...args, expectedVersion: job.moduleRuns![index].questionVersion });
+      expect(job.moduleRuns![index].questionLessonVersion).toBe(job.moduleRuns![index].approvedLessonVersion);
+      if (index === 0) {
+        const audit = job.stageOutputs.__moduleAudit;
+        const approved = job.moduleRuns![index];
+        job = await jobs.updateModuleLesson(admin, { ...args, expectedVersion: approved.lessonVersion, module: { ...approved.lessonDraft!, title: 'Reviewed order workflow' } });
+        expect(job.moduleRuns![index]).toMatchObject({ questionState: 'stale', lessonVersion: 2 });
+        expect(job.stageOutputs.__moduleAudit).toEqual(audit);
+        await expect(jobs.approveModuleQuestions(admin, { ...args, expectedVersion: job.moduleRuns![index].questionVersion })).rejects.toThrow();
+        job = await jobs.approveModuleLesson(admin, { ...args, expectedVersion: 2 });
+        job = await jobs.updateModuleQuestions(admin, { ...args, expectedVersion: job.moduleRuns![index].questionVersion, questions });
+        job = await jobs.approveModuleQuestions(admin, { ...args, expectedVersion: job.moduleRuns![index].questionVersion });
+      }
+    }
+    const done = await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'worker' });
+    expect(done).toMatchObject({ kind: 'done', job: { status: 'completed' } });
+    const result = done.job.result as { templateId: string; version: number };
+    const templates = createTemplateService(store);
+    const detail = await createAiReviewService(store, templates).getReview(admin, result.templateId, result.version);
+    expect(detail.status).toBe('draft');
+    expect(detail.content!.modules.map((module) => module.lessonProvenance)).toEqual(['manual', 'fallback', 'manual', 'ai', 'ai']);
+    expect(detail.content!.modules.every((module) => module.approvedLessonVersion === module.questionLessonVersion)).toBe(true);
+    expect(detail.modules.map((module) => module.key)).toEqual(job.outline!.modules.map((module) => module.frameKey));
+    expect(await store.count(admin.roomId, 'onboarding_resources')).toBe(0);
+  });
+
+  it('requires explicit Both advancement and publishes both materialized drafts sequentially and idempotently', async () => {
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    const jobs = createAiJobService(store);
+    const templates = createTemplateService(store, { publishGuard: createAiPublishGuard(store) });
+    const review = createAiReviewService(store, templates);
+    const order: string[] = [];
+    const generateOne = async (run: import('../src/ui/onboarding/ai/ai-template-batch').AiTemplateRun) => {
+      order.push(`generate:${run.kind}`);
+      const fixture = approvedModuleJob(run.kind);
+      await store.create(admin.roomId, 'onboarding_ai_jobs', { ...fixture, status: 'running' });
+      const done = await jobs.nextStep(admin, { jobId: fixture.jobId, workerId: 'worker' });
+      const result = done.job.result as { templateId: string; version: number };
+      return { ...run, job: done.job, review: await review.getReview(admin, result.templateId, result.version) };
+    };
+    const first = await generateValidatedTemplateRuns({ selection: 'both', responsibilities: 'Process orders\nReview orders', runs: [], generateOne });
+    expect(order).toEqual(['generate:normal']);
+    expect(first.runs[1].job).toBeNull();
+    expect(reviewAdvanceState(first.runs, 0).canNext).toBe(true);
+    const next = moveReviewIndex(first.runs, 0, 'next');
+    expect(next.index).toBe(1);
+    const second = await generateValidatedTemplateRuns({ selection: 'both', responsibilities: 'Process orders\nReview orders', runs: next.runs, generateOne });
+    expect(order).toEqual(['generate:normal', 'generate:advanced']);
+    const dependencies = {
+      prepareResources: async (target: import('../src/ui/onboarding/ai/ai-publish-batch').AiPublishTarget) => {
+        order.push(`files:${target.kind}`);
+        return review.updateReview(admin, { templateId: target.review.id, version: target.review.version, expectedUpdatedAt: target.review.updatedAt, ops: target.review.modules.map((module) => ({ kind: 'upsert_generated_resource' as const, moduleId: module.id, resource: { id: `pdf-${module.id}`, title: module.title, kind: 'file' as const, required: true, fileId: `file-${module.id}` } })) });
+      },
+      publish: async (prepared: import('../src/onboarding/templates').AdminTemplateDetail) => {
+        order.push(`publish:${prepared.employeeType}`);
+        return templates.publish(admin, prepared.id, prepared.version, prepared.updatedAt);
+      },
+      exportJson: async (published: import('../src/onboarding/templates').AdminTemplateDetail) => { order.push(`json:${published.employeeType}`); },
+    };
+    const published = await publishAiTemplateBatch(second.runs.map((run) => ({ kind: run.kind, review: run.review!, jsonExported: false, phase: 'idle' as const })), dependencies);
+    expect(order).toEqual(['generate:normal', 'generate:advanced', 'files:normal', 'publish:normal', 'json:normal', 'files:advanced', 'publish:advanced', 'json:advanced']);
+    const once = [...order];
+    await publishAiTemplateBatch(published, dependencies);
+    expect(order).toEqual(once);
+    expect((await templates.list(admin)).filter((template) => template.source === 'ai_generated').map((template) => template.status)).toEqual(['published', 'published']);
+  });
   it('materializes current approved module pairs on completion without publishing', async () => {
     const store = new MemoryOnboardingStore();
     await seedAiSource(store);

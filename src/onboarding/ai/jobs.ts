@@ -1639,7 +1639,12 @@ export function createAiJobService(
       const row = await requireModuleJob(actor, input.jobId);
       assertOutlineRevision(row, input.expectedRevision);
       if (!Array.isArray(input.edits) || input.edits.some((edit) => !edit || !['add', 'delete', 'reorder', 'update'].includes(edit.type))) throw new AiJobServiceError('OPERATION_CONFLICT', 'Outline edit type is invalid.');
-      const outline = applyTemplateOutlineEdits(row.outline!, input.edits, (frame) => 'outline-' + stableHash([row.jobId, row.outline!.revision + 1, frame]));
+      let outline: TemplateOutline;
+      try {
+        outline = applyTemplateOutlineEdits(row.outline!, input.edits, (frame) => 'outline-' + stableHash([row.jobId, row.outline!.revision + 1, frame]));
+      } catch {
+        throw new AiJobServiceError('OPERATION_CONFLICT', 'Outline edits are invalid.');
+      }
       validateOutline(row, outline);
       const runs = reconcileModuleRuns(row.moduleRuns!, outline).map((run): AiModuleDraftRun => ({ ...run, ...(run.lessonState === 'drafting' ? { lessonState: 'queued' } : {}), ...(run.questionState === 'drafting' ? { questionState: 'queued' } : {}) }));
       return jobFrom(await updateJob(actor, row, { outline, outlineApprovedRevision: 0, moduleRuns: runs, calls: obsoleteCalls(row, new Set(row.moduleRuns!.map((run) => run.outline.moduleLocalId))), status: 'running', result: null, ...RELEASED_LEASE, ...CLEARED_WAIT }), actor.roomId);

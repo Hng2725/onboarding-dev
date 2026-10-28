@@ -1,6 +1,7 @@
 ﻿import { describe, expect, it } from 'vitest';
 import { applyTemplateOutlineEdits, buildTemplateOutline, validateTemplateOutline } from '../src/onboarding/ai/outline';
 import type { FeatureInventory } from '../src/onboarding/ai/inventory';
+import { validateAdminOutline } from '../src/onboarding/ai/outline-validation';
 
 const inventory: FeatureInventory = {
   systemSummary: { purpose: 'System', modules: [], sourceRefs: [{ sectionId: 's1', quote: 'System overview' }] },
@@ -13,6 +14,20 @@ const build = (templateKind: 'normal' | 'advanced' = 'normal', data = inventory)
   buildTemplateOutline({ jobId: 'job-1', templateKind, inventory: data, responsibilities });
 
 describe('template outlines', () => {
+  it('covers all eight responsibilities within eight immutable authoritative frames', () => {
+    const tasks = ['Create report', 'Review access', 'Manage users', 'Check orders', 'Audit changes', 'Resolve issues', 'Train users', 'Export records'];
+    const outline = buildTemplateOutline({ jobId: 'eight', templateKind: 'advanced', inventory, responsibilities: tasks });
+    expect(outline.modules).toHaveLength(8);
+    expect(outline.modules.map((m) => m.frameKey)).toEqual(['t2-role', 't2-permissions', 't2-task-1', 't2-task-2', 't2-task-3', 't2-task-4', 't2-task-5', 't2-task-6']);
+    expect(outline.taskCoverage.map((item) => item.task)).toEqual(tasks);
+    for (const [index, item] of outline.taskCoverage.entries()) expect(outline.modules.find((m) => m.moduleLocalId === item.moduleLocalId)?.responsibilityIndexes).toContain(index);
+    expect(validateTemplateOutline(outline, { templateKind: 'advanced', responsibilities: tasks })).toEqual([]);
+  });
+  it.each([{ responsibilityIndexes: null }, { sourceSectionIds: null }, { sourceSectionIds: [123] }])('validates malformed Admin metadata before structural traversal %j', (patch) => {
+    const outline = build('advanced');
+    const malformed = { ...outline, modules: [{ ...outline.modules[0], ...patch }, ...outline.modules.slice(1)] };
+    expect(validateAdminOutline(malformed as never, { templateKind: 'advanced', responsibilities })).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'METADATA' })]));
+  });
   it('builds deterministic ordered normal frames with required frames', () => {
     const outline = build();
     expect(build()).toEqual(outline);
