@@ -23,6 +23,7 @@ const COLLECTION_NAMES = [
   'onboarding_ai_jobs',
   'onboarding_ai_room_leases',
   'onboarding_template_content',
+  'onboarding_ai_publications',
   'onboarding_module_progress',
   'onboarding_module_attempts',
 ];
@@ -55,6 +56,9 @@ describe('onboarding App Database schema', () => {
     }));
     expect(indexes('onboarding_evaluations')).toContainEqual(expect.objectContaining({
       fields: { operationId: 1 }, unique: true,
+    }));
+    expect(indexes('onboarding_ai_publications')).toContainEqual(expect.objectContaining({
+      fields: { batchId: 1 }, unique: true,
     }));
   });
 

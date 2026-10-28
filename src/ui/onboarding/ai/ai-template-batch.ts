@@ -1,5 +1,5 @@
 import { normalizeForMatch } from '../../../onboarding/ai/grounding';
-import type { AiJobRecord, EmployeeType, RoleProfile } from '../../../onboarding/contracts';
+import type { AiJobRecord, AiPublicationBatch, AiPublicationTarget, AiTemplateAssessmentSettings, EmployeeType, RoleProfile } from '../../../onboarding/contracts';
 import type { AdminTemplateDetail } from '../../../onboarding/templates';
 
 export type TemplateSelection = EmployeeType | 'both' | null;
@@ -9,17 +9,15 @@ export interface TemplateRequestErrors {
   readonly responsibilities?: string;
 }
 
-export interface AiTemplateSettings {
-  readonly passingScore: number;
-  readonly maxAttemptsPerModule: number | null;
-  readonly learningMode: 'sequential' | 'free';
-}
+export type AiTemplateSettings = AiTemplateAssessmentSettings;
 
 export interface AiTemplateRun {
   readonly kind: EmployeeType;
   readonly job: AiJobRecord | null;
   readonly review: AdminTemplateDetail | null;
   readonly settings?: AiTemplateSettings;
+  readonly publicationBatchId?: string;
+  readonly publicationTarget?: AiPublicationTarget;
 }
 
 export function templateKindsForSelection(selection: TemplateSelection): readonly EmployeeType[] {
@@ -109,12 +107,19 @@ export function selectResumableTemplateRuns(input: {
   readonly resumeJobIds: Readonly<Partial<Record<EmployeeType, string | null>>>;
   readonly legacyTemplateJobId?: string | null;
   readonly userId?: string;
+  readonly publicationBatches?: readonly AiPublicationBatch[];
 }): readonly AiTemplateRun[] {
   const eligible = input.jobs.filter((job) => job.kind === 'template'
     && job.status !== 'cancelled'
     && Boolean(job.templateKind)
     && (!input.userId || job.createdBy === input.userId));
   const byId = (jobId: string | null | undefined) => eligible.find((job) => job.jobId === jobId);
+  const publication = input.publicationBatches?.filter((batch) => !input.userId || batch.createdBy === input.userId)
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+  if (publication) return [...publication.targets]
+    .sort((a, b) => a.kind === b.kind ? 0 : a.kind === 'normal' ? -1 : 1)
+    .map((target) => ({ kind: target.kind, job: byId(target.jobId) ?? null, review: null,
+      settings: target.settings, publicationBatchId: publication.batchId, publicationTarget: target }));
   const legacy = byId(input.legacyTemplateJobId);
   const newestRecoverable = (kind: EmployeeType) => eligible
     .filter((job) => job.templateKind === kind

@@ -82,6 +82,8 @@ function services(): OnboardingServiceBundle {
       recordAttemptCleanup: vi.fn().mockResolvedValue({ jobId: 'job-1', status: 'cancelled' }),
     },
     aiReview: {
+      beginPublication: vi.fn().mockResolvedValue({ batchId: 'batch-1', targets: [] }),
+      listIncompletePublications: vi.fn().mockResolvedValue([{ batchId: 'batch-1', targets: [] }]),
       getReview: vi.fn().mockResolvedValue({ id: 'template-1', version: 1 }),
       updateReview: vi.fn().mockResolvedValue({ id: 'template-1', version: 1 }),
       resolveFlag: vi.fn().mockResolvedValue({ id: 'template-1', version: 1 }),
@@ -235,6 +237,8 @@ describe('onboarding tool dispatcher', () => {
       .rejects.toMatchObject({ data: { code: 'ADMIN_REQUIRED' } });
     await expect(handle('onboarding_admin_ai', { action: 'list_sources' }, verified()))
       .rejects.toMatchObject({ data: { code: 'ADMIN_REQUIRED' } });
+    await expect(handle('onboarding_admin_ai', { action: 'begin_publication', targets: [] }, verified()))
+      .rejects.toMatchObject({ data: { code: 'ADMIN_REQUIRED' } });
 
     expect(bundle.prepare).not.toHaveBeenCalled();
     expect(bundle.templates.list).not.toHaveBeenCalled();
@@ -248,6 +252,11 @@ describe('onboarding tool dispatcher', () => {
 
     await expect(handle('onboarding_admin_ai', { action: 'list_sources' }, actor))
       .resolves.toMatchObject({ sources: [{ sourceId: 'source-1' }] });
+    await expect(handle('onboarding_admin_ai', { action: 'list_jobs' }, actor))
+      .resolves.toMatchObject({ publicationBatches: [{ batchId: 'batch-1' }] });
+    await handle('onboarding_admin_ai', { action: 'begin_publication', targets: [{ kind: 'normal', templateId: 'template-1', version: 1 }] }, actor);
+    expect(bundle.aiReview.beginPublication).toHaveBeenCalledWith(expect.objectContaining({ userId: 'admin-1', roomId: 'room-a' }),
+      { targets: [{ kind: 'normal', templateId: 'template-1', version: 1 }], batchId: undefined });
     await handle('onboarding_admin_ai', {
       action: 'add_admin_note', operationId: 'op-note', title: 'Ghi chú', text: 'Nội dung',
     }, actor);

@@ -12,6 +12,7 @@ import {
   type FinalConclusion,
   type ModuleQuizAnswerInput,
   type OutlineEdit,
+  type AiPublicationTarget,
 } from './contracts';
 import type { GeneratedModule, GeneratedQuestion } from './ai/validate';
 import {
@@ -61,7 +62,7 @@ const ACTIONS: Readonly<Record<OnboardingDataToolName, readonly string[]>> = {
     'list_sources', 'ingest_source', 'add_admin_note', 'delete_source', 'get_source_section',
     'start_job', 'list_jobs', 'get_job', 'next_step', 'record_dispatch', 'submit_ai_output',
     'report_ai_failure', 'retry_job', 'cancel_job', 'record_attempt_cleanup',
-    'get_review', 'update_review', 'resolve_flag',
+    'get_review', 'update_review', 'resolve_flag', 'begin_publication',
   ],
   onboarding_admin_assignments: [
     'list', 'get', 'list_members', 'list_employees', 'add_employee', 'assign', 'grant_retry',
@@ -481,7 +482,10 @@ async function dispatchAdminAi(
         : requiredObject<StartAiJobInput>(args, 'job');
       return { job: await services.aiJobs.startJob(actor, input as StartAiJobInput) };
     }
-    case 'list_jobs': return { jobs: await services.aiJobs.listJobs(actor) };
+    case 'list_jobs': return { jobs: await services.aiJobs.listJobs(actor), publicationBatches: await services.aiReview.listIncompletePublications(actor) };
+    case 'begin_publication': return { batch: await services.aiReview.beginPublication(actor, {
+      batchId: optionalString(args, 'batchId'), targets: requiredArray<AiPublicationTarget>(args, 'targets'),
+    }) };
     case 'update_outline': return { job: await services.aiJobs.updateOutline(actor, {
       jobId: requiredString(args, 'jobId'), expectedRevision: requiredNumber(args, 'expectedRevision'), edits: requiredArray<OutlineEdit>(args, 'edits'),
     }) };

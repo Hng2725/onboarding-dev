@@ -220,7 +220,7 @@ export async function createLessonPdfArtifact(
   pdfMake.addVirtualFileSystem(vfsModule.default);
   const blob = await pdfMake.createPdf(lessonPdfDocumentDefinition(review, moduleId)).getBlob();
   return {
-    fileName: lessonPdfFileName(module.title, moduleIndex, review.content?.moduleApproval ? module.id : undefined),
+    fileName: lessonPdfFileName(module.title, moduleIndex, module.id),
     mimeType: 'application/pdf',
     blob: blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' }),
   };

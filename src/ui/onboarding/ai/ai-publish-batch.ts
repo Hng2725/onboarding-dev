@@ -12,6 +12,7 @@ export type AiPublishPhase =
   | 'failed';
 
 export interface AiPublishTarget {
+  readonly batchId?: string;
   readonly targetKey?: string;
   readonly uploadedResources?: Readonly<Record<string, TemplateResource>>;
   readonly kind: EmployeeType;
@@ -24,6 +25,7 @@ export interface AiPublishTarget {
 }
 
 export interface AiPublishBatchDependencies {
+  beginBatch?(targets: readonly AiPublishTarget[]): Promise<readonly AiPublishTarget[]>;
   prepareResources(target: AiPublishTarget, checkpoint?: (resources: Readonly<Record<string, TemplateResource>>) => void): Promise<AdminTemplateDetail>;
   publish(review: AdminTemplateDetail): Promise<AdminTemplateDetail>;
   exportJson(published: AdminTemplateDetail): Promise<void>;
@@ -49,12 +51,32 @@ function errorText(error: unknown): string {
 
 function orderedTargets(targets: readonly AiPublishTarget[]): readonly AiPublishTarget[] {
   return targets
-    .map((target) => ({ ...target, targetKey: aiPublishTargetKey(target.review) }))
+    .map((target): AiPublishTarget => {
+      const targetKey = aiPublishTargetKey(target.review);
+      const stale = (target.targetKey && target.targetKey !== targetKey)
+        || (target.preparedReview && aiPublishTargetKey(target.preparedReview) !== targetKey)
+        || (target.publishedTemplate && aiPublishTargetKey(target.publishedTemplate) !== targetKey);
+      return stale ? { batchId: target.batchId, kind: target.kind, review: target.review, targetKey, jsonExported: false, phase: 'idle' }
+        : { ...target, targetKey };
+    })
     .sort((left, right) => left.kind === right.kind ? 0 : left.kind === 'normal' ? -1 : 1);
 }
 
+export function restoreAiPublishTarget(review: AdminTemplateDetail, batchId?: string): AiPublishTarget {
+  const published = review.status === 'published';
+  const jsonExported = published && Boolean(review.content?.publication?.jsonFileId);
+  return { batchId, kind: review.employeeType, review, targetKey: aiPublishTargetKey(review),
+    uploadedResources: review.content?.publication?.pdfs,
+    ...(published ? { preparedReview: review, publishedTemplate: review } : {}),
+    jsonExported, phase: jsonExported ? 'completed' : 'idle' };
+}
+
 export function aiPublishTargetKey(review: AdminTemplateDetail): string {
-  return `${review.employeeType}:${review.id}:${review.version}:${review.content?.moduleApproval?.fingerprint ?? 'legacy'}`;
+  // Include legacy edits and settings, while allowing attachment/checkpoint writes to resume.
+  const { publication: _publication, ...content } = review.content ?? {};
+  return JSON.stringify({ kind: review.employeeType, id: review.id, version: review.version,
+    title: review.title, description: review.description, passingScore: review.passingScore,
+    content, modules: review.modules.map(({ resources: _resources, ...module }) => module) });
 }
 
 export async function publishAiTemplateBatch(
@@ -81,12 +103,21 @@ export async function publishAiTemplateBatch(
     fail(blockedIndex, new Error('Còn cờ bắt buộc cần xử lý trước khi xuất bản.'));
   }
 
+  if (dependencies.beginBatch) {
+    try {
+      current = orderedTargets(await dependencies.beginBatch(current));
+      onUpdate?.(current);
+    } catch (error) { fail(0, error); }
+    const refreshedBlocked = current.findIndex((target) => !aiReviewReadiness(target.preparedReview ?? target.review).allowed);
+    if (refreshedBlocked >= 0) fail(refreshedBlocked, new Error('Còn cờ bắt buộc cần xử lý trước khi xuất bản.'));
+  }
+
   for (let index = 0; index < current.length; index += 1) {
     if (!current[index].preparedReview) {
       update(index, { phase: 'preparing_files', error: undefined });
       try {
         const preparedReview = await dependencies.prepareResources(current[index], (uploadedResources) => update(index, { uploadedResources }));
-        update(index, { preparedReview, phase: 'prepared', error: undefined });
+        update(index, { review: preparedReview, targetKey: aiPublishTargetKey(preparedReview), preparedReview, phase: 'prepared', error: undefined });
       } catch (error) {
         fail(index, error);
       }

@@ -226,6 +226,18 @@ describe('AI template batch failure retention', () => {
   });
 });
 describe('AI template batch resume and request building', () => {
+  it('recovers completed jobs only from their persisted incomplete batch when local resume IDs are blank', () => {
+    const normal = resumableJob('normal', 'normal-job', 'completed');
+    const advanced = resumableJob('advanced', 'advanced-job', 'completed');
+    const targets = [normal, advanced].map((job) => ({ kind: job.templateKind, jobId: job.jobId,
+      templateId: job.result!.templateId, version: 2, settings: { passingScore: 85, maxAttemptsPerModule: 4, learningMode: 'free' as const } }));
+    const runs = selectResumableTemplateRuns({ jobs: [normal, advanced, resumableJob('normal', 'unrelated')], resumeJobIds: {}, userId: 'admin-1',
+      publicationBatches: [{ batchId: 'batch-1', createdBy: 'admin-1', createdAt: normal.createdAt, targets }] });
+    expect(runs.map((run) => [run.kind, run.job?.jobId, run.publicationTarget?.version, run.publicationBatchId])).toEqual([
+      ['normal', 'normal-job', 2, 'batch-1'], ['advanced', 'advanced-job', 2, 'batch-1'],
+    ]);
+    expect(runs[1].settings).toEqual(targets[1].settings);
+  });
   it('restores owned normal and advanced resume IDs in template order', () => {
     const normal = resumableJob('normal', 'normal-job', 'completed');
     const advanced = resumableJob('advanced', 'advanced-job');

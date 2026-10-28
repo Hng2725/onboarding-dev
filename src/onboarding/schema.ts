@@ -201,6 +201,13 @@ export const ONBOARDING_COLLECTIONS: readonly OnboardingCollectionDefinition[] =
   ], [
     index('template_content_unique', ['templateId', 'templateVersion'], true),
   ]),
+  collection('onboarding_ai_publications', [
+    field('batchId', 'string', true), field('createdBy', 'string', true), field('targets', 'json', true),
+    field('createdAt', 'datetime', true), field('updatedAt', 'datetime', true),
+  ], [
+    index('ai_publications_batch_unique', ['batchId'], true),
+    index('ai_publications_owner', ['createdBy', 'createdAt']),
+  ]),
   collection('onboarding_module_progress', [
     field('assignmentId', 'string', true), field('memberId', 'string', true),
     field('moduleId', 'string', true), field('openedAt', 'datetime'),

@@ -90,6 +90,28 @@ export interface TemplateContentSnapshot {
   readonly questionMeta: readonly QuestionMeta[];
 }
 
+export interface AiTemplateAssessmentSettings {
+  readonly passingScore: number;
+  readonly maxAttemptsPerModule: number | null;
+  readonly learningMode: 'sequential' | 'free';
+}
+
+export interface AiPublicationTarget {
+  readonly kind: EmployeeType;
+  readonly templateId: string;
+  readonly version: number;
+  readonly jobId?: string;
+  readonly materializedFingerprint?: string;
+  readonly settings?: AiTemplateAssessmentSettings;
+}
+
+export interface AiPublicationBatch {
+  readonly batchId: string;
+  readonly createdBy: string;
+  readonly createdAt: string;
+  readonly targets: readonly AiPublicationTarget[];
+}
+
 export interface RoleProfile {
   readonly department?: Department;
   readonly departmentLabel?: string;

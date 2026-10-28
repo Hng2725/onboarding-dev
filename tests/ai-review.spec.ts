@@ -12,6 +12,75 @@ import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template
 const admin: OnboardingActor = { userId: 'admin-1', roomId: 'room-a', access: 'admin' };
 
 describe('module publication gate', () => {
+  it('discovers persisted incomplete publication selections after service recreation and removes fully completed batches', async () => {
+    const { templates, review, draft, store } = await setup();
+    expect(typeof review.beginPublication).toBe('function');
+    const request = { targets: [{ kind: 'normal' as const, templateId: draft.id, version: draft.version,
+      settings: { passingScore: 80, maxAttemptsPerModule: 4, learningMode: 'free' as const } }] };
+    const batch = await review.beginPublication(admin, request);
+    const recreated = createAiReviewService(store, createTemplateService(store));
+    expect(await recreated.listIncompletePublications(admin)).toEqual([batch]);
+    expect((await recreated.beginPublication(admin, request)).batchId).toBe(batch.batchId);
+    expect(await recreated.listIncompletePublications({ ...admin, userId: 'other-admin' })).toEqual([]);
+    expect(await recreated.listIncompletePublications({ ...admin, roomId: 'other-room' })).toEqual([]);
+    const published = await templates.publish(admin, draft.id, batch.targets[0].version);
+    await recreated.updateReview(admin, { templateId: draft.id, version: published.version, expectedUpdatedAt: published.updatedAt,
+      ops: [{ kind: 'checkpoint_publication', jsonFileId: 'complete-json' }] });
+    expect(await recreated.listIncompletePublications(admin)).toEqual([]);
+  });
+  it('reuses settings revisions with refreshed approval fingerprints and leaves published v1 immutable', async () => {
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    const job = approvedModuleJob();
+    await store.create(admin.roomId, 'onboarding_ai_jobs', { ...job });
+    const templates = createTemplateService(store);
+    const reviews = createAiReviewService(store, templates);
+    const draft = await materializeModuleTemplate(store, templates, admin, job.jobId);
+    const published = await templates.publish(admin, draft.id, 1);
+    const request = { templateId: draft.id, version: 1, expectedUpdatedAt: published.updatedAt,
+      ops: [{ kind: 'set_settings' as const, passingScore: 85, maxAttemptsPerModule: 4, learningMode: 'free' as const }] };
+    const revision = await reviews.updateReview(admin, request);
+    expect(revision.version).toBe(2);
+    await expect(templates.publish(admin, revision.id, revision.version)).resolves.toMatchObject({ status: 'published', passingScore: 85 });
+    expect((await reviews.updateReview(admin, request)).version).toBe(2);
+    expect((await materializeModuleTemplate(store, templates, admin, job.jobId)).version).toBe(2);
+    expect(await templates.getAdminDetail(admin, draft.id, 1)).toEqual(published);
+    expect(await store.count(admin.roomId, 'onboarding_templates')).toBe(2);
+  });
+
+  it('does not create a revision when published settings are unchanged', async () => {
+    const { templates, review, draft, store } = await setup();
+    const published = await templates.publish(admin, draft.id, 1);
+    const result = await review.updateReview(admin, { templateId: draft.id, version: 1, expectedUpdatedAt: published.updatedAt,
+      ops: [{ kind: 'set_settings', passingScore: published.passingScore, learningMode: published.content!.learningMode, maxAttemptsPerModule: published.content!.maxAttemptsPerModule }] });
+    expect(result).toEqual(published);
+    expect(await store.count(admin.roomId, 'onboarding_templates')).toBe(1);
+  });
+
+  it.each(['draft', 'published'] as const)('invalidates changed legacy lesson artifacts on a %s while retaining unaffected PDFs', async (status) => {
+    const { templates, review, draft } = await setup();
+    let current = draft;
+    for (const module of draft.modules) {
+      const resource: TemplateResource = { id: 'ai-lesson-pdf-' + module.id, title: module.title, kind: 'file', required: true, fileId: 'pdf-' + module.id };
+      current = await review.updateReview(admin, { templateId: current.id, version: current.version, expectedUpdatedAt: current.updatedAt,
+        ops: [{ kind: 'checkpoint_publication', moduleId: module.id, resource }] });
+      current = await review.updateReview(admin, { templateId: current.id, version: current.version, expectedUpdatedAt: current.updatedAt,
+        ops: [{ kind: 'upsert_generated_resource', moduleId: module.id, resource }] });
+    }
+    if (status === 'published') {
+      current = await templates.publish(admin, current.id, 1);
+      current = await review.updateReview(admin, { templateId: current.id, version: 1, expectedUpdatedAt: current.updatedAt,
+        ops: [{ kind: 'checkpoint_publication', jsonFileId: 'v1-json' }] });
+    }
+    const before = current;
+    const changed = await review.updateReview(admin, { templateId: current.id, version: current.version, expectedUpdatedAt: current.updatedAt,
+      ops: [{ kind: 'update_block', moduleId: current.modules[0].id, blockId: current.content!.modules[0].blocks[0].id, body: 'Updated lesson text' }] });
+    expect(changed.content?.publication?.jsonFileId).toBeUndefined();
+    expect(changed.content?.publication?.pdfs[changed.modules[0].id]).toBeUndefined();
+    expect(changed.modules[0].resources.filter((resource) => resource.id.startsWith('ai-lesson-pdf-'))).toEqual([]);
+    expect(changed.content?.publication?.pdfs[changed.modules[1].id]?.fileId).toBe('pdf-' + before.modules[1].id);
+    if (status === 'published') expect(await templates.getAdminDetail(admin, before.id, 1)).toEqual(before);
+  });
   it('does not let callers bypass blocking flags by omitting the optional legacy publish guard', async () => {
     const store = new MemoryOnboardingStore();
     await seedAiSource(store);

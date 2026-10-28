@@ -13,6 +13,7 @@ import { usePrivosApp, usePrivosContext, type McpApp } from '@privos_ai/app-reac
 import type {
   AiCallRecord,
   AiJobRecord,
+  AiPublicationBatch,
   AiProvider,
   EmployeeType,
   TemplateResource,
@@ -44,6 +45,7 @@ import {
   AiPublishBatchError,
   aiPublishTargetKey,
   publishAiTemplateBatch,
+  restoreAiPublishTarget,
   type AiPublishBatchDependencies,
   type AiPublishTarget,
 } from './ai-publish-batch';
@@ -547,18 +549,36 @@ export function createAiPublishDependencies(
   });
 
   return {
+    async beginBatch(targets) {
+      const { batch } = await input.api.adminAi<{ batch: AiPublicationBatch }>('begin_publication', {
+        batchId: targets[0]?.batchId,
+        targets: targets.map((target) => ({ kind: target.kind, templateId: target.review.id, version: target.review.version,
+          settings: input.settingsByKind?.[target.kind] })),
+      });
+      return Promise.all(batch.targets.map(async (target) => {
+        const { review } = await input.api.adminAi<{ review: AdminTemplateDetail }>('get_review', {
+          templateId: target.templateId, version: target.version,
+        });
+        return restoreAiPublishTarget(review, batch.batchId);
+      }));
+    },
     async prepareResources(target, checkpoint) {
       let review = (await input.api.adminAi<{ review: AdminTemplateDetail }>('get_review', { templateId: target.review.id, version: target.review.version })).review;
       if (aiPublishTargetKey(review) !== aiPublishTargetKey(target.review)) throw new Error('Template đã thay đổi. Hãy kiểm tra bản nháp mới.');
-      if (review.status === 'published') return review;
       const settings = input.settingsByKind?.[target.kind];
-      if (settings && review.content?.moduleApproval) {
+      if (settings && (settings.passingScore !== review.passingScore
+        || settings.learningMode !== review.content?.learningMode
+        || settings.maxAttemptsPerModule !== review.content?.maxAttemptsPerModule)) {
         review = (await input.api.adminAi<{ review: AdminTemplateDetail }>('update_review', {
           templateId: review.id, version: review.version, expectedUpdatedAt: review.updatedAt,
           ops: [{ kind: 'set_settings', ...settings }],
         })).review;
       }
-      const uploadedResources: Record<string, TemplateResource> = { ...(target.uploadedResources ?? {}), ...(review.content?.publication?.pdfs ?? {}) };
+      if (review.status === 'published') return review;
+      const uploadedResources: Record<string, TemplateResource> = {
+        ...(aiPublishTargetKey(review) === aiPublishTargetKey(target.review) ? target.uploadedResources : {}),
+        ...(review.content?.publication?.pdfs ?? {}),
+      };
       report(review, 'preparing_folder');
       let folder: Awaited<ReturnType<typeof ensureFolder>>;
       try {
@@ -626,12 +646,6 @@ export function createAiPublishDependencies(
       }
 
       const operations: AiReviewOperation[] = [
-        ...(settings && !review.content?.moduleApproval ? [{
-          kind: 'set_settings' as const,
-          passingScore: settings.passingScore,
-          maxAttemptsPerModule: settings.maxAttemptsPerModule,
-          learningMode: settings.learningMode,
-        }] : []),
         ...resourceOperations,
       ];
       report(review, 'updating_review');
@@ -702,7 +716,10 @@ export function finishSuccessfulAiPublish(
     readonly onClose: () => void;
   },
 ): boolean {
-  if (targets.length === 0 || targets.some((target) => target.phase !== 'completed' || !target.preparedReview || target.publishedTemplate?.status !== 'published' || !target.jsonExported)) return false;
+  if (targets.length === 0 || targets.some((target) => target.phase !== 'completed' || !target.preparedReview
+    || target.publishedTemplate?.status !== 'published' || !target.jsonExported
+    || aiPublishTargetKey(target.review) !== aiPublishTargetKey(target.preparedReview)
+    || aiPublishTargetKey(target.review) !== aiPublishTargetKey(target.publishedTemplate))) return false;
   callbacks.clearResume();
   callbacks.onComplete();
   callbacks.onClose();
@@ -889,7 +906,7 @@ export function AiGeneratorPage({
   const review = activeReviewRun?.review ?? null;
   const activeSettings: AiTemplateSettings = activeReviewRun?.settings ?? {
     passingScore: review?.passingScore ?? 70,
-    maxAttemptsPerModule: review?.content?.maxAttemptsPerModule ?? 2,
+    maxAttemptsPerModule: review?.content?.maxAttemptsPerModule === undefined ? 2 : review.content.maxAttemptsPerModule,
     learningMode: review?.content?.learningMode ?? 'sequential',
   };
   const { passingScore, maxAttemptsPerModule, learningMode } = activeSettings;
@@ -912,7 +929,7 @@ export function AiGeneratorPage({
       const existing = current.find((run) => run.kind === kind);
       const settings = existing?.settings ?? {
         passingScore: nextReview.passingScore ?? 70,
-        maxAttemptsPerModule: nextReview.content?.maxAttemptsPerModule ?? 2,
+        maxAttemptsPerModule: nextReview.content?.maxAttemptsPerModule === undefined ? 2 : nextReview.content.maxAttemptsPerModule,
         learningMode: nextReview.content?.learningMode ?? 'sequential',
       };
       const next = existing
@@ -931,7 +948,7 @@ export function AiGeneratorPage({
             passingScore: run.settings?.passingScore ?? run.review?.passingScore ?? 70,
             maxAttemptsPerModule: run.settings
               ? run.settings.maxAttemptsPerModule
-              : run.review?.content?.maxAttemptsPerModule ?? 2,
+              : run.review?.content?.maxAttemptsPerModule === undefined ? 2 : run.review.content.maxAttemptsPerModule,
             learningMode: run.settings?.learningMode ?? run.review?.content?.learningMode ?? 'sequential',
             ...patch,
           },
@@ -1016,7 +1033,7 @@ export function AiGeneratorPage({
           setTemplateSelection(loaded.employeeType);
           return;
         }
-        const result = await api.adminAi<{ jobs: readonly AiJobRecord[] }>('list_jobs');
+        const result = await api.adminAi<{ jobs: readonly AiJobRecord[]; publicationBatches?: readonly AiPublicationBatch[] }>('list_jobs');
         if (!active) return;
         setRoomJobs(result.jobs);
         const inventoryId = roomId ? readAiResumeKey('onboarding:ai:inventory:' + roomId) : null;
@@ -1033,6 +1050,7 @@ export function AiGeneratorPage({
         });
         let restoredRuns = selectResumableTemplateRuns({
           jobs: result.jobs,
+          publicationBatches: result.publicationBatches,
           resumeJobIds,
           legacyTemplateJobId: legacyTemplateId,
           userId,
@@ -1057,9 +1075,9 @@ export function AiGeneratorPage({
             if (legacyTemplateId) clearAiResumeKeys(['onboarding:ai:template:' + roomId]);
           }
           for (const run of restoredRuns) {
-            const output = run.job?.status === 'completed' && run.job.result && typeof run.job.result === 'object'
+            const output = run.publicationTarget ?? (run.job?.status === 'completed' && run.job.result && typeof run.job.result === 'object'
               ? run.job.result as { templateId?: unknown; version?: unknown }
-              : undefined;
+              : undefined);
             if (output && typeof output.templateId === 'string' && typeof output.version === 'number') {
               const loaded = await loadReview(output.templateId, output.version, false);
               restoredRuns = restoredRuns.map((entry) => entry.kind === run.kind ? { ...entry, review: loaded } : entry);
@@ -1069,17 +1087,8 @@ export function AiGeneratorPage({
           const firstReview = restoredRuns.findIndex((run) => run.review);
           if (firstReview >= 0) { setActiveReviewIndex(firstReview); setStep(3); }
           else setStep(2);
-          if (restoredRuns.every((run) => run.review) && restoredRuns.some((run) => run.review?.content?.publication || run.review?.status === 'published')) {
-            let saved: readonly AiPublishTarget[] = [];
-            try { saved = JSON.parse(readAiResumeKey('onboarding:ai:publish:' + roomId + ':' + userId) ?? '[]'); } catch { /* Recover from server checkpoints below. */ }
-            const targets = restoredRuns.map((run): AiPublishTarget => {
-              const review = run.review!;
-              const previous = Array.isArray(saved) ? saved.find((target) => target.review && aiPublishTargetKey(target.review) === aiPublishTargetKey(review)) : undefined;
-              const published = review.status === 'published';
-              return { kind: run.kind, review, targetKey: aiPublishTargetKey(review), uploadedResources: { ...previous?.uploadedResources, ...review.content?.publication?.pdfs },
-                ...(published ? { preparedReview: review, publishedTemplate: review } : {}),
-                jsonExported: Boolean(published && review.content?.publication?.jsonFileId), phase: published && review.content?.publication?.jsonFileId ? 'completed' : 'idle' };
-            });
+          if (restoredRuns.every((run) => run.review) && restoredRuns.some((run) => run.publicationBatchId || run.review?.content?.publication || run.review?.status === 'published')) {
+            const targets = restoredRuns.map((run) => restoreAiPublishTarget(run.review!, run.publicationBatchId));
             checkpointTargets(targets); setStep(4);
           }
         } else if (inventory?.status === 'completed') setStep(2);
@@ -1349,7 +1358,7 @@ export function AiGeneratorPage({
             review: currentReview,
             settings: current.settings ?? {
               passingScore: currentReview.passingScore ?? 70,
-              maxAttemptsPerModule: currentReview.content?.maxAttemptsPerModule ?? 2,
+              maxAttemptsPerModule: currentReview.content?.maxAttemptsPerModule === undefined ? 2 : currentReview.content.maxAttemptsPerModule,
               learningMode: currentReview.content?.learningMode ?? 'sequential',
             },
           };
@@ -1497,7 +1506,7 @@ export function AiGeneratorPage({
         run.kind,
         run.settings ?? {
           passingScore: run.review.passingScore ?? 70,
-          maxAttemptsPerModule: run.review.content?.maxAttemptsPerModule ?? 2,
+          maxAttemptsPerModule: run.review.content?.maxAttemptsPerModule === undefined ? 2 : run.review.content.maxAttemptsPerModule,
           learningMode: run.review.content?.learningMode ?? 'sequential',
         },
       ])) as Partial<Record<EmployeeType, AiTemplateSettings>>;
@@ -1770,7 +1779,7 @@ export function AiGeneratorPage({
                 const publishTarget = publishTargets.find((target) => target.kind === run.kind);
                 const settings = run.settings ?? {
                   passingScore: run.review.passingScore ?? 70,
-                  maxAttemptsPerModule: run.review.content?.maxAttemptsPerModule ?? 2,
+                  maxAttemptsPerModule: run.review.content?.maxAttemptsPerModule === undefined ? 2 : run.review.content.maxAttemptsPerModule,
                   learningMode: run.review.content?.learningMode ?? 'sequential',
                 };
                 const questionCount = run.review.modules.reduce(

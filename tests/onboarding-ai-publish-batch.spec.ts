@@ -49,6 +49,35 @@ function dependencies(log: string[]): AiPublishBatchDependencies {
 }
 
 describe('AI template batch publishing', () => {
+  it('rechecks refreshed server targets before beginning artifact work', async () => {
+    const log: string[] = [];
+    const deps = dependencies(log);
+    deps.beginBatch = async (selected) => selected.map((target) => target.kind !== 'advanced' ? target : {
+      ...target, review: { ...target.review, flags: [{ id: 'new-block', type: 'missing', severity: 'blocking', status: 'open',
+        message: 'Changed', questionForAdmin: 'Confirm?', location: {}, evidence: [] }] },
+    });
+    await expect(publishAiTemplateBatch(targets(), deps)).rejects.toBeInstanceOf(AiPublishBatchError);
+    expect(log).toEqual([]);
+  });
+  it('discards completion from a different review version before publishing a revision', async () => {
+    const oldReview = { ...review('normal'), status: 'published' as const };
+    const changedReview = { ...review('normal'), version: 2 };
+    const log: string[] = [];
+    const result = await publishAiTemplateBatch([{ kind: 'normal', review: changedReview,
+      preparedReview: oldReview, publishedTemplate: oldReview, jsonExported: true, phase: 'completed' }], dependencies(log));
+    expect(log).toEqual(['prepare:normal', 'publish:normal:normal-prepared', 'export:normal:published:normal-published']);
+    expect(result[0].publishedTemplate?.version).toBe(2);
+  });
+
+  it('discards completion from changed legacy lesson content in the same draft version', async () => {
+    const oldReview = review('normal');
+    const changedReview = { ...oldReview, modules: [{ id: 'm1', key: 'core', title: 'New lesson', description: '', order: 1, resources: [], questions: [] }] };
+    const log: string[] = [];
+    await publishAiTemplateBatch([{ kind: 'normal', review: changedReview,
+      preparedReview: oldReview, publishedTemplate: { ...oldReview, status: 'published' }, jsonExported: true, phase: 'completed' }], dependencies(log));
+    expect(log[0]).toBe('prepare:normal');
+    expect(log).toHaveLength(3);
+  });
   it('checks every target before side effects and rejects the whole batch if one is blocked', async () => {
     const log: string[] = [];
     const deps = dependencies(log);

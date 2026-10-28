@@ -49,8 +49,8 @@ import { materializeModuleTemplate } from '../src/onboarding/ai/materialize';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { approvedModuleJob } from './helpers/approved-module-fixture';
 import { seedAiSource } from './helpers/ai-template-fixture';
-import { AiPublishBatchError, publishAiTemplateBatch, type AiPublishTarget } from '../src/ui/onboarding/ai/ai-publish-batch';
-import type { UpdateAiReviewInput } from '../src/onboarding/ai/review';
+import { AiPublishBatchError, publishAiTemplateBatch, restoreAiPublishTarget, type AiPublishTarget } from '../src/ui/onboarding/ai/ai-publish-batch';
+import type { AiReviewService, UpdateAiReviewInput } from '../src/onboarding/ai/review';
 
 const blockingFlag: VerificationFlag = {
   id: 'flag-1',
@@ -86,12 +86,27 @@ const publishReview: AdminTemplateDetail = {
   updatedAt: 'draft-at',
 };
 describe('Admin AI template UI model', () => {
+  it('applies changed settings to a published review before deciding to reuse it', async () => {
+    const published: AdminTemplateDetail = { ...publishReview, status: 'published', passingScore: 70 };
+    const revision: AdminTemplateDetail = { ...published, status: 'draft', version: 2, passingScore: 85 };
+    const api = { adminAi: vi.fn(async (action: string) => ({ review: action === 'get_review' ? published : revision })), adminTemplates: vi.fn() };
+    const dependencies = createAiPublishDependencies({ roomId: 'room-1', api: api as never,
+      app: { uploadFile: vi.fn(async () => ({ fileId: 'pdf' })) } as never,
+      settingsByKind: { normal: { passingScore: 85, maxAttemptsPerModule: 4, learningMode: 'free' } },
+      ensureTemplateFolder: async () => ({ rootId: 'root', documentsId: 'documents', templatesId: 'templates', templateFolderId: 'folder' }),
+      createLessonPdf: async () => ({ fileName: 'lesson.pdf', mimeType: 'application/pdf', blob: new Blob(['pdf']) }),
+      encodeBlob: async () => ({ dataUrl: 'data:application/pdf;base64,YQ==', base64: 'YQ==' }),
+    });
+    const prepared = await dependencies.prepareResources({ kind: 'normal', review: published, jsonExported: true, phase: 'completed' });
+    expect(prepared).toMatchObject({ version: 2, status: 'draft', passingScore: 85 });
+    expect(api.adminAi).toHaveBeenCalledWith('update_review', expect.objectContaining({ ops: [{ kind: 'set_settings', passingScore: 85, maxAttemptsPerModule: 4, learningMode: 'free' }] }));
+  });
   it('resumes Both from server checkpoints after a second-template PDF failure without duplicate artifacts', async () => {
     const actor = { roomId: 'room-a', userId: 'admin-1', access: 'admin' as const };
     const store = new MemoryOnboardingStore();
     await seedAiSource(store);
     const templates = createTemplateService(store);
-    const reviews = createAiReviewService(store, templates);
+    let reviews = createAiReviewService(store, templates);
     const targets: AiPublishTarget[] = [];
     for (const kind of ['normal', 'advanced'] as const) {
       const job = approvedModuleJob(kind);
@@ -109,9 +124,10 @@ describe('Admin AI template UI model', () => {
         uploaded.push(file.fileName); return { fileId: file.fileName };
       } } as never,
       api: {
-        adminAi: async (action: string, args: Record<string, unknown>) => ({ review: action === 'get_review'
-          ? await reviews.getReview(actor, String(args.templateId), Number(args.version))
-          : await reviews.updateReview(actor, args as unknown as UpdateAiReviewInput) }),
+        adminAi: async (action: string, args: Record<string, unknown>) => action === 'begin_publication'
+          ? { batch: await reviews.beginPublication(actor, args as unknown as Parameters<AiReviewService['beginPublication']>[1]) }
+          : { review: action === 'get_review' ? await reviews.getReview(actor, String(args.templateId), Number(args.version))
+            : await reviews.updateReview(actor, args as unknown as UpdateAiReviewInput) },
         adminTemplates: async (_action: string, args: Record<string, unknown>) => ({ template: await templates.publish(actor, String(args.templateId), Number(args.version), String(args.expectedUpdatedAt)) }),
       } as never,
       ensureTemplateFolder: async () => ({ rootId: 'root', documentsId: 'documents', templatesId: 'templates', templateFolderId: 'folder' }),
@@ -121,15 +137,23 @@ describe('Admin AI template UI model', () => {
     await expect(publishAiTemplateBatch(targets, makeDependencies())).rejects.toBeInstanceOf(AiPublishBatchError);
     expect((await templates.getAdminDetail(actor, targets[0].review.id, 1)).status).toBe('published');
     expect((await templates.getAdminDetail(actor, targets[1].review.id, 1)).passingScore).toBe(85);
-    // Simulate a fresh modal with no in-memory or browser checkpoint state.
+    // Recreate the service and discover the entire selection without the original targets array.
     fail = false;
-    const completed = await publishAiTemplateBatch(targets, makeDependencies(false));
+    reviews = createAiReviewService(store, createTemplateService(store));
+    const batches = await reviews.listIncompletePublications(actor);
+    expect(batches).toHaveLength(1);
+    expect(batches[0].targets.map((target) => target.kind)).toEqual(['normal', 'advanced']);
+    const recovered = await Promise.all(batches[0].targets.map(async (target) => restoreAiPublishTarget(
+      await reviews.getReview(actor, target.templateId, target.version), batches[0].batchId)));
+    targets.length = 0;
+    const completed = await publishAiTemplateBatch(recovered, makeDependencies(false));
     expect(completed.every((target) => target.phase === 'completed')).toBe(true);
     expect(uploaded).toHaveLength(11); // 4 + 5 PDFs and two JSON files.
     expect(new Set(uploaded).size).toBe(11);
     expect(await store.count(actor.roomId, 'onboarding_templates')).toBe(2);
     expect(await store.count(actor.roomId, 'onboarding_resources')).toBe(9);
-    expect((await templates.getAdminDetail(actor, targets[1].review.id, 1)).roleProfile).toEqual({ responsibilities: ['Process orders', 'Review orders'] });
+    expect((await templates.getAdminDetail(actor, recovered[1].review.id, 1)).roleProfile).toEqual({ responsibilities: ['Process orders', 'Review orders'] });
+    expect(await reviews.listIncompletePublications(actor)).toEqual([]);
   });
   it('derives an upload system name from the selected file when the field is blank', () => {
     expect(resolveUploadSystemName('', 'employee-handbook.docx')).toBe('employee handbook');
@@ -510,7 +534,7 @@ describe('Admin AI template UI model', () => {
     const calls: string[] = [];
     const complete = [
       { kind: 'normal' as const, review: publishReview, preparedReview: publishReview, publishedTemplate: { ...publishReview, status: 'published' as const }, jsonExported: true, phase: 'completed' as const },
-      { kind: 'advanced' as const, review: { ...publishReview, employeeType: 'advanced' as const }, preparedReview: publishReview, publishedTemplate: { ...publishReview, status: 'published' as const }, jsonExported: true, phase: 'completed' as const },
+      { kind: 'advanced' as const, review: { ...publishReview, employeeType: 'advanced' as const }, preparedReview: { ...publishReview, employeeType: 'advanced' as const }, publishedTemplate: { ...publishReview, employeeType: 'advanced' as const, status: 'published' as const }, jsonExported: true, phase: 'completed' as const },
     ];
     const callbacks = {
       clearResume: () => calls.push('clear'),
@@ -525,6 +549,7 @@ describe('Admin AI template UI model', () => {
     expect(calls).toEqual([]);
     expect(finishSuccessfulAiPublish(complete.map((target) => ({ ...target, jsonExported: false })), callbacks)).toBe(false);
     expect(finishSuccessfulAiPublish(complete.map((target) => ({ ...target, publishedTemplate: undefined })), callbacks)).toBe(false);
+    expect(finishSuccessfulAiPublish(complete.map((target) => ({ ...target, review: { ...target.review, version: 2 } })), callbacks)).toBe(false);
 
     expect(finishSuccessfulAiPublish(complete, callbacks)).toBe(true);
     expect(calls).toEqual(['clear', 'refresh', 'close']);

@@ -4,10 +4,17 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { AiJobRecord } from '../src/onboarding/contracts';
 import type { AdminTemplateDetail } from '../src/onboarding/templates';
+import { createTemplateService } from '../src/onboarding/templates';
+import { createAiReviewService, type AiReviewService, type UpdateAiReviewInput } from '../src/onboarding/ai/review';
+import { materializeModuleTemplate } from '../src/onboarding/ai/materialize';
+import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
+import { approvedModuleJob } from './helpers/approved-module-fixture';
+import { aiSource } from './helpers/ai-template-fixture';
+import { AiPublishBatchError, publishAiTemplateBatch, type AiPublishTarget } from '../src/ui/onboarding/ai/ai-publish-batch';
 
 const host = vi.hoisted(() => ({
   appRevision: 0,
-  apps: [{ revision: 0, rest: vi.fn() }, { revision: 1, rest: vi.fn() }],
+  apps: [{ revision: 0, rest: vi.fn(), uploadFile: vi.fn() }, { revision: 1, rest: vi.fn(), uploadFile: vi.fn() }],
   context: {
     userId: 'admin-1',
     username: 'admin',
@@ -28,7 +35,17 @@ vi.mock('@privos_ai/app-react', () => ({
   usePrivosContext: () => host.context,
 }));
 
-import { AiGeneratorPage } from '../src/ui/onboarding/ai/ai-generator';
+vi.mock('../src/ui/onboarding/ai/lesson-pdf', () => ({
+  createLessonPdfArtifact: async (review: AdminTemplateDetail, _id: string, index: number) => ({
+    fileName: `${review.employeeType}-${index}.pdf`, mimeType: 'application/pdf', blob: new Blob(['pdf'], { type: 'application/pdf' }),
+  }),
+}));
+vi.mock('../src/ui/onboarding/roomfiles', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/ui/onboarding/roomfiles')>(),
+  ensureTemplateRoomfilesFolder: async () => ({ rootId: 'root', documentsId: 'documents', templatesId: 'templates', templateFolderId: 'folder' }),
+}));
+
+import { AiGeneratorPage, createAiPublishDependencies } from '../src/ui/onboarding/ai/ai-generator';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -83,15 +100,100 @@ const failedTemplateJob: AiJobRecord = {
 };
 
 describe('AI generator lifecycle', () => {
+  it('recreates the modal and services with blank session storage and resumes a Template 2 upload failure', async () => {
+    host.appRevision = 0;
+    const actor = { roomId: 'room-1', userId: 'admin-1', access: 'admin' as const };
+    const store = new MemoryOnboardingStore();
+    await store.create(actor.roomId, 'onboarding_sources', { ...aiSource });
+    let templates = createTemplateService(store);
+    let reviews = createAiReviewService(store, templates);
+    const targets: AiPublishTarget[] = [];
+    for (const kind of ['normal', 'advanced'] as const) {
+      const job = approvedModuleJob(kind);
+      const row = await store.create(actor.roomId, 'onboarding_ai_jobs', { ...job });
+      const review = await materializeModuleTemplate(store, templates, actor, job.jobId);
+      await store.update(actor.roomId, 'onboarding_ai_jobs', String(row.id), { result: { templateId: review.id, version: review.version } });
+      targets.push({ kind, review, phase: 'idle', jsonExported: false });
+    }
+    const uploads: string[] = [];
+    let failUpload = true;
+    host.apps[0].uploadFile.mockImplementation(async (file: { fileName: string }) => {
+      if (file.fileName === 'advanced-1.pdf' && failUpload) throw new Error('Upload interrupted');
+      uploads.push(file.fileName);
+      return { fileId: file.fileName };
+    });
+    const api = {
+      adminAi: vi.fn(async (action: string, args: Record<string, unknown> = {}) => {
+        if (action === 'list_sources') return { sources: [] };
+        if (action === 'list_jobs') return { jobs: (await store.query(actor.roomId, 'onboarding_ai_jobs')).records,
+          publicationBatches: await reviews.listIncompletePublications(actor) };
+        if (action === 'begin_publication') return { batch: await reviews.beginPublication(actor, args as unknown as Parameters<AiReviewService['beginPublication']>[1]) };
+        if (action === 'get_review') return { review: await reviews.getReview(actor, String(args.templateId), Number(args.version)) };
+        if (action === 'update_review') return { review: await reviews.updateReview(actor, args as unknown as UpdateAiReviewInput) };
+        throw new Error('Unexpected action: ' + action);
+      }),
+      adminTemplates: vi.fn(async (_action: string, args: Record<string, unknown>) => ({
+        template: await templates.publish(actor, String(args.templateId), Number(args.version), String(args.expectedUpdatedAt)),
+      })),
+    };
+    const dependencies = createAiPublishDependencies({ roomId: actor.roomId, app: host.apps[0] as never, api: api as never,
+      encodeBlob: async () => ({ dataUrl: 'data:application/pdf;base64,YQ==', base64: 'YQ==' }) });
+    await expect(publishAiTemplateBatch(targets, dependencies)).rejects.toBeInstanceOf(AiPublishBatchError);
+    expect(uploads).toHaveLength(6); // Template 1: 4 PDFs + JSON; Template 2: 1 PDF.
+    targets.length = 0;
+    templates = createTemplateService(store);
+    reviews = createAiReviewService(store, templates);
+    const storage = new Map<string, string>();
+    vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    vi.stubGlobal('FileReader', class {
+      result = 'data:application/pdf;base64,YQ==';
+      onload: (() => void) | null = null;
+      readAsDataURL() { this.onload?.(); }
+    });
+    const closed = vi.fn();
+    const completed = vi.fn();
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, {
+      api: api as never, canGenerateWithAi: true, onClose: closed, onComplete: completed,
+    })); });
+    expect(closed).not.toHaveBeenCalled();
+    expect(JSON.stringify(view.toJSON())).toContain('Đã hoàn tất');
+    expect(uploads).toHaveLength(6);
+    failUpload = false;
+    const publish = view.root.findAllByType('button').find((button) => button.children.join('').includes('Xuất bản cả hai'))!;
+    expect(publish.props.disabled).toBe(false);
+    await act(async () => { publish.props.onClick(); });
+    expect(closed).toHaveBeenCalledTimes(1);
+    expect(completed).toHaveBeenCalledTimes(1);
+    expect(uploads).toHaveLength(11);
+    expect(new Set(uploads).size).toBe(11);
+    expect(await store.count(actor.roomId, 'onboarding_templates')).toBe(2);
+    expect(await store.count(actor.roomId, 'onboarding_resources')).toBe(9);
+    expect(await reviews.listIncompletePublications(actor)).toEqual([]);
+    view.unmount();
+    vi.unstubAllGlobals();
+    host.apps[0].uploadFile.mockReset();
+  });
+  it('preserves unlimited attempts when opening published settings without edits', async () => {
+    const review: AdminTemplateDetail = { id: 'published', version: 1, source: 'ai_generated', status: 'published', employeeType: 'normal',
+      title: 'Published', description: '', modules: [], locked: false, maxAttempts: 2, updatedAt: 'now', flags: [],
+      content: { assessmentMode: 'per_module', learningMode: 'free', maxAttemptsPerModule: null, modules: [], questionMeta: [] } };
+    const api = { adminAi: vi.fn(async (action: string) => action === 'list_sources' ? { sources: [] } : { review }) };
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, initialTemplate: { id: review.id, version: 1 }, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+    expect(view.root.findAllByType('input').find((input) => input.props.max === 10)?.props.value).toBe('');
+    view.unmount();
+  });
   it('reopens a partial publication at the batch summary using durable server checkpoints', async () => {
-    const storage = new Map([['onboarding:ai:template:room-1:normal', 'normal-job'], ['onboarding:ai:template:room-1:advanced', 'advanced-job'], ['onboarding:ai:selection:room-1', 'both']]);
+    const storage = new Map<string, string>();
     vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
     const reviews = (['normal', 'advanced'] as const).map((kind): AdminTemplateDetail => ({ id: kind + '-draft', version: 1, employeeType: kind, title: kind, description: '', source: 'ai_generated', status: kind === 'normal' ? 'published' : 'draft', locked: false, maxAttempts: 2, modules: [], flags: [], updatedAt: 'now', content: { assessmentMode: 'per_module', learningMode: 'sequential', maxAttemptsPerModule: 2, modules: [], questionMeta: [], publication: { pdfs: {}, ...(kind === 'normal' ? { jsonFileId: 'normal-json' } : {}) } } }));
     const jobs = reviews.map((review) => ({ ...failedTemplateJob, jobId: review.employeeType + '-job', templateKind: review.employeeType, pipelineVersion: 'module_v2', status: 'completed', result: { templateId: review.id, version: 1 } }));
     const closed = vi.fn();
     const api = { adminAi: vi.fn(async (action: string, args?: Record<string, unknown>) => {
       if (action === 'list_sources') return { sources: [] };
-      if (action === 'list_jobs') return { jobs };
+      if (action === 'list_jobs') return { jobs, publicationBatches: [{ batchId: 'persisted-both', createdBy: 'admin-1', createdAt: '2026-10-28T09:00:00.000Z',
+        targets: jobs.map((job) => ({ kind: job.templateKind, jobId: job.jobId, templateId: job.result.templateId, version: 1 })) }] };
       if (action === 'get_review') return { review: reviews.find((review) => review.id === args?.templateId) };
       throw new Error('Unexpected action: ' + action);
     }) };

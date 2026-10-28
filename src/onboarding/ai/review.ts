@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 
 import type { OnboardingActor } from '../auth';
 import type {
+  AiPublicationBatch,
+  AiPublicationTarget,
   QuestionOption,
   SourceRef,
   TemplateContentSnapshot,
@@ -17,7 +19,7 @@ import {
 } from '../templates';
 import { normalizeForMatch } from './grounding';
 import { createSourceService } from './sources';
-import { assertModuleTemplateCurrent } from './materialize';
+import { assertModuleTemplateCurrent, materializedModuleFingerprint } from './materialize';
 
 export type AiReviewServiceErrorCode =
   | 'ADMIN_REQUIRED'
@@ -90,6 +92,8 @@ export interface ResolveAiFlagInput {
 }
 
 export interface AiReviewService {
+  beginPublication(actor: OnboardingActor, input: { readonly batchId?: string; readonly targets: readonly AiPublicationTarget[] }): Promise<AiPublicationBatch>;
+  listIncompletePublications(actor: OnboardingActor): Promise<readonly AiPublicationBatch[]>;
   getReview(actor: OnboardingActor, templateId: string, version: number): Promise<AdminTemplateDetail>;
   updateReview(actor: OnboardingActor, input: UpdateAiReviewInput): Promise<AdminTemplateDetail>;
   resolveFlag(actor: OnboardingActor, input: ResolveAiFlagInput): Promise<AdminTemplateDetail>;
@@ -106,6 +110,20 @@ interface TemplateContentDbRecord extends StoreRecord {
   readonly content: TemplateContentSnapshot;
   readonly flags: readonly VerificationFlag[];
   readonly updatedAt: string;
+}
+
+interface PublicationDbRecord extends StoreRecord, AiPublicationBatch {
+  readonly id: string;
+  readonly updatedAt: string;
+}
+
+function publicationBatch(row: PublicationDbRecord): AiPublicationBatch {
+  return { batchId: row.batchId, createdBy: row.createdBy, createdAt: row.createdAt, targets: row.targets };
+}
+
+function publicationSettings(detail: AdminTemplateDetail) {
+  return { passingScore: detail.passingScore ?? 70, learningMode: detail.content?.learningMode ?? 'sequential',
+    maxAttemptsPerModule: detail.content?.maxAttemptsPerModule === undefined ? 2 : detail.content.maxAttemptsPerModule };
 }
 
 interface SourceDbRecord extends StoreRecord {
@@ -322,10 +340,17 @@ function remapRevision(
       option.id,
       revisionId('ai-opt', templateId, version, question.id + ':' + option.id),
     ] as const)));
+  const remapResource = (moduleId: string, resource: TemplateResource): TemplateResource => ({
+    ...resource,
+    id: resource.id === 'ai-lesson-pdf-' + moduleId
+      ? 'ai-lesson-pdf-' + moduleIds.get(moduleId)
+      : resource.id,
+  });
   return {
     modules: modules.map((module) => ({
       ...module,
       id: moduleIds.get(module.id) ?? module.id,
+      resources: module.resources.map((resource) => remapResource(module.id, resource)),
       questions: module.questions.map((question) => ({
         ...question,
         id: questionIds.get(question.id) ?? question.id,
@@ -338,6 +363,10 @@ function remapRevision(
     })),
     content: {
       ...content,
+      ...(content.publication ? { publication: { pdfs: Object.fromEntries(
+        Object.entries(content.publication.pdfs).filter(([id]) => moduleIds.has(id))
+          .map(([id, resource]) => [moduleIds.get(id)!, remapResource(id, resource)]),
+      ) } } : {}),
       modules: content.modules.map((module) => ({
         ...module,
         moduleId: moduleIds.get(module.moduleId) ?? module.moduleId,
@@ -697,15 +726,40 @@ export function createAiReviewService(
     content: TemplateContentSnapshot,
     flags: readonly VerificationFlag[],
     passingScore = detail.passingScore,
+    reuseSettingsRevision = false,
   ): Promise<AdminTemplateDetail> {
     let nextModules = modules;
     let nextContent = pendingContent(content, flags);
     let nextFlags = flags;
+    // An attachment is reusable only while the lesson it renders remains unchanged.
+    const unchangedLessons = new Set(nextContent.modules.filter((module) =>
+      JSON.stringify(module) === JSON.stringify(detail.content.modules.find((old) => old.moduleId === module.moduleId)))
+      .map((module) => module.moduleId));
+    nextModules = nextModules.map((module) => ({ ...module, resources: module.resources.filter((resource) =>
+      resource.id !== 'ai-lesson-pdf-' + module.id || unchangedLessons.has(module.id)) }));
+    if (nextContent.publication) nextContent = { ...nextContent, publication: { pdfs: Object.fromEntries(
+      Object.entries(nextContent.publication.pdfs).filter(([id]) => unchangedLessons.has(id)),
+    ) } };
     if (detail.status === 'published') {
+      // Validate the original approved snapshot before re-keying its immutable content.
+      if (detail.content.moduleApproval) await assertModuleTemplateCurrent(store, actor, detail);
       const catalog = await templates.list(actor);
-      const nextVersion = Math.max(...catalog
+      const latestVersion = Math.max(...catalog
         .filter((item) => item.id === detail.id)
-        .map((item) => item.version)) + 1;
+        .map((item) => item.version));
+      if (reuseSettingsRevision && latestVersion > detail.version) {
+        const latest = await templates.getAdminDetail(actor, detail.id, latestVersion);
+        const expected = remapRevision(detail.id, latestVersion, nextModules, nextContent, nextFlags);
+        if (latest.jobId === detail.jobId && (latest.status === 'draft' || latest.status === 'published')
+          && latest.passingScore === passingScore
+          && latest.content?.learningMode === nextContent.learningMode
+          && latest.content?.maxAttemptsPerModule === nextContent.maxAttemptsPerModule
+          && materializedModuleFingerprint(latest) === materializedModuleFingerprint(expected)) {
+          if (latest.content.moduleApproval) await assertModuleTemplateCurrent(store, actor, latest);
+          return latest;
+        }
+      }
+      const nextVersion = latestVersion + 1;
       const remapped = remapRevision(
         detail.id,
         nextVersion,
@@ -716,6 +770,10 @@ export function createAiReviewService(
       nextModules = remapped.modules;
       nextContent = remapped.content;
       nextFlags = remapped.flags;
+      if (nextContent.moduleApproval) nextContent = { ...nextContent, moduleApproval: {
+        ...nextContent.moduleApproval,
+        materializedFingerprint: materializedModuleFingerprint({ modules: nextModules, content: nextContent }),
+      } };
     }
     const errors = structuralErrors({ ...detail, modules: nextModules }, nextContent);
     if (errors.length > 0) {
@@ -746,7 +804,88 @@ export function createAiReviewService(
     }
   }
 
-  return {
+  const service: AiReviewService = {
+    async beginPublication(actor, input) {
+      requireAdmin(actor);
+      if (!Array.isArray(input.targets) || input.targets.length < 1 || input.targets.length > 2
+        || new Set(input.targets.map((target) => target.kind)).size !== input.targets.length) {
+        throw new AiReviewServiceError('REVIEW_INVALID', 'Select one target of each template kind.');
+      }
+      const ordered = [...input.targets].sort((a, b) => a.kind === b.kind ? 0 : a.kind === 'normal' ? -1 : 1);
+      const batchId = input.batchId ?? 'ai-publication-' + createHash('sha256').update(JSON.stringify({
+        userId: actor.userId, targets: ordered.map(({ kind, templateId, version, settings }) => ({ kind, templateId, version, settings })),
+      })).digest('hex');
+      let row = (await store.query<PublicationDbRecord>(actor.roomId, 'onboarding_ai_publications', { filter: { batchId }, limit: 1 })).records[0];
+      if (row && (row.createdBy !== actor.userId || row.targets.length !== ordered.length
+        || row.targets.some((target, i) => target.kind !== ordered[i].kind || target.templateId !== ordered[i].templateId))) {
+        throw new AiReviewServiceError('REVIEW_CONFLICT', 'This publication belongs to a different selection.');
+      }
+      if (input.batchId && !row) throw new AiReviewServiceError('REVIEW_NOT_FOUND', 'Publication batch not found.');
+      if (!row) {
+        const targets: AiPublicationTarget[] = [];
+        for (const target of ordered) {
+          const detail = await reviewDetail(actor, target.templateId, target.version);
+          if (detail.employeeType !== target.kind || !['draft', 'published'].includes(detail.status)
+            || detail.flags.some((flag) => flag.severity === 'blocking' && flag.status === 'open')) {
+            throw new AiReviewServiceError('REVIEW_INVALID', 'Review every selected template before publishing.');
+          }
+          await assertModuleTemplateCurrent(store, actor, detail);
+          const settings = target.settings ?? publicationSettings(detail);
+          applyReviewOperations(detail, [{ kind: 'set_settings', ...settings }]);
+          targets.push({ kind: target.kind, templateId: detail.id, version: detail.version, jobId: detail.jobId,
+            materializedFingerprint: materializedModuleFingerprint(detail), settings });
+        }
+        const timestamp = now();
+        row = await store.create<PublicationDbRecord>(actor.roomId, 'onboarding_ai_publications', {
+          batchId, createdBy: actor.userId, targets, createdAt: timestamp, updatedAt: timestamp,
+        }, batchId);
+      }
+      // Persist the complete selection before any revision or external artifact work.
+      // If interrupted, replaying a settings operation reuses its valid revision.
+      for (let index = 0; index < row.targets.length; index += 1) {
+        const target = row.targets[index];
+        let detail: AdminTemplateDetail = await reviewDetail(actor, target.templateId, target.version);
+        if (target.materializedFingerprint !== materializedModuleFingerprint(detail)) {
+          throw new AiReviewServiceError('REVIEW_CONFLICT', 'Publication content changed. Review the current draft first.');
+        }
+        await assertModuleTemplateCurrent(store, actor, detail);
+        if (target.settings) detail = await service.updateReview(actor, { templateId: detail.id, version: detail.version,
+          expectedUpdatedAt: detail.updatedAt, ops: [{ kind: 'set_settings', ...target.settings }] });
+        if (detail.version !== target.version) {
+          const targets = row.targets.map((item, i) => i === index
+            ? { ...item, version: detail.version, materializedFingerprint: materializedModuleFingerprint(detail) } : item);
+          row = await store.update<PublicationDbRecord>(actor.roomId, 'onboarding_ai_publications', row.id,
+            { targets, updatedAt: now() }, { expectedUpdatedAt: row.updatedAt });
+        }
+      }
+      return publicationBatch(row);
+    },
+
+    async listIncompletePublications(actor) {
+      requireAdmin(actor);
+      const batches: AiPublicationBatch[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await store.query<PublicationDbRecord>(actor.roomId, 'onboarding_ai_publications', {
+          filter: { createdBy: actor.userId }, orderBy: [{ field: 'createdAt', direction: 'desc' }], limit: 1000, cursor,
+        });
+        for (const row of page.records) {
+          const completed = await Promise.all(row.targets.map(async (target) => {
+            const detail = await templates.getAdminDetail(actor, target.templateId, target.version);
+            return detail.status === 'published' && Boolean(detail.content?.publication?.jsonFileId)
+              && materializedModuleFingerprint(detail) === target.materializedFingerprint
+              && (!target.settings || JSON.stringify(publicationSettings(detail)) === JSON.stringify({
+                passingScore: target.settings.passingScore, learningMode: target.settings.learningMode,
+                maxAttemptsPerModule: target.settings.maxAttemptsPerModule,
+              }));
+          }));
+          if (!completed.every(Boolean)) batches.push(publicationBatch(row));
+        }
+        cursor = page.nextCursor;
+      } while (cursor);
+      return batches;
+    },
+
     async getReview(actor, templateId, version) {
       return reviewDetail(actor, templateId, version);
     },
@@ -780,6 +919,10 @@ export function createAiReviewService(
         throw new AiReviewServiceError('REVIEW_INVALID', 'Edit and approve lessons and questions in the module workspace first.');
       }
       const updatedState = applyReviewOperations(detail, input.ops);
+      if (input.ops.every((op) => op.kind === 'set_settings')
+        && updatedState.passingScore === detail.passingScore
+        && updatedState.content.learningMode === detail.content.learningMode
+        && updatedState.content.maxAttemptsPerModule === detail.content.maxAttemptsPerModule) return detail;
       const flags = reopenTouchedFlags(detail.flags, input.ops);
       const updated = await save(
         actor,
@@ -789,6 +932,7 @@ export function createAiReviewService(
         updatedState.content,
         flags,
         updatedState.passingScore,
+        input.ops.every((op) => op.kind === 'set_settings'),
       );
       await audit(actor, 'ai_template.manual_edit', updated.id, {
         fromVersion: detail.version,
@@ -917,4 +1061,5 @@ export function createAiReviewService(
       return updated;
     },
   };
+  return service;
 }

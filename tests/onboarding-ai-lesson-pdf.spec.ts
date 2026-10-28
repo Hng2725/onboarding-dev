@@ -136,7 +136,7 @@ describe('AI lesson PDF artifacts', () => {
     const artifact = await createLessonPdfArtifact(review, 'module-1', 0);
     const bytes = new Uint8Array(await artifact.blob.arrayBuffer());
 
-    expect(artifact.fileName).toBe('01-quy-trinh-xu-ly-don-hang.pdf');
+    expect(artifact.fileName).toBe('01-quy-trinh-xu-ly-don-hang-module-1.pdf');
     expect(artifact.mimeType).toBe('application/pdf');
     expect(artifact.blob.type).toBe('application/pdf');
     expect(artifact.blob.size).toBeGreaterThan(0);
