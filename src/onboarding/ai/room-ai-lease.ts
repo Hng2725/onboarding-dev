@@ -60,6 +60,15 @@ export function aiCallMayBeLive(call: AiCallRecord): boolean {
       || call.cleanupState === 'pending' || call.cleanupState === 'unknown');
 }
 
+function reservationStopped(lease: LeaseRecord, call: AiCallRecord | undefined): boolean {
+  if (!call || call.leaseHolderId !== lease.holderId || aiCallMayBeLive(call)) return false;
+  // Only affirmative persisted evidence can reconcile a failed release. An absent
+  // claim, elapsed lease, local timeout, or unknown dispatch is not such evidence.
+  return call.cleanupState === 'confirmed'
+    || Boolean(call.finishedAt) && (call.status === 'completed' || call.status === 'invalid'
+      || call.status === 'failed' && call.providerErrorCode === 'PROJECT_BUSY' && !call.attemptRef && !call.dispatchUnknown);
+}
+
 /** Also fences attempts recorded before the room-lease collection was introduced. */
 async function conflictingAttempt(store: OnboardingStore, roomId: string, input: RoomAiLeaseInput): Promise<RoomAiLease | undefined> {
   let cursor: string | undefined;
@@ -79,14 +88,15 @@ export async function acquireRoomAiLease(
 ): Promise<{ acquired: true; lease: RoomAiLease } | { acquired: false; lease: RoomAiLease }> {
   assertInput(actor, input);
   const current = await readLease(store, actor.roomId);
+  let stoppedReservation = false;
   if (current?.dispatchReserved) {
+    const owner = (await store.query<StoreRecord & { calls: readonly AiCallRecord[] }>(actor.roomId, 'onboarding_ai_jobs', { filter: { jobId: current.jobId }, limit: 1 })).records[0];
+    const call = owner?.calls.find((candidate) => candidate.callId === current.callId);
+    stoppedReservation = reservationStopped(current, call);
     // The atomic lease write reserves dispatch before the job claim is written.
     // Expiry must never reopen that gap, including to another request by this holder.
-    if (input.reserveDispatch || current.jobId !== input.jobId || current.callId !== input.callId) {
-      return { acquired: false, lease: current };
-    }
-    const owner = (await store.query<StoreRecord & { calls: readonly AiCallRecord[] }>(actor.roomId, 'onboarding_ai_jobs', { filter: { jobId: current.jobId }, limit: 1 })).records[0];
-    if (!owner?.calls.some((call) => call.callId === current.callId && call.attemptRef && call.status === 'dispatched')) {
+    if (!stoppedReservation && (input.reserveDispatch || current.jobId !== input.jobId || current.callId !== input.callId
+      || !call?.attemptRef || call.status !== 'dispatched')) {
       return { acquired: false, lease: current };
     }
   }
@@ -103,10 +113,12 @@ export async function acquireRoomAiLease(
       return { acquired: false, lease: winner };
     }
   }
-  if (!matches(current, input) && Date.parse(current.expiresAt) > Date.parse(input.now ?? new Date().toISOString())) {
+  if (!stoppedReservation && !matches(current, input) && Date.parse(current.expiresAt) > Date.parse(input.now ?? new Date().toISOString())) {
     return { acquired: false, lease: current };
   }
   try {
+    // Reconciliation and the next reservation share this CAS: stale terminal
+    // evidence cannot release or replace a newer holder's reservation.
     return { acquired: true, lease: await store.update<LeaseRecord>(actor.roomId, 'onboarding_ai_room_leases', current.id, data, { expectedUpdatedAt: current.updatedAt }) };
   } catch (error) {
     if (!isAiLeaseConflict(error)) throw error;

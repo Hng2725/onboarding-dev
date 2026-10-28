@@ -257,6 +257,55 @@ describe('room AI serialization', () => {
 });
 
 describe('atomic room lease operations', () => {
+  it.each(['job', 'call', 'holder', 'claim', 'dispatch_unknown', 'cleanup_unknown'] as const)('keeps a reservation fenced when terminal evidence has a mismatched or unresolved %s', async (caseName) => {
+    const { service, other, inventoryJob, store, advance, now } = await setup();
+    const owner = await inventoryJob('owner');
+    const competing = await inventoryJob('competing');
+    await service.nextStep(admin, { jobId: owner.jobId, workerId: 'tab-a' });
+    const claimed = await service.getJob(admin, owner.jobId);
+    await store.update(admin.roomId, 'onboarding_ai_jobs', owner.id, {
+      calls: [{ ...claimed.calls[0], status: 'failed', providerErrorCode: 'PROJECT_BUSY', finishedAt: now(),
+        ...(caseName === 'claim' ? { status: 'pending' } : {}),
+        ...(caseName === 'dispatch_unknown' ? { dispatchUnknown: true, cleanupState: 'pending' } : {}),
+        ...(caseName === 'cleanup_unknown' ? { cleanupState: 'unknown' } : {}),
+      }],
+    });
+    const lease = (await store.query(admin.roomId, 'onboarding_ai_room_leases')).records[0];
+    if (caseName === 'job' || caseName === 'call' || caseName === 'holder') {
+      await store.update(admin.roomId, 'onboarding_ai_room_leases', String(lease.id), {
+        [caseName + 'Id']: 'different-' + caseName,
+      });
+    }
+    advance(120_001);
+    await expect(other.nextStep(admin, { jobId: competing.jobId, workerId: 'tab-b' })).resolves.toMatchObject({ kind: 'wait' });
+  });
+
+  it('does not let stale terminal reconciliation overwrite a newer reservation', async () => {
+    const { service, other, inventoryJob, store, now } = await setup();
+    const owner = await inventoryJob('owner');
+    const stale = await inventoryJob('stale');
+    const winner = await inventoryJob('winner');
+    await service.nextStep(admin, { jobId: owner.jobId, workerId: 'tab-a' });
+    const claimed = await service.getJob(admin, owner.jobId);
+    await store.update(admin.roomId, 'onboarding_ai_jobs', owner.id, {
+      calls: [{ ...claimed.calls[0], status: 'failed', providerErrorCode: 'PROJECT_BUSY', finishedAt: now() }],
+    });
+    const update = store.update.bind(store);
+    let raced = false;
+    vi.spyOn(store, 'update').mockImplementation(async (room, collection, id, data, options) => {
+      if (!raced && collection === 'onboarding_ai_room_leases' && data.jobId === stale.jobId) {
+        raced = true;
+        expect(options?.expectedUpdatedAt).toBeDefined();
+        await expect(service.nextStep(admin, { jobId: winner.jobId, workerId: 'tab-winner' })).resolves.toMatchObject({ kind: 'ai_call' });
+      }
+      return update(room, collection, id, data, options);
+    });
+    await expect(other.nextStep(admin, { jobId: stale.jobId, workerId: 'tab-stale' })).resolves.toMatchObject({ kind: 'wait' });
+    expect(raced).toBe(true);
+    expect((await store.query(admin.roomId, 'onboarding_ai_room_leases')).records[0]).toMatchObject({ jobId: winner.jobId, holderId: 'tab-winner', dispatchReserved: true });
+    await expect(other.nextStep(admin, { jobId: stale.jobId, workerId: 'tab-stale' })).resolves.toMatchObject({ kind: 'wait' });
+  });
+
   it('returns wait when App Platform wraps an optimistic conflict in a plain transport error', async () => {
     const store = new MemoryOnboardingStore();
     await acquireRoomAiLease(store, admin, { jobId: 'old', callId: 'A1', holderId: 'old', now: '2026-10-28T00:00:00.000Z' });
@@ -298,6 +347,35 @@ describe('atomic room lease operations', () => {
 });
 
 describe('bounded provider waiting and module recovery', () => {
+  it('recovers a persisted busy rejection after release fails once and the retry budget reaches fallback', async () => {
+    const { service, other, templateJob, inventoryJob, store, advance } = await setup();
+    const job = await templateJob();
+    const competing = await inventoryJob('competing');
+    const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    if (step.kind !== 'ai_call') throw new Error('Expected lesson call');
+    const update = store.update.bind(store);
+    let failRelease = true;
+    vi.spyOn(store, 'update').mockImplementation(async (room, collection, id, data, options) => {
+      if (failRelease && collection === 'onboarding_ai_room_leases' && data.expiresAt === '1970-01-01T00:00:00.000Z') {
+        failRelease = false;
+        throw new Error('Lease release transport failed');
+      }
+      return update(room, collection, id, data, options);
+    });
+    await expect(service.reportAiFailure(admin, {
+      jobId: job.jobId, workerId: 'tab-a', callId: step.callId, kind: 'failed', providerErrorCode: 'PROJECT_BUSY',
+    })).rejects.toThrow('Lease release transport failed');
+    const waiting = await service.getJob(admin, job.jobId);
+    expect(waiting.calls[0]).toMatchObject({ status: 'failed', providerErrorCode: 'PROJECT_BUSY', leaseHolderId: 'tab-a' });
+    expect(waiting.calls).toHaveLength(2);
+    advance(120_001);
+    await expect(other.nextStep(admin, { jobId: job.jobId, workerId: 'tab-new' })).resolves.toMatchObject({ kind: 'awaiting_admin' });
+    const fallback = await service.getJob(admin, job.jobId);
+    expect(fallback.moduleRuns![0]).toMatchObject({ lessonState: 'fallback_review', lessonProvenance: 'fallback' });
+    expect(fallback.moduleRuns!.slice(1)).toEqual(waiting.moduleRuns!.slice(1));
+    await expect(other.nextStep(admin, { jobId: competing.jobId, workerId: 'tab-b' })).resolves.toMatchObject({ kind: 'ai_call' });
+  });
+
   it('accepts delayed PROJECT_BUSY only from the matching claim holder and preserves the bounded fallback deadline', async () => {
     const { service, other, templateJob, inventoryJob, advance, now } = await setup();
     const job = await templateJob();
