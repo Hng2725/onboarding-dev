@@ -4,6 +4,28 @@ import { AiGatewayError, type AiGateway } from '../src/ui/onboarding/ai/ai-gatew
 import { pumpAiJob } from '../src/ui/onboarding/ai/ai-pump';
 
 describe('AI browser pump', () => {
+  it.each(['changed', 'closed'] as const)('relinquishes a new unused heartbeat grant when polling is %s', async (outcome) => {
+    let time = 0;
+    const controller = new AbortController();
+    const adminAi = vi.fn()
+      .mockResolvedValueOnce({ kind: 'ai_call', callId: 'A1', operationId: 'job-1:A1', prompt: 'p', attemptRef: 'attempt-1' })
+      .mockImplementationOnce(async () => {
+        if (outcome === 'closed') controller.abort(new Error('closed'));
+        return { kind: 'ai_call', callId: 'A2', operationId: 'job-1:A2', prompt: 'p' };
+      })
+      .mockResolvedValue({ jobId: 'job-1', status: 'running' });
+    const gateway: AiGateway = { dispatch: vi.fn(), status: vi.fn().mockResolvedValue({ state: 'running' }), cancel: vi.fn() };
+    await expect(pumpAiJob({
+      api: { adminAi }, gateway, provider: 'sandbox', jobId: 'job-1', workerId: 'tab-a', signal: controller.signal,
+      nowMs: () => time, sleep: async () => { time += 45_000; },
+    })).rejects.toThrow(outcome === 'closed' ? 'closed' : 'AI job step changed while polling.');
+    expect(adminAi).toHaveBeenCalledWith('report_ai_failure', {
+      jobId: 'job-1', workerId: 'tab-a', callId: 'A2', kind: 'failed', providerErrorCode: 'DISPATCH_NOT_STARTED',
+    });
+    expect(gateway.dispatch).not.toHaveBeenCalled();
+    expect(gateway.cancel).not.toHaveBeenCalled();
+  });
+
   it('releases a dispatch claim when the gateway proves it stopped before contacting the provider', async () => {
     const controller = new AbortController();
     const adminAi = vi.fn().mockResolvedValueOnce({ kind: 'ai_call', callId: 'A1', operationId: 'job-1:A1', prompt: 'p' }).mockResolvedValue({ jobId: 'job-1', status: 'running' });
@@ -94,6 +116,25 @@ describe('AI browser pump', () => {
     expect(adminAi).toHaveBeenCalledWith('report_ai_failure', expect.objectContaining({ kind: 'failed', providerErrorCode: 'PROJECT_BUSY' }));
     expect(sleep).toHaveBeenCalledWith(12_000, undefined);
     expect(gateway.dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists a definitive busy rejection received while closing without starting later work', async () => {
+    const controller = new AbortController();
+    const adminAi = vi.fn()
+      .mockResolvedValueOnce({ kind: 'ai_call', callId: 'A1', operationId: 'job-1:A1', prompt: 'p' })
+      .mockResolvedValue({ jobId: 'job-1', status: 'running' });
+    const gateway: AiGateway = {
+      dispatch: vi.fn(async () => {
+        controller.abort(new Error('closed'));
+        throw new AiGatewayError('PROJECT_BUSY', 'Another request in this project is still running');
+      }),
+      status: vi.fn(), cancel: vi.fn(),
+    };
+    await expect(pumpAiJob({ api: { adminAi }, gateway, provider: 'native_chat', jobId: 'job-1', workerId: 'tab-a', signal: controller.signal })).rejects.toThrow('closed');
+    expect(adminAi).toHaveBeenCalledWith('report_ai_failure', expect.objectContaining({ callId: 'A1', kind: 'failed', providerErrorCode: 'PROJECT_BUSY' }));
+    expect(adminAi).toHaveBeenCalledTimes(2);
+    expect(gateway.cancel).not.toHaveBeenCalled();
+    expect(gateway.status).not.toHaveBeenCalled();
   });
 
   it('dispatches, records, polls, submits, and stops only when the server says done', async () => {
@@ -325,13 +366,14 @@ describe('AI browser pump', () => {
       { kind: 'ai_call', callId: 'B-lessons', operationId: 'job-1:B-lessons', prompt: 'lessons' },
       { kind: 'ai_call', callId: 'B-questions', operationId: 'job-1:B-questions', prompt: 'questions' },
     ] as const;
-    const adminAi = vi.fn().mockImplementation(async (action: string) => {
+    const recorded = new Set<string>();
+    const adminAi = vi.fn().mockImplementation(async (action: string, args: Record<string, unknown>) => {
       if (action === 'next_step') {
         return submitted < steps.length
-          ? steps[submitted]
+          ? { ...steps[submitted], ...(recorded.has(steps[submitted].callId) ? { attemptRef: steps[submitted].operationId } : {}) }
           : { kind: 'done', job: { jobId: 'job-1', status: 'completed' } };
       }
-      if (action === 'record_dispatch') return { jobId: 'job-1', status: 'running' };
+      if (action === 'record_dispatch') { recorded.add(String(args.callId)); return { jobId: 'job-1', status: 'running' }; }
       if (action === 'submit_ai_output') {
         submitted += 1;
         return { jobId: 'job-1', status: submitted === steps.length ? 'completed' : 'running' };

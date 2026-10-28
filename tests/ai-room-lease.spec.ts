@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { McpApp } from '@privos_ai/app-react';
 
 import { createAiJobService } from '../src/onboarding/ai/jobs';
 import { AI_GENERATION_LIMITS } from '../src/onboarding/ai/limits';
@@ -7,6 +8,7 @@ import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
 import { pumpAiJob, type AiPumpApi } from '../src/ui/onboarding/ai/ai-pump';
 import type { AiGateway } from '../src/ui/onboarding/ai/ai-gateway-sandbox';
+import { createNativeChatAiGateway } from '../src/ui/onboarding/ai/ai-gateway-native-chat';
 
 const admin = { userId: 'admin-1', roomId: 'room-a', access: 'admin' as const };
 const inventory = {
@@ -42,6 +44,46 @@ async function setup(maxPageSize?: number) {
 }
 
 describe('room AI serialization', () => {
+  it.each(['create', 'takeover'] as const)('keeps an atomic dispatch reservation fenced when %s suspends beyond expiry', async (operation) => {
+    const { service, other, inventoryJob, store, advance, now } = await setup();
+    const first = await inventoryJob('first');
+    const second = await inventoryJob('second');
+    if (operation === 'takeover') {
+      await acquireRoomAiLease(store, admin, { jobId: 'old', callId: 'A1', holderId: 'old', now: now() });
+      advance(AI_GENERATION_LIMITS.pumpLeaseMs + 1);
+    }
+    let entered!: () => void;
+    let resume!: () => void;
+    const suspended = new Promise<void>((resolve) => { entered = resolve; });
+    const resumed = new Promise<void>((resolve) => { resume = resolve; });
+    const create = store.create.bind(store);
+    const update = store.update.bind(store);
+    if (operation === 'create') {
+      vi.spyOn(store, 'create').mockImplementation(async (room, collection, data) => {
+        const result = await create(room, collection, data);
+        if (collection === 'onboarding_ai_room_leases' && data.jobId === first.jobId) { entered(); await resumed; }
+        return result;
+      });
+    } else {
+      vi.spyOn(store, 'update').mockImplementation(async (room, collection, id, data, options) => {
+        const result = await update(room, collection, id, data, options);
+        if (collection === 'onboarding_ai_room_leases' && data.jobId === first.jobId) { entered(); await resumed; }
+        return result;
+      });
+    }
+    const delayed = service.nextStep(admin, { jobId: first.jobId, workerId: 'tab-a' });
+    await suspended;
+    await expect(other.nextStep(admin, { jobId: first.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'wait' });
+    advance(AI_GENERATION_LIMITS.pumpLeaseMs + 1);
+    await expect(other.nextStep(admin, { jobId: first.jobId, workerId: 'tab-c' })).resolves.toMatchObject({ kind: 'wait' });
+    const competing = await other.nextStep(admin, { jobId: second.jobId, workerId: 'tab-b' });
+    resume();
+    const original = await delayed;
+    expect(competing.kind).toBe('wait');
+    expect(original.kind).toBe('ai_call');
+    await expect(other.nextStep(admin, { jobId: first.jobId, workerId: 'tab-c' })).resolves.toMatchObject({ kind: 'wait' });
+  });
+
   it('releases terminal evidence after a release transport failure, including repeated cleanup confirmation', async () => {
     for (const outcome of ['output', 'cleanup'] as const) {
       const { service, other, inventoryJob, store } = await setup();
@@ -84,6 +126,22 @@ describe('room AI serialization', () => {
     await service.recordDispatch(admin, { jobId: first.jobId, workerId: 'tab-a', callId: 'A1', attemptRef: 'attempt-late', provider: 'sandbox' });
     advance(AI_GENERATION_LIMITS.pumpLeaseMs + 1);
     await expect(other.nextStep(admin, { jobId: first.jobId, workerId: 'tab-new' })).resolves.toMatchObject({ kind: 'ai_call', attemptRef: 'attempt-late' });
+  });
+
+  it('releases an unused atomic reservation when the job claim loses its optimistic write', async () => {
+    const { service, other, inventoryJob, store } = await setup();
+    const job = await inventoryJob('first');
+    const update = store.update.bind(store);
+    let conflict = true;
+    vi.spyOn(store, 'update').mockImplementation(async (room, collection, id, data, options) => {
+      if (conflict && collection === 'onboarding_ai_jobs' && data.pumpedBy === 'tab-a') {
+        conflict = false;
+        throw Object.assign(new Error('Atomic update conflict'), { code: 'OPERATION_CONFLICT' });
+      }
+      return update(room, collection, id, data, options);
+    });
+    await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'wait' });
+    await expect(other.nextStep(admin, { jobId: job.jobId, workerId: 'tab-b' })).resolves.toMatchObject({ kind: 'ai_call', callId: 'A1' });
   });
 
   it('releases a claim only when its holder proves dispatch never began', async () => {
@@ -240,6 +298,35 @@ describe('atomic room lease operations', () => {
 });
 
 describe('bounded provider waiting and module recovery', () => {
+  it('accepts delayed PROJECT_BUSY only from the matching claim holder and preserves the bounded fallback deadline', async () => {
+    const { service, other, templateJob, inventoryJob, advance, now } = await setup();
+    const job = await templateJob();
+    const competing = await inventoryJob('competing');
+    const first = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    if (first.kind !== 'ai_call') throw new Error('Expected lesson call');
+    const failure = { jobId: job.jobId, callId: first.callId, workerId: 'tab-a', kind: 'failed' as const, providerErrorCode: 'PROJECT_BUSY' };
+    advance(AI_GENERATION_LIMITS.pumpLeaseMs + 1);
+    await expect(other.reportAiFailure(admin, { ...failure, workerId: 'tab-b' })).rejects.toMatchObject({ code: 'JOB_LEASE_LOST' });
+    const waiting = await service.reportAiFailure(admin, failure);
+    expect(waiting.providerWaitStartedAt).toBe(now());
+    expect(waiting.nextRetryAt).toBe(new Date(Date.parse(now()) + 3_000).toISOString());
+    for (let repeat = 0; repeat < 5; repeat += 1) {
+      await expect(other.nextStep(admin, { jobId: job.jobId, workerId: 'tab-b' })).resolves.toMatchObject({ kind: 'wait' });
+    }
+    advance(3_000);
+    const retry = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    if (retry.kind !== 'ai_call') throw new Error('Expected retry');
+    advance(120_000);
+    await expect(service.reportAiFailure(admin, failure)).rejects.toMatchObject({ code: 'JOB_CALL_MISMATCH' });
+    await expect(other.nextStep(admin, { jobId: competing.jobId, workerId: 'tab-b' })).resolves.toMatchObject({ kind: 'wait' });
+    const fallback = await service.reportAiFailure(admin, { ...failure, callId: retry.callId });
+    expect(fallback.moduleRuns![0]).toMatchObject({ lessonState: 'fallback_review', lessonProvenance: 'fallback' });
+    expect(fallback.moduleRuns!.slice(1)).toEqual(waiting.moduleRuns!.slice(1));
+    expect(fallback.calls).toHaveLength(2);
+    await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'awaiting_admin' });
+    await expect(other.nextStep(admin, { jobId: competing.jobId, workerId: 'tab-b' })).resolves.toMatchObject({ kind: 'ai_call' });
+  });
+
   it('does not expire provider wait while a retry dispatch acknowledgement is still in flight', async () => {
     const { service, templateJob, inventoryJob, advance } = await setup();
     const job = await templateJob();
@@ -408,6 +495,34 @@ describe('bounded provider waiting and module recovery', () => {
 });
 
 describe('persisted pump reconnect', () => {
+  it('releases the room after Native context upload fails without a provider request', async () => {
+    const { service, other, inventoryJob, advance } = await setup();
+    const job = await inventoryJob('upload');
+    const competing = await inventoryJob('competing');
+    const rest = vi.fn<McpApp['rest']>();
+    const uploadFile = vi.fn<McpApp['uploadFile']>().mockImplementation(async () => {
+      advance(AI_GENERATION_LIMITS.pumpLeaseMs + 1);
+      throw new Error('Storage unavailable');
+    });
+    const gateway = createNativeChatAiGateway({ rest, uploadFile } as unknown as McpApp, admin.roomId);
+    const api: AiPumpApi = {
+      async adminAi<T>(action: string, args: Record<string, unknown>) {
+        const result = action === 'next_step' ? await service.nextStep(admin, args as never)
+          : action === 'report_ai_failure' ? await service.reportAiFailure(admin, args as never)
+            : (() => { throw new Error('Unexpected action: ' + action); })();
+        return result as T;
+      },
+    };
+    await expect(pumpAiJob({ api, gateway, provider: 'native_chat', jobId: job.jobId, workerId: 'tab-a' })).rejects.toThrow('Storage unavailable');
+    expect(rest).not.toHaveBeenCalled();
+    const persisted = await service.getJob(admin, job.jobId);
+    expect(persisted.status).toBe('running');
+    expect(persisted.calls[0]).toMatchObject({ status: 'pending' });
+    expect(persisted.calls[0].dispatchUnknown).toBeUndefined();
+    expect(persisted.calls[0].dispatchClaimedAt).toBeUndefined();
+    await expect(other.nextStep(admin, { jobId: competing.jobId, workerId: 'tab-b' })).resolves.toMatchObject({ kind: 'ai_call' });
+  });
+
   it('refreshes an expired polling lease after a suspended tab before persisting the final deadline result', async () => {
     const { service, inventoryJob, advance, now } = await setup();
     const job = await inventoryJob('suspend');

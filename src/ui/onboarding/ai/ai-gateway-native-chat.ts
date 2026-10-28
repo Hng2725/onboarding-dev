@@ -161,11 +161,11 @@ export function createNativeChatAiGateway(
         const message = error instanceof Error ? error.message : String(error || '');
         if (/not permitted|permission|403/i.test(message)) {
           throw new AiGatewayError(
-            'AI_PERMISSION_DENIED',
+            'DISPATCH_NOT_STARTED',
             'Chưa được cấp quyền ghi file context cho Native AI Chat.',
           );
         }
-        throw new AiGatewayError('AI_REQUEST_FAILED', message || 'Không thể lưu context AI.');
+        throw new AiGatewayError('DISPATCH_NOT_STARTED', message || 'Không thể lưu context AI.');
       }
       if (input.signal?.aborted) throw new AiGatewayError('DISPATCH_NOT_STARTED', 'Closed before provider dispatch.');
 

@@ -188,6 +188,7 @@ export const ONBOARDING_COLLECTIONS: readonly OnboardingCollectionDefinition[] =
   collection('onboarding_ai_room_leases', [
     field('leaseKey', 'string', true), field('jobId', 'string', true),
     field('callId', 'string', true), field('holderId', 'string', true),
+    field('dispatchReserved', 'boolean'),
     field('expiresAt', 'datetime', true), field('updatedAt', 'datetime', true),
   ], [index('ai_room_leases_key_unique', ['leaseKey'], true)]),
   collection('onboarding_template_content', [

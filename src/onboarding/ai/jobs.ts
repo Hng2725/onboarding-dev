@@ -1308,7 +1308,7 @@ export function createAiJobService(
     // Returning a pending call is itself a durable dispatch claim. A lost response is
     // uncertain, so even the same tab must not receive a second dispatch permission.
     if (!call.attemptRef && call.dispatchClaimedAt) return { kind: 'wait', job: jobFrom(row, actor.roomId) };
-    const lease = await acquireRoomAiLease(store, actor, { jobId: row.jobId, callId: call.callId, holderId: workerId, now: now() });
+    const lease = await acquireRoomAiLease(store, actor, { jobId: row.jobId, callId: call.callId, holderId: workerId, reserveDispatch: !call.attemptRef, now: now() });
     if (!lease.acquired) return { kind: 'wait', job: jobFrom(row, actor.roomId) };
     const calls = row.calls.map((item) => item.callId === call.callId ? { ...item, leaseHolderId: workerId, ...(!item.attemptRef ? { dispatchClaimedAt: now() } : {}) } : item);
     let moduleRuns = row.moduleRuns;
@@ -1317,7 +1317,16 @@ export function createAiJobService(
       const next = call.moduleTarget === 'lesson' ? { ...run, lessonAttempts: (run.lessonAttempts ?? 0) + 1 } : { ...run, questionAttempts: (run.questionAttempts ?? 0) + 1 };
       moduleRuns = replaceRun(row, next);
     }
-    row = await updateJob(actor, row, { calls, ...(moduleRuns ? { moduleRuns } : {}), pumpedBy: workerId, pumpLeaseUntil: lease.lease.expiresAt });
+    try {
+      row = await updateJob(actor, row, { calls, ...(moduleRuns ? { moduleRuns } : {}), pumpedBy: workerId, pumpLeaseUntil: lease.lease.expiresAt });
+    } catch (error) {
+      // An optimistic rejection proves this request never persisted or granted the
+      // new claim. Unknown transport outcomes retain the reservation conservatively.
+      if (!call.attemptRef && isAiLeaseConflict(error)) {
+        await releaseRoomAiLease(store, actor, { jobId: row.jobId, callId: call.callId, holderId: workerId, now: now() });
+      }
+      throw error;
+    }
     return { kind: 'ai_call', callId: call.callId, operationId: call.operationId, ...request, ...(call.attemptRef ? { attemptRef: call.attemptRef, provider: callProvider(call), startedAt: call.startedAt } : {}) };
   }
 
@@ -1897,12 +1906,6 @@ export function createAiJobService(
       if (row.status !== 'running') {
         throw new AiJobServiceError('JOB_NOT_RUNNING', 'The AI job is not running.');
       }
-      if (!leaseOwned(row, input.workerId)) {
-        throw new AiJobServiceError(
-          'JOB_LEASE_LOST',
-          'This browser tab no longer owns the AI job lease.',
-        );
-      }
       const current = row.calls.find((candidate) =>
         candidate.status === 'pending' || candidate.status === 'dispatched');
       if (!current || current.callId !== input.callId) {
@@ -1910,6 +1913,13 @@ export function createAiJobService(
           'JOB_CALL_MISMATCH',
           'The failed call is not the current call.',
         );
+      }
+      // A delayed definitive rejection still belongs to this unresolved claim.
+      // Clock expiry alone cannot discard that evidence or authorize another reporter.
+      const matchingBusyClaim = input.kind === 'failed' && input.providerErrorCode === 'PROJECT_BUSY'
+        && current.leaseHolderId === input.workerId && Boolean(current.dispatchClaimedAt);
+      if (!matchingBusyClaim && !leaseOwned(row, input.workerId)) {
+        throw new AiJobServiceError('JOB_LEASE_LOST', 'This browser tab no longer owns the AI job lease.');
       }
       const code = input.kind === 'dispatch_unknown'
         ? 'AI_DISPATCH_UNKNOWN'

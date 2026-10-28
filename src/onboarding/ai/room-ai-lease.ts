@@ -6,6 +6,7 @@ import { AI_GENERATION_LIMITS } from './limits';
 interface LeaseRecord extends StoreRecord, RoomAiLease {
   readonly id: string;
   readonly updatedAt: string;
+  readonly dispatchReserved?: boolean;
 }
 
 export interface RoomAiLeaseInput {
@@ -13,6 +14,7 @@ export interface RoomAiLeaseInput {
   readonly callId: string;
   readonly holderId: string;
   readonly now?: string;
+  readonly reserveDispatch?: boolean;
 }
 
 function assertInput(actor: OnboardingActor, input: RoomAiLeaseInput): void {
@@ -77,9 +79,20 @@ export async function acquireRoomAiLease(
 ): Promise<{ acquired: true; lease: RoomAiLease } | { acquired: false; lease: RoomAiLease }> {
   assertInput(actor, input);
   const current = await readLease(store, actor.roomId);
+  if (current?.dispatchReserved) {
+    // The atomic lease write reserves dispatch before the job claim is written.
+    // Expiry must never reopen that gap, including to another request by this holder.
+    if (input.reserveDispatch || current.jobId !== input.jobId || current.callId !== input.callId) {
+      return { acquired: false, lease: current };
+    }
+    const owner = (await store.query<StoreRecord & { calls: readonly AiCallRecord[] }>(actor.roomId, 'onboarding_ai_jobs', { filter: { jobId: current.jobId }, limit: 1 })).records[0];
+    if (!owner?.calls.some((call) => call.callId === current.callId && call.attemptRef && call.status === 'dispatched')) {
+      return { acquired: false, lease: current };
+    }
+  }
   const blocking = await conflictingAttempt(store, actor.roomId, input);
   if (blocking) return { acquired: false, lease: current ?? blocking };
-  const data = { leaseKey: 'generation' as const, jobId: input.jobId, callId: input.callId, holderId: input.holderId, expiresAt: expiresAt(input), updatedAt: timestamp(input, current) };
+  const data = { leaseKey: 'generation' as const, jobId: input.jobId, callId: input.callId, holderId: input.holderId, dispatchReserved: input.reserveDispatch === true, expiresAt: expiresAt(input), updatedAt: timestamp(input, current) };
   if (!current) {
     try {
       return { acquired: true, lease: await store.create<LeaseRecord>(actor.roomId, 'onboarding_ai_room_leases', data) };
@@ -115,7 +128,7 @@ export async function releaseRoomAiLease(store: OnboardingStore, actor: Onboardi
   const current = await readLease(store, actor.roomId);
   if (!current || !matches(current, input)) return;
   try {
-    await store.update(actor.roomId, 'onboarding_ai_room_leases', current.id, { expiresAt: new Date(0).toISOString(), updatedAt: timestamp(input, current) }, { expectedUpdatedAt: current.updatedAt });
+    await store.update(actor.roomId, 'onboarding_ai_room_leases', current.id, { dispatchReserved: false, expiresAt: new Date(0).toISOString(), updatedAt: timestamp(input, current) }, { expectedUpdatedAt: current.updatedAt });
   } catch (error) {
     // A concurrent refresh/takeover owns the record now. Never release its lease.
     if (!isAiLeaseConflict(error)) throw error;

@@ -14,6 +14,14 @@ function appWith(input: {
 }
 
 describe('Native AI Chat gateway', () => {
+  it.each(['Storage unavailable', '403 permission denied'])('proves dispatch did not start when context upload fails: %s', async (message) => {
+    const rest = vi.fn<McpApp['rest']>();
+    const uploadFile = vi.fn<McpApp['uploadFile']>().mockRejectedValue(new Error(message));
+    const gateway = createNativeChatAiGateway(appWith({ rest, uploadFile }), 'room-a');
+    await expect(gateway.dispatch({ operationId: 'op', prompt: 'p' })).rejects.toMatchObject({ code: 'DISPATCH_NOT_STARTED' });
+    expect(rest).not.toHaveBeenCalled();
+  });
+
   it('does not send a provider request when the modal closes during context upload', async () => {
     const controller = new AbortController();
     const rest = vi.fn<McpApp['rest']>();

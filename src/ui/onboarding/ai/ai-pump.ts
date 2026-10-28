@@ -82,6 +82,14 @@ export async function pumpAiJob(options: PumpAiJobOptions): Promise<AiJobRecord>
     const retryAt = job.nextRetryAt ?? job.moduleRuns?.find((run) => run.nextRetryAt)?.nextRetryAt;
     return retryAt && Date.parse(retryAt) > nowMs() ? Date.parse(retryAt) - nowMs() : AI_GENERATION_LIMITS.pollIntervalMs;
   };
+  const releaseUnusedGrant = async (step: PumpStep) => {
+    if (step.kind !== 'ai_call' || step.attemptRef) return;
+    // No gateway call occurred: this is positive evidence the reservation can be released.
+    await options.api.adminAi('report_ai_failure', {
+      jobId: options.jobId, workerId: options.workerId, callId: step.callId,
+      kind: 'failed', providerErrorCode: 'DISPATCH_NOT_STARTED',
+    });
+  };
 
   work: for (;;) {
     throwIfAborted(options.signal);
@@ -89,13 +97,7 @@ export async function pumpAiJob(options: PumpAiJobOptions): Promise<AiJobRecord>
       jobId: options.jobId,
       workerId: options.workerId,
     });
-    if (options.signal?.aborted && step.kind === 'ai_call' && !step.attemptRef) {
-      // No gateway call occurred: this is positive evidence the reservation can be released.
-      await options.api.adminAi('report_ai_failure', {
-        jobId: options.jobId, workerId: options.workerId, callId: step.callId,
-        kind: 'failed', providerErrorCode: 'DISPATCH_NOT_STARTED',
-      }).catch(() => undefined);
-    }
+    if (options.signal?.aborted) await releaseUnusedGrant(step).catch(() => undefined);
     throwIfAborted(options.signal);
     if (step.kind === 'done' || step.kind === 'awaiting_admin') {
       options.onProgress?.(step.job);
@@ -127,10 +129,10 @@ export async function pumpAiJob(options: PumpAiJobOptions): Promise<AiJobRecord>
       } catch (error) {
         const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
         const notStarted = code === 'DISPATCH_NOT_STARTED';
+        const known = notStarted || code === 'PROJECT_BUSY' || code === 'AI_PERMISSION_DENIED';
         // Unknown dispatches remain fenced on close. Positive non-dispatch evidence
         // can safely release the claim even when the signal is already aborted.
-        if (options.signal?.aborted && !notStarted) throw abortReason(options.signal);
-        const known = notStarted || code === 'PROJECT_BUSY' || code === 'AI_PERMISSION_DENIED';
+        if (options.signal?.aborted && !known) throw abortReason(options.signal);
         const job = await options.api.adminAi<AiJobRecord>('report_ai_failure', {
           jobId: options.jobId,
           workerId: options.workerId,
@@ -191,6 +193,7 @@ export async function pumpAiJob(options: PumpAiJobOptions): Promise<AiJobRecord>
           await sleep(retryAfter(error, backoff), options.signal);
           continue;
         }
+        if (options.signal?.aborted) await releaseUnusedGrant(leaseStep).catch(() => undefined);
         throwIfAborted(options.signal);
         if (leaseStep.kind === 'done' || leaseStep.kind === 'awaiting_admin') {
           options.onProgress?.(leaseStep.job);
@@ -207,8 +210,9 @@ export async function pumpAiJob(options: PumpAiJobOptions): Promise<AiJobRecord>
         }
         if (
           leaseStep.callId !== step.callId
-          || (leaseStep.attemptRef && leaseStep.attemptRef !== attemptRef)
+          || leaseStep.attemptRef !== attemptRef
         ) {
+          await releaseUnusedGrant(leaseStep);
           throw new Error('AI job step changed while polling.');
         }
         leaseRefreshedAt = nowMs();
