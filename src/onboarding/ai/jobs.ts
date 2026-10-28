@@ -27,7 +27,7 @@ import {
 } from './inventory';
 import { AI_GENERATION_LIMITS } from './limits';
 import { sanitizeAiDiagnosticText } from './diagnostics';
-import { materializeAiTemplate } from './materialize';
+import { materializeAiTemplate, materializeModuleTemplate } from './materialize';
 import { buildTemplateOutline, applyTemplateOutlineEdits } from './outline';
 import { buildFallbackLesson } from './fallback-lessons';
 import { buildModuleLessonPrompt, buildModuleQuestionPrompt, validateModuleLessonOutput, validateModuleQuestionOutput, validApprovedLesson, type ModuleLessonPromptInput } from './module-draft';
@@ -1501,6 +1501,9 @@ export function createAiJobService(
     if (!call) {
       if (modulesComplete(row.moduleRuns!)) {
         if (row.status !== 'completed') row = await updateJob(actor, row, { status: 'completed', ...RELEASED_LEASE });
+        const materialized = await materializeModuleTemplate(store, templates, actor, row.jobId);
+        const result = { templateId: materialized.id, version: materialized.version };
+        if (JSON.stringify(row.result) !== JSON.stringify(result)) row = await updateJob(actor, row, { result });
         return { kind: 'done', job: jobFrom(row, actor.roomId) };
       }
       return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
@@ -1594,7 +1597,7 @@ export function createAiJobService(
           kind: 'template',
           status: 'running',
           templateKind: input.templateKind,
-          ...(input.roleProfile ? { roleProfile: input.roleProfile } : {}),
+          ...(input.roleProfile ? { roleProfile: { responsibilities: input.roleProfile.responsibilities } } : {}),
           ...(input.title?.trim() ? { title: input.title.trim() } : {}),
           sourceIds: inventoryJob.sourceIds,
           inventoryJobId: inventoryJob.jobId,

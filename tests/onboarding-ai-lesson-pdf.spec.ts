@@ -81,6 +81,14 @@ const review: AdminTemplateDetail = {
 };
 
 describe('AI lesson PDF artifacts', () => {
+  it('uses distinct stable names for identically titled modules from separate templates', () => {
+    expect(lessonPdfFileName('Same title', 0, 'ai-mod-first')).not.toBe(lessonPdfFileName('Same title', 0, 'ai-mod-second'));
+    expect(lessonPdfFileName('Same title', 0, 'ai-mod-first')).toBe('01-same-title-ai-mod-first.pdf');
+  });
+  it('does not render internal approval and checkpoint fields into lesson text', () => {
+    const internal = { ...review, content: { ...review.content!, publication: { pdfs: {}, jsonFileId: 'private-json' }, moduleApproval: { pipelineVersion: 'module_v2' as const, outlineRevision: 2, fingerprint: 'private-fingerprint', materializedFingerprint: 'private-materialized', taskCoverage: [] }, modules: review.content!.modules.map((m) => ({ ...m, lessonProvenance: 'manual' as const, approvedLessonVersion: 2 })) } };
+    expect(JSON.stringify(lessonPdfDocumentDefinition(internal, 'module-1'))).not.toMatch(/private-|lessonProvenance|moduleApproval|approvedLessonVersion/);
+  });
   it('builds a Vietnamese lesson-only document definition in source order', () => {
     const definition = lessonPdfDocumentDefinition(review, 'module-1');
     const serialized = JSON.stringify(definition);

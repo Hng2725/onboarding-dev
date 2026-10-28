@@ -1,4 +1,4 @@
-import type { EmployeeType } from '../../../onboarding/contracts';
+import type { EmployeeType, TemplateResource } from '../../../onboarding/contracts';
 import type { AdminTemplateDetail } from '../../../onboarding/templates';
 import { aiReviewReadiness } from './ai-template-batch';
 
@@ -12,6 +12,8 @@ export type AiPublishPhase =
   | 'failed';
 
 export interface AiPublishTarget {
+  readonly targetKey?: string;
+  readonly uploadedResources?: Readonly<Record<string, TemplateResource>>;
   readonly kind: EmployeeType;
   readonly review: AdminTemplateDetail;
   readonly preparedReview?: AdminTemplateDetail;
@@ -22,7 +24,7 @@ export interface AiPublishTarget {
 }
 
 export interface AiPublishBatchDependencies {
-  prepareResources(target: AiPublishTarget): Promise<AdminTemplateDetail>;
+  prepareResources(target: AiPublishTarget, checkpoint?: (resources: Readonly<Record<string, TemplateResource>>) => void): Promise<AdminTemplateDetail>;
   publish(review: AdminTemplateDetail): Promise<AdminTemplateDetail>;
   exportJson(published: AdminTemplateDetail): Promise<void>;
 }
@@ -47,8 +49,12 @@ function errorText(error: unknown): string {
 
 function orderedTargets(targets: readonly AiPublishTarget[]): readonly AiPublishTarget[] {
   return targets
-    .map((target) => ({ ...target }))
+    .map((target) => ({ ...target, targetKey: aiPublishTargetKey(target.review) }))
     .sort((left, right) => left.kind === right.kind ? 0 : left.kind === 'normal' ? -1 : 1);
+}
+
+export function aiPublishTargetKey(review: AdminTemplateDetail): string {
+  return `${review.employeeType}:${review.id}:${review.version}:${review.content?.moduleApproval?.fingerprint ?? 'legacy'}`;
 }
 
 export async function publishAiTemplateBatch(
@@ -76,17 +82,15 @@ export async function publishAiTemplateBatch(
   }
 
   for (let index = 0; index < current.length; index += 1) {
-    if (current[index].preparedReview) continue;
-    update(index, { phase: 'preparing_files', error: undefined });
-    try {
-      const preparedReview = await dependencies.prepareResources(current[index]);
-      update(index, { preparedReview, phase: 'prepared', error: undefined });
-    } catch (error) {
-      fail(index, error);
+    if (!current[index].preparedReview) {
+      update(index, { phase: 'preparing_files', error: undefined });
+      try {
+        const preparedReview = await dependencies.prepareResources(current[index], (uploadedResources) => update(index, { uploadedResources }));
+        update(index, { preparedReview, phase: 'prepared', error: undefined });
+      } catch (error) {
+        fail(index, error);
+      }
     }
-  }
-
-  for (let index = 0; index < current.length; index += 1) {
     let published = current[index].publishedTemplate;
     if (!published) {
       const prepared = current[index].preparedReview

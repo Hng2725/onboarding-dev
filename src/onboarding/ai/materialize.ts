@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 
 import type { OnboardingActor } from '../auth';
 import type {
+  AiJobRecord,
+  AiModuleDraftRun,
   LessonBlock,
   ModuleContent,
   OnboardingQuestion,
@@ -20,6 +22,9 @@ import type {
 } from '../templates';
 import { groundSourceRef, type RawSourceRef } from './grounding';
 import type { GeneratedTemplate } from './validate';
+import { modulesComplete } from './module-lifecycle';
+import { validApprovedLesson, validateModuleQuestionOutput } from './module-draft';
+import { validateAdminOutline } from './outline-validation';
 
 export type AiMaterializationErrorCode =
   | 'ADMIN_REQUIRED'
@@ -47,6 +52,96 @@ export interface MaterializeAiTemplateInput {
   readonly maxAttemptsPerModule?: number | null;
   readonly passingScore?: number;
   readonly generationNotes?: readonly string[];
+}
+
+interface ValidatedMaterializationInput extends MaterializeAiTemplateInput {
+  readonly approvedJob?: AiJobRecord;
+}
+
+function fingerprint(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function approvalFingerprint(job: AiJobRecord): string {
+  return fingerprint({
+    outline: job.outline, title: job.title, responsibilities: job.roleProfile?.responsibilities,
+    runs: job.outline!.modules.filter((m) => !m.tombstoned).map((m) => {
+      const run = job.moduleRuns!.find((r) => r.outline.moduleLocalId === m.moduleLocalId)!;
+      return { lesson: run.lessonDraft, questions: run.questionDraft, provenance: run.lessonProvenance,
+        lessonVersion: run.approvedLessonVersion, questionVersion: run.approvedQuestionVersion,
+        questionLessonVersion: run.questionLessonVersion, sourceFingerprint: run.sourceFingerprint };
+    }),
+  });
+}
+
+/** Resources, assessment settings and flag resolutions may change after approval; lesson/quiz text may not. */
+export function materializedModuleFingerprint(detail: { readonly modules: TemplateDraftInput['modules']; readonly content?: TemplateContentSnapshot }): string {
+  return fingerprint({
+    modules: detail.modules.map((m) => ({ id: m.id, key: m.key, title: m.title, description: m.description, questions: m.questions })),
+    lessons: detail.content?.modules.map((m) => ({ ...m, blocks: m.blocks.map(({ pendingVerification: _pending, ...block }) => block) })),
+    questions: detail.content?.questionMeta,
+  });
+}
+
+async function currentModuleInput(store: OnboardingStore, actor: OnboardingActor, jobId: string): Promise<ValidatedMaterializationInput> {
+  const row = (await store.query<StoreRecord & AiJobRecord>(actor.roomId, 'onboarding_ai_jobs', { filter: { jobId }, limit: 1 })).records[0];
+  const invalid = () => new AiMaterializationError('AI_CONTENT_INVALID', 'Every current outline module requires its latest approved lesson and three to five matching approved questions.');
+  if (!row || row.pipelineVersion !== 'module_v2' || row.kind !== 'template' || row.status !== 'completed'
+    || !row.templateKind || !row.outline || !row.moduleRuns || row.outlineApprovedRevision !== row.outline.revision
+    || validateAdminOutline(row.outline, { templateKind: row.templateKind, responsibilities: row.roleProfile?.responsibilities ?? [] }).length) throw invalid();
+  const job: AiJobRecord = { ...row, roomId: actor.roomId };
+  const sources = (await Promise.all((job.sourceIds ?? []).map(async (sourceId) => {
+    const source = (await store.query<StoreRecord & SourceRecord>(actor.roomId, 'onboarding_sources', { filter: { sourceId }, limit: 1 })).records[0];
+    return source ? { ...source, roomId: actor.roomId } : undefined;
+  }))).filter((source): source is SourceRecord => !!source && source.status === 'ready' && !source.deletedAt);
+  const runs: AiModuleDraftRun[] = [];
+  for (const module of job.outline!.modules.filter((m) => !m.tombstoned)) {
+    const matches = job.moduleRuns!.filter((r) => r.outline.moduleLocalId === module.moduleLocalId);
+    const run = matches[0];
+    if (matches.length !== 1 || !run || run.outlineRevision !== job.outline!.revision
+      || JSON.stringify(run.outline) !== JSON.stringify(module) || !modulesComplete([run])
+      || !['ai', 'fallback', 'manual'].includes(run.lessonProvenance ?? '')
+      || !Number.isSafeInteger(run.lessonVersion) || run.lessonVersion < 1
+      || !Number.isSafeInteger(run.questionVersion) || run.questionVersion < 1) throw invalid();
+    const selected = module.sourceSectionIds.map((id) => sources.flatMap((source) =>
+      (source.sections ?? []).filter((s) => s.id === id).map((section) => ({ section, checksum: source.checksum, sourceId: source.sourceId }))));
+    if (selected.some((items) => items.length !== 1)
+      || (run.sourceFingerprint !== undefined && run.sourceFingerprint !== fingerprint(selected))) throw invalid();
+    const context = { module, sections: selected.map((items) => items[0].section), features: [], responsibilities: job.roleProfile?.responsibilities ?? [], templateKind: job.templateKind! };
+    if (!validApprovedLesson(run.lessonDraft!, context, run.lessonProvenance!)
+      || !validateModuleQuestionOutput({ questions: run.questionDraft, flags: run.questionFlags ?? [] }, {
+        ...context, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance,
+      }, true).ok) throw invalid();
+    runs.push(run);
+  }
+  if (!runs.length || job.moduleRuns!.some((r) => !r.outline.tombstoned && !runs.includes(r))) throw invalid();
+  return {
+    jobId, approvedJob: job, promptVersion: job.promptVersion, templateKind: job.templateKind!, sources,
+    ...(job.roleProfile ? { roleProfile: { responsibilities: job.roleProfile.responsibilities } } : {}),
+    generated: {
+      title: job.title?.trim() || (job.templateKind === 'normal' ? 'Template 1' : 'Template 2'),
+      description: 'Onboarding', generationNotes: [], taskCoverage: job.outline!.taskCoverage,
+      modules: runs.map((run) => ({ ...run.lessonDraft!, questions: run.questionDraft! })),
+      flags: [...job.outline!.flags, ...runs.flatMap((run) => [...(run.lessonFlags ?? []), ...(run.questionFlags ?? [])].map((flag) => ({ ...flag, location: { ...flag.location, moduleLocalId: run.outline.moduleLocalId } })))],
+    },
+  };
+}
+
+export async function materializeModuleTemplate(store: OnboardingStore, templates: TemplateService, actor: OnboardingActor, jobId: string): Promise<AdminTemplateDetail> {
+  if (actor.access !== 'admin') throw new AiMaterializationError('ADMIN_REQUIRED', 'Admin access is required.');
+  return materializeValidatedTemplate(store, templates, actor, await currentModuleInput(store, actor, jobId));
+}
+
+export async function assertModuleTemplateCurrent(store: OnboardingStore, actor: OnboardingActor, detail: AdminTemplateDetail): Promise<void> {
+  if (!detail.jobId) return;
+  const row = (await store.query<StoreRecord & AiJobRecord>(actor.roomId, 'onboarding_ai_jobs', { filter: { jobId: detail.jobId }, limit: 1 })).records[0];
+  if (row?.pipelineVersion !== 'module_v2' && !detail.content?.moduleApproval) return;
+  const current = await currentModuleInput(store, actor, detail.jobId);
+  const approval = detail.content?.moduleApproval;
+  if (!approval || approval.fingerprint !== approvalFingerprint(current.approvedJob!)
+    || approval.materializedFingerprint !== materializedModuleFingerprint(detail)) {
+    throw new AiMaterializationError('AI_CONTENT_INVALID', 'The materialized lesson or questions no longer match the current approved versions.');
+  }
 }
 
 function stableId(prefix: string, ...parts: readonly string[]): string {
@@ -121,12 +216,25 @@ export async function materializeAiTemplate(
   actor: OnboardingActor,
   input: MaterializeAiTemplateInput,
 ): Promise<AdminTemplateDetail> {
+  if (actor.access !== 'admin') throw new AiMaterializationError('ADMIN_REQUIRED', 'Admin access is required.');
+  const job = (await store.query<StoreRecord & AiJobRecord>(actor.roomId, 'onboarding_ai_jobs', { filter: { jobId: input.jobId }, limit: 1 })).records[0];
+  return job?.pipelineVersion === 'module_v2'
+    ? materializeModuleTemplate(store, templates, actor, input.jobId)
+    : materializeValidatedTemplate(store, templates, actor, input);
+}
+
+async function materializeValidatedTemplate(
+  store: OnboardingStore,
+  templates: TemplateService,
+  actor: OnboardingActor,
+  input: ValidatedMaterializationInput,
+): Promise<AdminTemplateDetail> {
   if (actor.access !== 'admin') {
     throw new AiMaterializationError('ADMIN_REQUIRED', 'Admin access is required.');
   }
   const jobId = required(input.jobId, 'Job ID');
   if (
-    input.sources.length === 0
+    (input.sources.length === 0 && !input.approvedJob?.moduleRuns?.every((run) => run.outline.tombstoned || run.lessonProvenance === 'manual'))
     || input.sources.some((source) =>
       source.roomId !== actor.roomId || source.status !== 'ready' || Boolean(source.deletedAt))
   ) {
@@ -136,23 +244,26 @@ export async function materializeAiTemplate(
     throw new AiMaterializationError('AI_CONTENT_INVALID', 'Advanced templates require a role profile.');
   }
   const templateId = stableId('ai-template', actor.roomId, jobId);
+  // A revised approval gets fresh content IDs so published versions remain immutable.
+  const identityScope = input.approvedJob ? stableId('approval', templateId, approvalFingerprint(input.approvedJob)) : templateId;
+  const scoped = (moduleId: string, localId: string) => input.approvedJob ? moduleId + '\u0000' + localId : localId;
   const moduleIds = new Map<string, string>();
   const blockIds = new Map<string, string>();
   const questionIds = new Map<string, string>();
   input.generated.modules.forEach((module) => {
-    moduleIds.set(module.localId, stableId('ai-mod', templateId, module.localId));
+    moduleIds.set(module.localId, stableId('ai-mod', identityScope, module.localId));
     module.blocks.forEach((block) => {
-      blockIds.set(block.localId, stableId('ai-block', templateId, module.localId, block.localId));
+      blockIds.set(scoped(module.localId, block.localId), stableId('ai-block', identityScope, module.localId, block.localId));
     });
     module.questions.forEach((question) => {
-      questionIds.set(question.localId, stableId('ai-q', templateId, module.localId, question.localId));
+      questionIds.set(scoped(module.localId, question.localId), stableId('ai-q', identityScope, module.localId, question.localId));
     });
   });
 
   const flags: VerificationFlag[] = input.generated.flags.map((flag, index) => ({
     id: stableId(
       'ai-flag',
-      templateId,
+      identityScope,
       flag.type,
       flag.location.moduleLocalId ?? '',
       flag.location.blockLocalId ?? '',
@@ -169,10 +280,10 @@ export async function materializeAiTemplate(
         ? { moduleId: moduleIds.get(flag.location.moduleLocalId) }
         : {}),
       ...(flag.location.blockLocalId
-        ? { blockId: blockIds.get(flag.location.blockLocalId) }
+        ? { blockId: blockIds.get(scoped(flag.location.moduleLocalId ?? '', flag.location.blockLocalId)) }
         : {}),
       ...(flag.location.questionLocalId
-        ? { questionId: questionIds.get(flag.location.questionLocalId) }
+        ? { questionId: questionIds.get(scoped(flag.location.moduleLocalId ?? '', flag.location.questionLocalId)) }
         : {}),
       ...(flag.location.featureId ? { featureId: flag.location.featureId } : {}),
     },
@@ -189,10 +300,11 @@ export async function materializeAiTemplate(
   const questionMeta: QuestionMeta[] = [];
   const draftModules: TemplateDraftInput['modules'][number][] = [];
   for (const generatedModule of input.generated.modules) {
+    const approved = input.approvedJob?.moduleRuns?.find((run) => run.outline.moduleLocalId === generatedModule.localId);
     const moduleId = moduleIds.get(generatedModule.localId);
     if (!moduleId) throw new AiMaterializationError('AI_CONTENT_INVALID', 'A module ID could not be materialized.');
     const blocks: LessonBlock[] = generatedModule.blocks.map((block) => {
-      const blockId = blockIds.get(block.localId);
+      const blockId = blockIds.get(scoped(generatedModule.localId, block.localId));
       if (!blockId) throw new AiMaterializationError('AI_CONTENT_INVALID', 'A block ID could not be materialized.');
       return {
         id: blockId,
@@ -204,24 +316,24 @@ export async function materializeAiTemplate(
           block.sourceRefs,
           input.sources,
           'Block ' + block.localId,
-          block.kind !== 'summary',
+          block.kind !== 'summary' && approved?.lessonProvenance !== 'manual',
         ),
         pendingVerification: pendingBlocks.has(blockId),
       };
     });
     const questions: OnboardingQuestion[] = generatedModule.questions.map((question) => {
-      const questionId = questionIds.get(question.localId);
+      const questionId = questionIds.get(scoped(generatedModule.localId, question.localId));
       if (!questionId) {
         throw new AiMaterializationError('AI_CONTENT_INVALID', 'A question ID could not be materialized.');
       }
       const balanced = balancedOptions(
-        templateId,
-        question.localId,
+        identityScope,
+        scoped(generatedModule.localId, question.localId),
         questionIndex++,
         question.options,
         question.correctOptionId,
       );
-      const mappedBlockIds = question.blockIds.map((localId) => blockIds.get(localId))
+      const mappedBlockIds = question.blockIds.map((localId) => blockIds.get(scoped(generatedModule.localId, localId)))
         .filter((id): id is string => Boolean(id));
       if (mappedBlockIds.length !== question.blockIds.length) {
         throw new AiMaterializationError('AI_CONTENT_INVALID', 'A question references an unknown lesson block.');
@@ -229,7 +341,7 @@ export async function materializeAiTemplate(
       questionMeta.push({
         questionId,
         level: question.level,
-        sourceRefs: grounded(question.sourceRefs, input.sources, 'Question ' + question.localId, true),
+        sourceRefs: grounded(question.sourceRefs, input.sources, 'Question ' + question.localId, approved?.lessonProvenance !== 'manual'),
         blockIds: mappedBlockIds,
       });
       return {
@@ -243,6 +355,12 @@ export async function materializeAiTemplate(
       };
     });
     contentModules.push({
+      ...(approved ? {
+        moduleLocalId: approved.outline.moduleLocalId, lessonProvenance: approved.lessonProvenance,
+        approvedLessonVersion: approved.approvedLessonVersion, approvedQuestionVersion: approved.approvedQuestionVersion,
+        questionLessonVersion: approved.questionLessonVersion, featureIds: approved.outline.featureIds,
+        sourceSectionIds: approved.outline.sourceSectionIds, responsibilityIndexes: approved.outline.responsibilityIndexes,
+      } : {}),
       moduleId,
       frameKey: generatedModule.frameKey,
       objectives: generatedModule.objectives,
@@ -283,10 +401,15 @@ export async function materializeAiTemplate(
     maxAttempts: 1,
     modules: draftModules,
   };
+  const approvedContent: TemplateContentSnapshot = input.approvedJob ? { ...content, moduleApproval: {
+    pipelineVersion: 'module_v2', outlineRevision: input.approvedJob.outline!.revision,
+    fingerprint: approvalFingerprint(input.approvedJob), taskCoverage: input.approvedJob.outline!.taskCoverage,
+    materializedFingerprint: materializedModuleFingerprint({ content, modules: draftModules }),
+  } } : content;
   const detail = await templates.createAiDraft(actor, {
     templateId,
     draft,
-    content,
+    content: approvedContent,
     flags,
     ...(input.roleProfile ? { roleProfile: input.roleProfile } : {}),
     sourceIds: [...new Set(input.sources.map((source) => source.sourceId))],

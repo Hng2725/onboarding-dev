@@ -17,6 +17,7 @@ import {
 } from '../templates';
 import { normalizeForMatch } from './grounding';
 import { createSourceService } from './sources';
+import { assertModuleTemplateCurrent } from './materialize';
 
 export type AiReviewServiceErrorCode =
   | 'ADMIN_REQUIRED'
@@ -38,6 +39,8 @@ export class AiReviewServiceError extends Error {
 }
 
 export type AiReviewOperation =
+  | { readonly kind: 'checkpoint_publication'; readonly moduleId: string; readonly resource: TemplateResource }
+  | { readonly kind: 'checkpoint_publication'; readonly jsonFileId: string }
   | {
     readonly kind: 'update_block';
     readonly moduleId: string;
@@ -206,7 +209,7 @@ function structuralErrors(
       continue;
     }
     if (
-      moduleContent.objectives.length < 2
+      (moduleContent.objectives.length < 2 && moduleContent.lessonProvenance !== 'fallback')
       || moduleContent.objectives.length > 4
       || moduleContent.estimatedMinutes <= 0
     ) {
@@ -221,6 +224,7 @@ function structuralErrors(
     }
     if (
       detail.employeeType === 'advanced'
+      && moduleContent.lessonProvenance !== 'fallback'
       && !moduleContent.blocks.some((block) => block.kind === 'scenario')
     ) {
       errors.push('Advanced module ' + module.id + ' requires a scenario block.');
@@ -230,7 +234,7 @@ function structuralErrors(
     }
     const blockIds = new Set(moduleContent.blocks.map((block) => block.id));
     for (const block of moduleContent.blocks) {
-      if (block.kind !== 'summary' && block.sourceRefs.length === 0) {
+      if (block.kind !== 'summary' && block.sourceRefs.length === 0 && moduleContent.lessonProvenance !== 'manual') {
         errors.push('Block ' + block.id + ' requires source evidence.');
       }
     }
@@ -247,7 +251,7 @@ function structuralErrors(
       }
       if (
         !meta
-        || meta.sourceRefs.length === 0
+        || (meta.sourceRefs.length === 0 && moduleContent.lessonProvenance !== 'manual')
         || meta.blockIds.length === 0
         || meta.blockIds.some((blockId) => !blockIds.has(blockId))
       ) {
@@ -265,7 +269,7 @@ function structuralErrors(
 }
 
 function touchedBy(flag: VerificationFlag, operation: AiReviewOperation): boolean {
-  if (operation.kind === 'set_settings' || operation.kind === 'upsert_generated_resource') return false;
+  if (operation.kind === 'set_settings' || operation.kind === 'upsert_generated_resource' || operation.kind === 'checkpoint_publication') return false;
   if ('moduleId' in operation && flag.location.moduleId === operation.moduleId) {
     if (operation.kind === 'remove_module') return true;
     if ('blockId' in operation) return flag.location.blockId === operation.blockId;
@@ -453,6 +457,8 @@ export function createAiPublishGuard(
   return async (actor, detail) => {
     if (detail.source !== 'ai_generated') return;
     requireAi(detail);
+    try { await assertModuleTemplateCurrent(store, actor, detail); }
+    catch (error) { throw new TemplateServiceError('TEMPLATE_INVALID', error instanceof Error ? error.message : 'Module approvals are invalid.'); }
     if (detail.flags.some((flag) => flag.severity === 'blocking' && flag.status === 'open')) {
       throw new TemplateServiceError(
         'TEMPLATE_FLAGS_BLOCKING',
@@ -497,6 +503,7 @@ function applyReviewOperations(
   };
   let passingScore = detail.passingScore;
   for (const operation of operations) {
+    if (operation.kind === 'checkpoint_publication') continue;
     if (operation.kind === 'update_block') {
       let found = false;
       content = {
@@ -750,6 +757,28 @@ export function createAiReviewService(
         throw new AiReviewServiceError('REVIEW_CONFLICT', 'Template changed after this review loaded it.');
       }
       if (input.ops.length === 0) return detail;
+      if (input.ops.some((op) => op.kind === 'checkpoint_publication')) {
+        if (input.ops.length !== 1 || input.ops[0].kind !== 'checkpoint_publication') throw new AiReviewServiceError('REVIEW_INVALID', 'Checkpoint one publication artifact at a time.');
+        const op = input.ops[0];
+        const publication = detail.content.publication ?? { pdfs: {} };
+        let next = publication;
+        if ('jsonFileId' in op) {
+          if (detail.status !== 'published' || !op.jsonFileId?.trim()) throw new AiReviewServiceError('REVIEW_INVALID', 'A published template and JSON file ID are required.');
+          next = { ...publication, jsonFileId: op.jsonFileId.trim() };
+        } else {
+          if (!detail.modules.some((m) => m.id === op.moduleId) || op.resource?.id !== 'ai-lesson-pdf-' + op.moduleId
+            || op.resource.kind !== 'file' || !op.resource.required || !op.resource.fileId?.trim() || !op.resource.title?.trim()) throw new AiReviewServiceError('REVIEW_INVALID', 'A valid lesson PDF resource is required.');
+          next = { ...publication, pdfs: { ...publication.pdfs, [op.moduleId]: op.resource } };
+        }
+        const rows = await store.query<TemplateContentDbRecord>(actor.roomId, 'onboarding_template_content', { filter: { templateId: detail.id, templateVersion: detail.version }, limit: 1 });
+        const row = rows.records[0];
+        if (!row) throw new AiReviewServiceError('REVIEW_NOT_FOUND', 'Template content not found.');
+        await store.update(actor.roomId, 'onboarding_template_content', row.id, { content: { ...detail.content, publication: next }, updatedAt: now() }, { expectedUpdatedAt: row.updatedAt });
+        return templates.getAdminDetail(actor, detail.id, detail.version);
+      }
+      if (detail.content.moduleApproval && input.ops.some((op) => op.kind !== 'set_settings' && op.kind !== 'upsert_generated_resource')) {
+        throw new AiReviewServiceError('REVIEW_INVALID', 'Edit and approve lessons and questions in the module workspace first.');
+      }
       const updatedState = applyReviewOperations(detail, input.ops);
       const flags = reopenTouchedFlags(detail.flags, input.ops);
       const updated = await save(
@@ -779,6 +808,9 @@ export function createAiReviewService(
       }
       const flag = detail.flags.find((item) => item.id === input.flagId);
       if (!flag) throw new AiReviewServiceError('FLAG_NOT_FOUND', 'The verification flag was not found.');
+      if (detail.content.moduleApproval && input.action === 'remove') {
+        throw new AiReviewServiceError('REVIEW_INVALID', 'Change and approve module content in the module workspace first.');
+      }
       const note = input.note?.trim();
       const timestamp = now();
       let modules = detail.modules;
@@ -825,7 +857,7 @@ export function createAiReviewService(
           verifiedAt: timestamp,
         };
         evidence.push(ref);
-        content = {
+        if (!content.moduleApproval) content = {
           ...content,
           modules: content.modules.map((module) => ({
             ...module,

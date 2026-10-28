@@ -2,13 +2,64 @@ import { describe, expect, it } from 'vitest';
 
 import type { OnboardingActor } from '../src/onboarding/auth';
 import type { TemplateResource } from '../src/onboarding/contracts';
-import { materializeAiTemplate } from '../src/onboarding/ai/materialize';
+import { materializeAiTemplate, materializeModuleTemplate } from '../src/onboarding/ai/materialize';
+import { approvedModuleJob } from './helpers/approved-module-fixture';
 import { createAiPublishGuard, createAiReviewService } from '../src/onboarding/ai/review';
 import { createTemplateService } from '../src/onboarding/templates';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
 
 const admin: OnboardingActor = { userId: 'admin-1', roomId: 'room-a', access: 'admin' };
+
+describe('module publication gate', () => {
+  it('does not let callers bypass blocking flags by omitting the optional legacy publish guard', async () => {
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    const job = approvedModuleJob();
+    await store.create(admin.roomId, 'onboarding_ai_jobs', { ...job, outline: { ...job.outline!, flags: [{ type: 'missing', severity: 'blocking', message: 'Missing policy', questionForAdmin: 'Confirm policy?', location: { moduleLocalId: 'm1' }, evidence: [] }] } });
+    const templates = createTemplateService(store);
+    const draft = await materializeModuleTemplate(store, templates, admin, job.jobId);
+    await expect(templates.publish(admin, draft.id, 1)).rejects.toMatchObject({ code: 'TEMPLATE_INVALID' });
+  });
+  it('persists PDF and JSON checkpoints across service instances without revising a published template', async () => {
+    const { store, templates, draft } = await setup();
+    let review = await createAiReviewService(store, templates).updateReview(admin, {
+      templateId: draft.id, version: 1, expectedUpdatedAt: draft.updatedAt,
+      ops: [{ kind: 'checkpoint_publication', moduleId: draft.modules[0].id, resource: { id: 'ai-lesson-pdf-' + draft.modules[0].id, title: 'Lesson', kind: 'file', required: true, fileId: 'uploaded-pdf' } }],
+    });
+    expect((await createAiReviewService(store, templates).getReview(admin, draft.id, 1)).content?.publication?.pdfs[draft.modules[0].id].fileId).toBe('uploaded-pdf');
+    review = await templates.publish(admin, draft.id, 1);
+    await createAiReviewService(store, templates).updateReview(admin, { templateId: draft.id, version: 1, expectedUpdatedAt: review.updatedAt, ops: [{ kind: 'checkpoint_publication', jsonFileId: 'uploaded-json' }] });
+    expect((await createAiReviewService(store, templates).getReview(admin, draft.id, 1))).toMatchObject({ status: 'published', version: 1, content: { publication: { jsonFileId: 'uploaded-json' } } });
+    expect(await store.count(admin.roomId, 'onboarding_templates')).toBe(1);
+  });
+  it('rejects publication if a newer lesson invalidated a materialized approval even without an optional guard', async () => {
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    const job = approvedModuleJob();
+    const row = await store.create(admin.roomId, 'onboarding_ai_jobs', { ...job });
+    const templates = createTemplateService(store);
+    const draft = await materializeModuleTemplate(store, templates, admin, job.jobId);
+    await store.update(admin.roomId, 'onboarding_ai_jobs', String(row.id), {
+      moduleRuns: job.moduleRuns!.map((r, i) => i === 0 ? { ...r, lessonVersion: 3 } : r),
+    });
+    await expect(templates.publish(admin, draft.id, draft.version)).rejects.toMatchObject({ code: 'TEMPLATE_INVALID' });
+    expect((await templates.getAdminDetail(admin, draft.id, draft.version)).status).toBe('draft');
+  });
+
+  it('requires module edits to be approved again and permits artifact/settings updates', async () => {
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    const job = approvedModuleJob();
+    await store.create(admin.roomId, 'onboarding_ai_jobs', { ...job });
+    const templates = createTemplateService(store, { publishGuard: createAiPublishGuard(store) });
+    const draft = await materializeModuleTemplate(store, templates, admin, job.jobId);
+    const review = createAiReviewService(store, templates);
+    await expect(review.updateReview(admin, { templateId: draft.id, version: 1, expectedUpdatedAt: draft.updatedAt, ops: [{ kind: 'update_block', moduleId: draft.modules[0].id, blockId: draft.content!.modules[0].blocks[0].id, body: 'Unapproved replacement' }] })).rejects.toMatchObject({ code: 'REVIEW_INVALID' });
+    const updated = await review.updateReview(admin, { templateId: draft.id, version: 1, expectedUpdatedAt: draft.updatedAt, ops: [{ kind: 'set_settings', passingScore: 80 }] });
+    await expect(templates.publish(admin, updated.id, 1)).resolves.toMatchObject({ status: 'published', passingScore: 80 });
+  });
+});
 
 async function setup() {
   const store = new MemoryOnboardingStore();

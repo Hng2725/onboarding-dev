@@ -18,6 +18,14 @@ interface FolderRow {
 }
 
 describe('Onboarding Roomfiles', () => {
+  it('exports lesson content without approval, provenance or publication checkpoint internals', () => {
+    const artifact = templateJsonArtifact({ id: 'template-1', version: 1, title: 'Training', jobId: 'secret-job', operationId: 'secret-operation', content: {
+      publication: { pdfs: {}, jsonFileId: 'secret-file' }, moduleApproval: { fingerprint: 'secret-hash' },
+      modules: [{ moduleId: 'm1', lessonProvenance: 'manual', approvedLessonVersion: 2, approvedQuestionVersion: 3, questionLessonVersion: 2, moduleLocalId: 'local', blocks: [{ body: 'Learn this' }] }],
+    } });
+    expect(JSON.parse(artifact.content).content.modules[0].blocks[0].body).toBe('Learn this');
+    expect(artifact.content).not.toMatch(/secret-|lessonProvenance|moduleApproval|publication|approvedLessonVersion|questionLessonVersion|operationId|moduleLocalId/);
+  });
   it('accepts the direct JSON response shape returned by the live host bridge', async () => {
     const rest = vi.fn(async (request: { query?: Record<string, unknown> }) => request.query?.fatherId
       ? {

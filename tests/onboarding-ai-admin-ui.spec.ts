@@ -43,6 +43,14 @@ import {
   validateSourceFile,
 } from '../src/ui/onboarding/ai/source-panel';
 import { TemplateCard, templateDetailActions } from '../src/ui/onboarding/template-editor-ui';
+import { createAiReviewService } from '../src/onboarding/ai/review';
+import { createTemplateService } from '../src/onboarding/templates';
+import { materializeModuleTemplate } from '../src/onboarding/ai/materialize';
+import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
+import { approvedModuleJob } from './helpers/approved-module-fixture';
+import { seedAiSource } from './helpers/ai-template-fixture';
+import { AiPublishBatchError, publishAiTemplateBatch, type AiPublishTarget } from '../src/ui/onboarding/ai/ai-publish-batch';
+import type { UpdateAiReviewInput } from '../src/onboarding/ai/review';
 
 const blockingFlag: VerificationFlag = {
   id: 'flag-1',
@@ -78,6 +86,51 @@ const publishReview: AdminTemplateDetail = {
   updatedAt: 'draft-at',
 };
 describe('Admin AI template UI model', () => {
+  it('resumes Both from server checkpoints after a second-template PDF failure without duplicate artifacts', async () => {
+    const actor = { roomId: 'room-a', userId: 'admin-1', access: 'admin' as const };
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    const templates = createTemplateService(store);
+    const reviews = createAiReviewService(store, templates);
+    const targets: AiPublishTarget[] = [];
+    for (const kind of ['normal', 'advanced'] as const) {
+      const job = approvedModuleJob(kind);
+      await store.create(actor.roomId, 'onboarding_ai_jobs', { ...job });
+      const review = await materializeModuleTemplate(store, templates, actor, job.jobId);
+      targets.push({ kind, review, jsonExported: false, phase: 'idle' });
+    }
+    const uploaded: string[] = [];
+    let fail = true;
+    const makeDependencies = (withSettings = true) => createAiPublishDependencies({
+      roomId: actor.roomId,
+      ...(withSettings ? { settingsByKind: { advanced: { passingScore: 85, maxAttemptsPerModule: 4, learningMode: 'free' as const } } } : {}),
+      app: { uploadFile: async (file: { fileName: string }) => {
+        if (file.fileName === 'advanced-1.pdf' && fail) throw new Error('Upload disconnected');
+        uploaded.push(file.fileName); return { fileId: file.fileName };
+      } } as never,
+      api: {
+        adminAi: async (action: string, args: Record<string, unknown>) => ({ review: action === 'get_review'
+          ? await reviews.getReview(actor, String(args.templateId), Number(args.version))
+          : await reviews.updateReview(actor, args as unknown as UpdateAiReviewInput) }),
+        adminTemplates: async (_action: string, args: Record<string, unknown>) => ({ template: await templates.publish(actor, String(args.templateId), Number(args.version), String(args.expectedUpdatedAt)) }),
+      } as never,
+      ensureTemplateFolder: async () => ({ rootId: 'root', documentsId: 'documents', templatesId: 'templates', templateFolderId: 'folder' }),
+      createLessonPdf: async (review, _id, index) => ({ fileName: `${review.employeeType}-${index}.pdf`, mimeType: 'application/pdf', blob: new Blob(['pdf']) }),
+      encodeBlob: async () => ({ dataUrl: 'data:application/pdf;base64,YQ==', base64: 'YQ==' }),
+    });
+    await expect(publishAiTemplateBatch(targets, makeDependencies())).rejects.toBeInstanceOf(AiPublishBatchError);
+    expect((await templates.getAdminDetail(actor, targets[0].review.id, 1)).status).toBe('published');
+    expect((await templates.getAdminDetail(actor, targets[1].review.id, 1)).passingScore).toBe(85);
+    // Simulate a fresh modal with no in-memory or browser checkpoint state.
+    fail = false;
+    const completed = await publishAiTemplateBatch(targets, makeDependencies(false));
+    expect(completed.every((target) => target.phase === 'completed')).toBe(true);
+    expect(uploaded).toHaveLength(11); // 4 + 5 PDFs and two JSON files.
+    expect(new Set(uploaded).size).toBe(11);
+    expect(await store.count(actor.roomId, 'onboarding_templates')).toBe(2);
+    expect(await store.count(actor.roomId, 'onboarding_resources')).toBe(9);
+    expect((await templates.getAdminDetail(actor, targets[1].review.id, 1)).roleProfile).toEqual({ responsibilities: ['Process orders', 'Review orders'] });
+  });
   it('derives an upload system name from the selected file when the field is blank', () => {
     expect(resolveUploadSystemName('', 'employee-handbook.docx')).toBe('employee handbook');
     expect(resolveUploadSystemName('  Payroll Portal  ', 'guide.pdf')).toBe('Payroll Portal');
@@ -404,8 +457,7 @@ describe('Admin AI template UI model', () => {
     expect(pdfUploads).toHaveLength(2);
     expect(pdfUploads.every((input) => input.folderId === 'template-folder'
       && input.duplicateAction === 'replace')).toBe(true);
-    expect(adminAi).toHaveBeenCalledTimes(1);
-    const updateArgs = adminAi.mock.calls[0][1] as { readonly ops: readonly Record<string, unknown>[] };
+    const updateArgs = adminAi.mock.calls.at(-1)![1] as { readonly ops: readonly Record<string, unknown>[] };
     const resourceOps = updateArgs.ops.filter((operation) => operation.kind === 'upsert_generated_resource');
     expect(resourceOps).toHaveLength(2);
     expect(resourceOps.map((operation) => operation.resource)).toEqual([
@@ -429,7 +481,7 @@ describe('Admin AI template UI model', () => {
       app: { uploadFile: vi.fn(async (upload: { readonly fileName: string }) => ({
         file: { _id: `file-${upload.fileName}`, name: upload.fileName },
       })) } as never,
-      api: { adminAi: vi.fn(), adminTemplates: vi.fn() } as never,
+      api: { adminAi: vi.fn(async () => ({ review: publishReview })), adminTemplates: vi.fn() } as never,
       roomId: 'room-1',
       ensureTemplateFolder: async () => ({
         rootId: 'root', documentsId: 'documents', templatesId: 'templates', templateFolderId: 'folder',
@@ -457,8 +509,8 @@ describe('Admin AI template UI model', () => {
   it('refreshes and closes the modal only after every publish target completes', () => {
     const calls: string[] = [];
     const complete = [
-      { kind: 'normal' as const, review: publishReview, jsonExported: true, phase: 'completed' as const },
-      { kind: 'advanced' as const, review: { ...publishReview, employeeType: 'advanced' as const }, jsonExported: true, phase: 'completed' as const },
+      { kind: 'normal' as const, review: publishReview, preparedReview: publishReview, publishedTemplate: { ...publishReview, status: 'published' as const }, jsonExported: true, phase: 'completed' as const },
+      { kind: 'advanced' as const, review: { ...publishReview, employeeType: 'advanced' as const }, preparedReview: publishReview, publishedTemplate: { ...publishReview, status: 'published' as const }, jsonExported: true, phase: 'completed' as const },
     ];
     const callbacks = {
       clearResume: () => calls.push('clear'),
@@ -471,6 +523,8 @@ describe('Admin AI template UI model', () => {
       callbacks,
     )).toBe(false);
     expect(calls).toEqual([]);
+    expect(finishSuccessfulAiPublish(complete.map((target) => ({ ...target, jsonExported: false })), callbacks)).toBe(false);
+    expect(finishSuccessfulAiPublish(complete.map((target) => ({ ...target, publishedTemplate: undefined })), callbacks)).toBe(false);
 
     expect(finishSuccessfulAiPublish(complete, callbacks)).toBe(true);
     expect(calls).toEqual(['clear', 'refresh', 'close']);

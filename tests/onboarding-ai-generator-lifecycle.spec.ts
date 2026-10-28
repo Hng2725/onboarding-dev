@@ -3,6 +3,7 @@ import TestRenderer, { act } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AiJobRecord } from '../src/onboarding/contracts';
+import type { AdminTemplateDetail } from '../src/onboarding/templates';
 
 const host = vi.hoisted(() => ({
   appRevision: 0,
@@ -82,6 +83,47 @@ const failedTemplateJob: AiJobRecord = {
 };
 
 describe('AI generator lifecycle', () => {
+  it('reopens a partial publication at the batch summary using durable server checkpoints', async () => {
+    const storage = new Map([['onboarding:ai:template:room-1:normal', 'normal-job'], ['onboarding:ai:template:room-1:advanced', 'advanced-job'], ['onboarding:ai:selection:room-1', 'both']]);
+    vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    const reviews = (['normal', 'advanced'] as const).map((kind): AdminTemplateDetail => ({ id: kind + '-draft', version: 1, employeeType: kind, title: kind, description: '', source: 'ai_generated', status: kind === 'normal' ? 'published' : 'draft', locked: false, maxAttempts: 2, modules: [], flags: [], updatedAt: 'now', content: { assessmentMode: 'per_module', learningMode: 'sequential', maxAttemptsPerModule: 2, modules: [], questionMeta: [], publication: { pdfs: {}, ...(kind === 'normal' ? { jsonFileId: 'normal-json' } : {}) } } }));
+    const jobs = reviews.map((review) => ({ ...failedTemplateJob, jobId: review.employeeType + '-job', templateKind: review.employeeType, pipelineVersion: 'module_v2', status: 'completed', result: { templateId: review.id, version: 1 } }));
+    const closed = vi.fn();
+    const api = { adminAi: vi.fn(async (action: string, args?: Record<string, unknown>) => {
+      if (action === 'list_sources') return { sources: [] };
+      if (action === 'list_jobs') return { jobs };
+      if (action === 'get_review') return { review: reviews.find((review) => review.id === args?.templateId) };
+      throw new Error('Unexpected action: ' + action);
+    }) };
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: closed, onComplete: () => undefined })); });
+    expect(view.root.findAllByType('button').some((button) => button.children.join('').includes('Xuất bản cả hai'))).toBe(true);
+    expect(closed).not.toHaveBeenCalled();
+    expect(JSON.stringify(view.toJSON())).toContain('Đã hoàn tất');
+    view.unmount(); vi.unstubAllGlobals();
+  });
+  it('opens a materialized module review and requires explicit next before Template 2', async () => {
+    const storage = new Map([['onboarding:ai:template:room-1:normal', 'template-1'], ['onboarding:ai:selection:room-1', 'both']]);
+    vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    const review: AdminTemplateDetail = { id: 'draft-1', version: 1, employeeType: 'normal', title: 'Approved first', description: '', source: 'ai_generated', status: 'draft', locked: false, maxAttempts: 2, modules: [{ id: 'm1', key: 'core', title: 'Core', description: '', order: 0, resources: [], questions: [] }], flags: [], updatedAt: 'now', content: { assessmentMode: 'per_module', learningMode: 'sequential', maxAttemptsPerModule: 2, questionMeta: [], modules: [{ moduleId: 'm1', frameKey: 'core', objectives: ['Learn'], estimatedMinutes: 1, blocks: [{ id: 'b1', kind: 'summary', body: 'Approved lesson', sourceRefs: [], pendingVerification: false }] }], moduleApproval: { pipelineVersion: 'module_v2', outlineRevision: 1, fingerprint: 'approved', materializedFingerprint: 'snapshot', taskCoverage: [] } } };
+    const job = { ...failedTemplateJob, templateKind: 'normal', pipelineVersion: 'module_v2', status: 'completed', result: { templateId: review.id, version: 1 } };
+    const api = { adminAi: vi.fn(async (action: string) => {
+      if (action === 'list_sources') return { sources: [] };
+      if (action === 'list_jobs') return { jobs: [inventoryJob, job] };
+      if (action === 'get_review') return { review };
+      throw new Error('Unexpected action: ' + action);
+    }) };
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+    const next = view.root.findAllByType('button').find((button) => button.children.join('') === 'Tiếp: Template 2');
+    expect(next).toBeDefined();
+    expect(view.root.findByProps({ 'aria-label': 'Sửa khối nội dung' }).props.disabled).toBe(true);
+    expect(view.root.findAllByType('button').some((button) => button.children.join('') === 'Chỉnh sửa module')).toBe(true);
+    expect(api.adminAi.mock.calls.some(([action]) => action === 'start_job')).toBe(false);
+    await act(async () => { next!.props.onClick(); });
+    expect(view.root.findAllByType('button').some((button) => button.children.join('').includes('Tạo lộ trình'))).toBe(true);
+    view.unmount(); vi.unstubAllGlobals();
+  });
   it('restores and closes a timed-out job by observing the provider without cancelling it', async () => {
     host.appRevision = 0;
     let cancelled = false;
@@ -188,7 +230,7 @@ it('reopens a completed module job without routing to legacy review', async () =
   const api = { adminAi: vi.fn(async (action: string) => { if (action === 'list_sources') return { sources: [] }; if (action === 'list_jobs') return { jobs: [inventoryJob, job] }; throw new Error('Unexpected action: ' + action); }) };
   let view!: TestRenderer.ReactTestRenderer;
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-  expect(JSON.stringify(view.toJSON())).toContain('Sẵn sàng tạo bản nháp/xuất bản');
+  expect(view.root.findAllByType('button').some((button) => button.children.join('') === 'Rà soát bản nháp')).toBe(true);
   expect(api.adminAi).not.toHaveBeenCalledWith('get_review', expect.anything());
   view.unmount(); vi.unstubAllGlobals();
 });

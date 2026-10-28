@@ -11,6 +11,8 @@ import { createModuleLearningService } from '../src/onboarding/module-learning';
 import { createTemplateService } from '../src/onboarding/templates';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { generatedTemplate } from './helpers/ai-template-fixture';
+import { seedAiSource } from './helpers/ai-template-fixture';
+import { approvedModuleJob } from './helpers/approved-module-fixture';
 
 const admin: OnboardingActor = { userId: 'admin-1', roomId: 'room-a', access: 'admin' };
 const learner: OnboardingActor = { userId: 'member-1', roomId: 'room-a', access: 'learner' };
@@ -49,6 +51,18 @@ function correctAnswers(started: {
 }
 
 describe('AI onboarding integration', () => {
+  it('materializes current approved module pairs on completion without publishing', async () => {
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    const job = approvedModuleJob();
+    await store.create(admin.roomId, 'onboarding_ai_jobs', { ...job, status: 'running' });
+    const jobs = createAiJobService(store);
+    const completed = await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'test-worker' });
+    expect(completed).toMatchObject({ kind: 'done', job: { status: 'completed', result: { templateId: expect.any(String), version: 1 } } });
+    const catalog = await createTemplateService(store).list(admin);
+    expect(catalog.filter((t) => t.source === 'ai_generated')).toEqual([expect.objectContaining({ status: 'draft' })]);
+    expect(await store.count(admin.roomId, 'onboarding_resources')).toBe(0);
+  });
   it('runs document ingestion through generation, review, publish, assignment, retry, and completion', async () => {
     const store = new MemoryOnboardingStore();
     let tick = 0;

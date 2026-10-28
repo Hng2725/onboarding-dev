@@ -4,6 +4,14 @@ import { createModuleLearningService } from '../src/onboarding/module-learning';
 import { moduleLearner, seedAiAssignment } from './helpers/ai-assignment-fixture';
 
 describe('module learning DTO boundary', () => {
+  it('omits internal materialization and artifact metadata from the assigned learner lesson', async () => {
+    const context = await seedAiAssignment();
+    const row = (await context.store.query('room-a', 'onboarding_assignments', { filter: { id: context.assignment.id } })).records[0];
+    const snapshot = row.templateSnapshot as import('../src/onboarding/contracts').TemplateSnapshot;
+    await context.store.update('room-a', 'onboarding_assignments', context.assignment.id, { templateSnapshot: { ...snapshot, content: { ...snapshot.content, moduleApproval: { fingerprint: 'private' }, publication: { pdfs: {}, jsonFileId: 'private' }, modules: snapshot.content!.modules.map((m) => ({ ...m, lessonProvenance: 'manual', approvedLessonVersion: 1 })) } } });
+    const detail = await context.assignments.getMine(moduleLearner, context.assignment.id);
+    expect(JSON.stringify(detail)).not.toMatch(/lessonProvenance|approvedLessonVersion|moduleApproval|publication/);
+  });
   it('hides answer keys, explanations, and source refs until a submitted attempt is requested', async () => {
     const context = await seedAiAssignment();
     const service = createModuleLearningService(

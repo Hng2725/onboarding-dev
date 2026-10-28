@@ -130,9 +130,9 @@ function slugify(value: string): string {
   return slug || 'module';
 }
 
-export function lessonPdfFileName(moduleTitle: string, moduleIndex: number): string {
+export function lessonPdfFileName(moduleTitle: string, moduleIndex: number, moduleId?: string): string {
   const ordinal = String(Math.max(0, moduleIndex) + 1).padStart(2, '0');
-  return `${ordinal}-${slugify(moduleTitle)}.pdf`;
+  return `${ordinal}-${slugify(moduleTitle)}${moduleId ? '-' + slugify(moduleId) : ''}.pdf`;
 }
 
 export function lessonPdfDocumentDefinition(
@@ -220,7 +220,7 @@ export async function createLessonPdfArtifact(
   pdfMake.addVirtualFileSystem(vfsModule.default);
   const blob = await pdfMake.createPdf(lessonPdfDocumentDefinition(review, moduleId)).getBlob();
   return {
-    fileName: lessonPdfFileName(module.title, moduleIndex),
+    fileName: lessonPdfFileName(module.title, moduleIndex, review.content?.moduleApproval ? module.id : undefined),
     mimeType: 'application/pdf',
     blob: blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' }),
   };

@@ -49,6 +49,14 @@ export interface LessonBlock {
 }
 
 export interface ModuleContent {
+  readonly moduleLocalId?: string;
+  readonly lessonProvenance?: 'ai' | 'fallback' | 'manual';
+  readonly approvedLessonVersion?: number;
+  readonly approvedQuestionVersion?: number;
+  readonly questionLessonVersion?: number;
+  readonly featureIds?: readonly string[];
+  readonly sourceSectionIds?: readonly string[];
+  readonly responsibilityIndexes?: readonly number[];
   readonly moduleId: string;
   readonly frameKey: string;
   readonly objectives: readonly string[];
@@ -64,6 +72,17 @@ export interface QuestionMeta {
 }
 
 export interface TemplateContentSnapshot {
+  readonly publication?: {
+    readonly pdfs: Readonly<Record<string, TemplateResource>>;
+    readonly jsonFileId?: string;
+  };
+  readonly moduleApproval?: {
+    readonly pipelineVersion: 'module_v2';
+    readonly outlineRevision: number;
+    readonly fingerprint: string;
+    readonly materializedFingerprint: string;
+    readonly taskCoverage: readonly import('./ai/validate').GeneratedTaskCoverage[];
+  };
   readonly assessmentMode: 'per_module';
   readonly learningMode: 'sequential' | 'free';
   readonly maxAttemptsPerModule: number | null;

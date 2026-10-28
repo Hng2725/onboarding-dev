@@ -71,7 +71,7 @@ describe('AI template batch publishing', () => {
     expect(deps.prepareResources).not.toHaveBeenCalled();
   });
 
-  it('prepares every target first, then publishes and exports normal before advanced', async () => {
+  it('finishes normal artifacts and publication before starting advanced', async () => {
     const log: string[] = [];
     const deps = dependencies(log);
     const updates: (readonly AiPublishTarget[])[] = [];
@@ -82,9 +82,9 @@ describe('AI template batch publishing', () => {
 
     expect(log).toEqual([
       'prepare:normal',
-      'prepare:advanced',
       'publish:normal:normal-prepared',
       'export:normal:published:normal-published',
+      'prepare:advanced',
       'publish:advanced:advanced-prepared',
       'export:advanced:published:advanced-published',
     ]);
@@ -94,7 +94,7 @@ describe('AI template batch publishing', () => {
     expect(updates.at(-1)?.every((target) => target.phase === 'completed')).toBe(true);
   });
 
-  it('does not publish when advanced preparation fails and skips prepared work on retry', async () => {
+  it('retains normal publication when advanced upload fails and resumes only missing work after serialization', async () => {
     const log: string[] = [];
     let failAdvanced = true;
     const deps = dependencies(log);
@@ -111,20 +111,17 @@ describe('AI template batch publishing', () => {
       expect(error).toBeInstanceOf(AiPublishBatchError);
       snapshots = (error as AiPublishBatchError).targets;
     }
-    expect(log).toEqual(['prepare:normal', 'prepare:advanced']);
-    expect(deps.publish).not.toHaveBeenCalled();
-    expect(snapshots.find((target) => target.kind === 'normal')?.phase).toBe('prepared');
+    expect(log).toEqual(['prepare:normal', 'publish:normal:normal-prepared', 'export:normal:published:normal-published', 'prepare:advanced']);
+    expect(snapshots.find((target) => target.kind === 'normal')?.phase).toBe('completed');
     expect(snapshots.find((target) => target.kind === 'advanced')).toMatchObject({
       phase: 'failed', error: 'PDF advanced failed',
     });
 
     failAdvanced = false;
     log.length = 0;
-    const retried = await publishAiTemplateBatch(snapshots, deps);
+    const retried = await publishAiTemplateBatch(JSON.parse(JSON.stringify(snapshots)), deps);
     expect(log).toEqual([
       'prepare:advanced',
-      'publish:normal:normal-prepared',
-      'export:normal:published:normal-published',
       'publish:advanced:advanced-prepared',
       'export:advanced:published:advanced-published',
     ]);

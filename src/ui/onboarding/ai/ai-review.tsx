@@ -275,7 +275,7 @@ export function AiReview({
                       key={block.id}
                       moduleId={selectedModule.id}
                       block={block}
-                      busy={busy}
+                      busy={busy || Boolean(review.content?.moduleApproval)}
                       onSave={(operation) => onUpdated([operation])}
                       onOpenSource={(ref) => void openSource(ref)}
                     />
@@ -288,7 +288,7 @@ export function AiReview({
                       key={question.id}
                       question={question}
                       refs={questionMeta.get(question.id)?.sourceRefs ?? []}
-                      busy={busy}
+                      busy={busy || Boolean(review.content?.moduleApproval)}
                       onSave={(operation) => onUpdated([operation])}
                       onOpenSource={(ref) => void openSource(ref)}
                     />

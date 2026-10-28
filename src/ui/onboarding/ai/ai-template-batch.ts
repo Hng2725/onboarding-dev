@@ -78,10 +78,15 @@ export async function generateTemplateRuns(
   const latest = [...runs];
 
   for (let index = 0; index < latest.length; index += 1) {
-    if (latest[index].review) continue;
+    if (latest[index].review) {
+      if (!aiReviewReadiness(latest[index].review).allowed) break;
+      continue;
+    }
+    if (latest[index].job?.pipelineVersion === 'module_v2' && latest[index].job?.status === 'completed' && !latest[index].job?.result) continue;
     try {
       latest[index] = await generateOne(latest[index]);
       onUpdate?.([...latest]);
+      if (latest[index].job?.pipelineVersion === 'module_v2') break;
     } catch (error) {
       throw new AiTemplateGenerationError([...latest], error);
     }
@@ -192,7 +197,7 @@ export function aiReviewReadiness(
   const blockingCount = (review?.flags ?? []).filter(
     (flag) => flag.status === 'open' && flag.severity === 'blocking',
   ).length;
-  return { allowed: blockingCount === 0, blockingCount };
+  return { allowed: Boolean(review) && blockingCount === 0, blockingCount };
 }
 
 export function reviewAdvanceState(

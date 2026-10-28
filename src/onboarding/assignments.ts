@@ -156,7 +156,10 @@ function learnerSafeSnapshot(snapshot: TemplateSnapshot): LearnerTemplateDto {
       assessmentMode: snapshot.content.assessmentMode,
       learningMode: snapshot.content.learningMode,
       maxAttemptsPerModule: snapshot.content.maxAttemptsPerModule,
-      modules: snapshot.content.modules,
+      modules: snapshot.content.modules.map((module) => ({
+        moduleId: module.moduleId, frameKey: module.frameKey, objectives: module.objectives,
+        estimatedMinutes: module.estimatedMinutes, blocks: module.blocks,
+      })),
     }
     : undefined;
   return {

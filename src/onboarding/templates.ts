@@ -1,4 +1,5 @@
 import type { OnboardingActor } from './auth';
+import { assertModuleTemplateCurrent } from './ai/materialize';
 import type {
   EmployeeType,
   LearnerTemplateDto,
@@ -388,11 +389,17 @@ function learnerSnapshot(snapshot: TemplateSnapshot): LearnerTemplateDto {
       assessmentMode: snapshot.content.assessmentMode,
       learningMode: snapshot.content.learningMode,
       maxAttemptsPerModule: snapshot.content.maxAttemptsPerModule,
-      modules: snapshot.content.modules,
+      modules: snapshot.content.modules.map((module) => ({
+        moduleId: module.moduleId, frameKey: module.frameKey, objectives: module.objectives,
+        estimatedMinutes: module.estimatedMinutes, blocks: module.blocks,
+      })),
     }
     : undefined;
   return {
-    ...snapshot,
+    id: snapshot.id, version: snapshot.version, source: snapshot.source, status: snapshot.status,
+    employeeType: snapshot.employeeType, title: snapshot.title, description: snapshot.description,
+    ...(snapshot.passingScore === undefined ? {} : { passingScore: snapshot.passingScore }),
+    ...(snapshot.assessmentMode ? { assessmentMode: snapshot.assessmentMode } : {}),
     ...(learnerContent ? { content: learnerContent } : {}),
     modules: snapshot.modules.map((module) => ({
       ...module,
@@ -633,14 +640,20 @@ export function createTemplateService(
     actor: OnboardingActor,
     input: CreateAiTemplateDraftInput,
   ): Promise<AdminTemplateDetail> {
-    const existingRecord = await findRecord(actor.roomId, input.templateId, 1);
-    const existingContent = await findAiContent(actor.roomId, input.templateId, 1);
+    const latestVersion = input.content.moduleApproval
+      ? (await store.query<TemplateDbRecord>(actor.roomId, 'onboarding_templates', { filter: { templateId: input.templateId }, orderBy: [{ field: 'version', direction: 'desc' }], limit: 1 })).records[0]?.version ?? 1
+      : 1;
+    const existingRecord = await findRecord(actor.roomId, input.templateId, latestVersion);
+    const existingContent = await findAiContent(actor.roomId, input.templateId, latestVersion);
     if (existingContent) {
       if (existingContent.jobId !== input.jobId) {
         throw new TemplateServiceError('TEMPLATE_CONFLICT', 'The AI template ID belongs to another generation job.');
       }
       if (!existingRecord) {
         throw new TemplateServiceError('TEMPLATE_CONFLICT', 'The AI template catalog record is missing.');
+      }
+      if (input.content.moduleApproval && input.content.moduleApproval.fingerprint !== existingContent.content.moduleApproval?.fingerprint) {
+        return persistAiDraftUpdate(actor, { ...input, version: existingRecord.version, expectedUpdatedAt: canonicalTimestamp(existingRecord.updatedAt, 'Template updatedAt') });
       }
       return loadCustom(actor.roomId, existingRecord);
     }
@@ -903,12 +916,18 @@ export function createTemplateService(
       requireAdmin(actor);
       if (systemId(templateId)) return locked(templateId);
       const record = await requireRecord(actor.roomId, templateId, version);
+      if (record.status === 'published') return loadCustom(actor.roomId, record);
       if (record.status !== 'draft') throw new TemplateServiceError('TEMPLATE_CONFLICT', 'Only a draft can be published.');
       const currentUpdatedAt = canonicalTimestamp(record.updatedAt, 'Template updatedAt');
       if (expectedUpdatedAt && canonicalTimestamp(expectedUpdatedAt, 'Expected template updatedAt') !== currentUpdatedAt) {
         throw new TemplateServiceError('TEMPLATE_CONFLICT', 'Template changed before publication.');
       }
       const detail = await loadCustom(actor.roomId, record);
+      try { await assertModuleTemplateCurrent(store, actor, detail); }
+      catch (error) { throw new TemplateServiceError('TEMPLATE_INVALID', error instanceof Error ? error.message : 'Module approvals are invalid.'); }
+      if (detail.content?.moduleApproval && detail.flags?.some((flag) => flag.severity === 'blocking' && flag.status === 'open')) {
+        throw new TemplateServiceError('TEMPLATE_INVALID', 'Resolve every blocking verification flag before publishing.');
+      }
       if (options.publishGuard) await options.publishGuard(actor, detail);
       const timestamp = now();
       await store.update(actor.roomId, 'onboarding_templates', record.id, {

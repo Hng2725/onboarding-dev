@@ -97,6 +97,24 @@ describe('AI template batch selection', () => {
 });
 
 describe('AI template batch coordinator', () => {
+  it('does not start Template 2 while Template 1 has a blocking review flag', async () => {
+    const calls: string[] = [];
+    await generateTemplateRuns([{ ...completedRun('normal', 'blocked'), review: { ...completedRun('normal', 'blocked').review!, flags: [{ id: 'block', type: 'missing', severity: 'blocking', status: 'open', message: 'Missing', questionForAdmin: 'Resolve?', location: {}, evidence: [] }] } }, run('advanced')], async (current) => { calls.push(current.kind); return current; });
+    expect(calls).toEqual([]);
+  });
+  it('stops after a module template is materialized until an explicit next action', async () => {
+    const calls: string[] = [];
+    const result = await generateTemplateRuns([run('normal'), run('advanced')], async (current) => {
+      calls.push(current.kind);
+      return { ...completedRun(current.kind, 'Approved'), job: { ...resumableJob(current.kind, 'module-job', 'completed'), pipelineVersion: 'module_v2' } };
+    });
+    expect(calls).toEqual(['normal']);
+    expect(result[1].review).toBeNull();
+  });
+
+  it('does not treat a missing review as publish ready', () => {
+    expect(aiReviewReadiness(null).allowed).toBe(false);
+  });
   it('awaits normal before advanced and reports each completed snapshot', async () => {
     const calls: string[] = [];
     const updates: string[][] = [];

@@ -15,6 +15,7 @@ import type {
   AiJobRecord,
   AiProvider,
   EmployeeType,
+  TemplateResource,
   VerificationFlag,
 } from '../../../onboarding/contracts';
 import type { SourceSummary } from '../../../onboarding/ai/sources';
@@ -41,6 +42,7 @@ import { AiOutlineReview } from './ai-outline-review';
 import { AiModuleWorkspace } from './ai-module-workspace';
 import {
   AiPublishBatchError,
+  aiPublishTargetKey,
   publishAiTemplateBatch,
   type AiPublishBatchDependencies,
   type AiPublishTarget,
@@ -545,8 +547,18 @@ export function createAiPublishDependencies(
   });
 
   return {
-    async prepareResources(target) {
-      const review = target.review;
+    async prepareResources(target, checkpoint) {
+      let review = (await input.api.adminAi<{ review: AdminTemplateDetail }>('get_review', { templateId: target.review.id, version: target.review.version })).review;
+      if (aiPublishTargetKey(review) !== aiPublishTargetKey(target.review)) throw new Error('Template đã thay đổi. Hãy kiểm tra bản nháp mới.');
+      if (review.status === 'published') return review;
+      const settings = input.settingsByKind?.[target.kind];
+      if (settings && review.content?.moduleApproval) {
+        review = (await input.api.adminAi<{ review: AdminTemplateDetail }>('update_review', {
+          templateId: review.id, version: review.version, expectedUpdatedAt: review.updatedAt,
+          ops: [{ kind: 'set_settings', ...settings }],
+        })).review;
+      }
+      const uploadedResources: Record<string, TemplateResource> = { ...(target.uploadedResources ?? {}), ...(review.content?.publication?.pdfs ?? {}) };
       report(review, 'preparing_folder');
       let folder: Awaited<ReturnType<typeof ensureFolder>>;
       try {
@@ -567,6 +579,9 @@ export function createAiPublishDependencies(
         };
         let activeStage: AiPublishFileStage = 'creating_pdf';
         try {
+          const existing = uploadedResources[module.id] ?? module.resources.find((resource) => resource.id === lessonPdfResourceId(module.id) && resource.fileId);
+          let resource = existing;
+          if (!resource) {
           report(review, activeStage, progress);
           const artifact = await createPdf(review, module.id, index);
           const encoded = await encode(artifact.blob);
@@ -585,18 +600,24 @@ export function createAiPublishDependencies(
             mimeType: artifact.mimeType,
             size: artifact.blob.size,
           });
-          resourceOperations.push({
-            kind: 'upsert_generated_resource',
-            moduleId: module.id,
-            resource: {
+          resource = {
               id: lessonPdfResourceId(module.id),
               title: `Tài liệu: ${module.title}`,
-              description: 'Tài liệu bài học PDF do AI tạo.',
+              description: 'Tài liệu bài học PDF.',
               kind: 'file',
               required: true,
               fileId: uploaded.fileId,
-            },
-          });
+            };
+          uploadedResources[module.id] = resource;
+          checkpoint?.({ ...uploadedResources });
+          }
+          if (!review.content?.publication?.pdfs[module.id]) {
+            review = (await input.api.adminAi<{ review: AdminTemplateDetail }>('update_review', {
+              templateId: review.id, version: review.version, expectedUpdatedAt: review.updatedAt,
+              ops: [{ kind: 'checkpoint_publication', moduleId: module.id, resource }],
+            })).review;
+          }
+          resourceOperations.push({ kind: 'upsert_generated_resource', moduleId: module.id, resource });
         } catch (error) {
           const contextual = contextualPublishError(review, error, module.title);
           report(review, activeStage, { ...progress, error: contextual.message });
@@ -604,9 +625,8 @@ export function createAiPublishDependencies(
         }
       }
 
-      const settings = input.settingsByKind?.[target.kind];
       const operations: AiReviewOperation[] = [
-        ...(settings ? [{
+        ...(settings && !review.content?.moduleApproval ? [{
           kind: 'set_settings' as const,
           passingScore: settings.passingScore,
           maxAttemptsPerModule: settings.maxAttemptsPerModule,
@@ -631,6 +651,7 @@ export function createAiPublishDependencies(
     },
 
     async publish(review) {
+      if (review.status === 'published') return review;
       report(review, 'publishing');
       try {
         return (await input.api.adminTemplates<{ template: AdminTemplateDetail }>('publish', {
@@ -646,18 +667,24 @@ export function createAiPublishDependencies(
     },
 
     async exportJson(published) {
+      if (published.content?.publication?.jsonFileId) return;
       report(published, 'exporting_json');
       try {
         const folder = await folderFor(published);
         const artifact = templateJsonArtifact(published);
         const encoded = await encode(new Blob([artifact.content], { type: artifact.mimeType }));
-        await input.app.uploadFile({
+        const upload = await input.app.uploadFile({
           channelId: input.roomId,
           folderId: folder.templateFolderId,
           fileName: artifact.fileName,
           base64Data: encoded.dataUrl,
           mimeType: artifact.mimeType,
           duplicateAction: 'replace',
+        });
+        const uploaded = normalizeUploadedRoomFile(upload, { fileName: artifact.fileName, mimeType: artifact.mimeType });
+        await input.api.adminAi('update_review', {
+          templateId: published.id, version: published.version, expectedUpdatedAt: published.updatedAt,
+          ops: [{ kind: 'checkpoint_publication', jsonFileId: uploaded.fileId }],
         });
       } catch (error) {
         const contextual = contextualPublishError(published, error);
@@ -675,7 +702,7 @@ export function finishSuccessfulAiPublish(
     readonly onClose: () => void;
   },
 ): boolean {
-  if (targets.length === 0 || targets.some((target) => target.phase !== 'completed')) return false;
+  if (targets.length === 0 || targets.some((target) => target.phase !== 'completed' || !target.preparedReview || target.publishedTemplate?.status !== 'published' || !target.jsonExported)) return false;
   callbacks.clearResume();
   callbacks.onComplete();
   callbacks.onClose();
@@ -852,6 +879,10 @@ export function AiGeneratorPage({
   const appRef = useRef(app);
   appRef.current = app;
   const { userId } = context;
+  const checkpointTargets = useCallback((targets: readonly AiPublishTarget[]) => {
+    setPublishTargets(targets);
+    if (roomId) writeAiResumeKey('onboarding:ai:publish:' + roomId + ':' + userId, JSON.stringify(targets));
+  }, [roomId, userId]);
   const activeTemplateRun = templateRuns.find((run) => run.kind === selectedTemplateKind) ?? templateRuns.find((run) => !run.review) ?? templateRuns[0];
   const templateJob = activeTemplateRun?.job ?? null;
   const activeReviewRun = templateRuns[activeReviewIndex];
@@ -868,7 +899,7 @@ export function AiGeneratorPage({
     setTemplateRuns((current) => {
       const existing = current.find((run) => run.kind === kind);
       const next = existing
-        ? current.map((run) => run.kind === kind ? { ...run, job } : run)
+        ? current.map((run) => run.kind === kind ? { ...run, job, ...(job.pipelineVersion === 'module_v2' && !job.result ? { review: null } : {}) } : run)
         : [...current, { kind, job, review: null }];
       return [...next].sort((left, right) => left.kind === right.kind ? 0 : left.kind === 'normal' ? -1 : 1);
     });
@@ -1030,14 +1061,27 @@ export function AiGeneratorPage({
               ? run.job.result as { templateId?: unknown; version?: unknown }
               : undefined;
             if (output && typeof output.templateId === 'string' && typeof output.version === 'number') {
-              await loadReview(output.templateId, output.version, false);
+              const loaded = await loadReview(output.templateId, output.version, false);
+              restoredRuns = restoredRuns.map((entry) => entry.kind === run.kind ? { ...entry, review: loaded } : entry);
             }
           }
-          if (restoredRuns.every((run) => run.job?.status === 'completed' && run.job.pipelineVersion !== 'module_v2')) {
-            setActiveReviewIndex(0);
-            setStep(3);
-          }
+          setTemplateRuns(restoredRuns);
+          const firstReview = restoredRuns.findIndex((run) => run.review);
+          if (firstReview >= 0) { setActiveReviewIndex(firstReview); setStep(3); }
           else setStep(2);
+          if (restoredRuns.every((run) => run.review) && restoredRuns.some((run) => run.review?.content?.publication || run.review?.status === 'published')) {
+            let saved: readonly AiPublishTarget[] = [];
+            try { saved = JSON.parse(readAiResumeKey('onboarding:ai:publish:' + roomId + ':' + userId) ?? '[]'); } catch { /* Recover from server checkpoints below. */ }
+            const targets = restoredRuns.map((run): AiPublishTarget => {
+              const review = run.review!;
+              const previous = Array.isArray(saved) ? saved.find((target) => target.review && aiPublishTargetKey(target.review) === aiPublishTargetKey(review)) : undefined;
+              const published = review.status === 'published';
+              return { kind: run.kind, review, targetKey: aiPublishTargetKey(review), uploadedResources: { ...previous?.uploadedResources, ...review.content?.publication?.pdfs },
+                ...(published ? { preparedReview: review, publishedTemplate: review } : {}),
+                jsonExported: Boolean(published && review.content?.publication?.jsonFileId), phase: published && review.content?.publication?.jsonFileId ? 'completed' : 'idle' };
+            });
+            checkpointTargets(targets); setStep(4);
+          }
         } else if (inventory?.status === 'completed') setStep(2);
         else if (inventory) setStep(1);
         // Provider cleanup runs after the job is on screen; it must never delay opening the modal.
@@ -1049,7 +1093,7 @@ export function AiGeneratorPage({
     return () => {
       active = false;
     };
-  }, [api, initialTemplate, loadReview, loadSources, reconcileCleanups, roomId, userId]);
+  }, [api, checkpointTargets, initialTemplate, loadReview, loadSources, reconcileCleanups, roomId, userId]);
 
   useEffect(() => () => {
     abortRef.current?.abort();
@@ -1227,8 +1271,26 @@ export function AiGeneratorPage({
   async function resumeModuleJob() {
     if (!templateJob) return;
     setBusy(true); setNotice(null);
-    try { setTemplateJob(await pump(templateJob, aiJobPrefersNative(templateJob))); }
+    try { const job = await pump(templateJob, aiJobPrefersNative(templateJob)); setTemplateJob(job); await openCompletedModuleReview(job); }
     catch (caught) { if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' }); }
+    finally { setBusy(false); }
+  }
+
+  async function openCompletedModuleReview(job: AiJobRecord) {
+    const output = job.result as { templateId?: unknown; version?: unknown } | undefined;
+    if (job.status !== 'completed' || !output || typeof output.templateId !== 'string' || typeof output.version !== 'number') return;
+    await loadReview(output.templateId, output.version, false);
+    setActiveReviewIndex(Math.max(0, templateRuns.findIndex((run) => run.kind === job.templateKind)));
+    setStep(3);
+  }
+
+  async function editApprovedModules() {
+    if (!review) return;
+    setBusy(true); setNotice(null);
+    try {
+      const job = activeReviewRun.job ?? (await api.adminAi<{ job: AiJobRecord }>('get_job', { jobId: review.jobId })).job;
+      setTemplateJob(job); setSelectedTemplateKind(activeReviewRun.kind); setStep(2);
+    } catch (caught) { setNotice({ message: generationErrorMessage(caught), tone: 'error' }); }
     finally { setBusy(false); }
   }
 
@@ -1240,11 +1302,7 @@ export function AiGeneratorPage({
       setTemplateJob(job);
       if (resume) {
         job = await pump(job); setTemplateJob(job);
-        const output = job.result as { templateId?: unknown; version?: unknown } | undefined;
-        if (job.pipelineVersion !== 'module_v2' && job.status === 'completed' && output && typeof output.templateId === 'string' && typeof output.version === 'number') {
-          await loadReview(output.templateId, output.version, false);
-          if (templateRuns.length === 1 || templateRuns.every((run) => run.kind === job.templateKind || run.review)) { setActiveReviewIndex(0); setStep(3); }
-        }
+        await openCompletedModuleReview(job);
       }
     } catch (caught) { if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' }); }
     finally { setBusy(false); }
@@ -1260,7 +1318,6 @@ export function AiGeneratorPage({
         responsibilities,
         runs: templateRuns,
         generateOne: async (current) => {
-          if (current.job?.pipelineVersion === 'module_v2' && current.job.status === 'completed') return current;
           const preferNative = aiJobPrefersNative(current.job);
           let job = current.job?.status === 'running'
             ? current.job
@@ -1280,7 +1337,7 @@ export function AiGeneratorPage({
           }
           job = await pump(job, preferNative);
           setTemplateJob(job);
-          if (job.pipelineVersion === 'module_v2') throw new ModuleReviewPending();
+          if (job.pipelineVersion === 'module_v2' && (job.status !== 'completed' || !job.result)) throw new ModuleReviewPending();
           const output = job.result as { templateId?: unknown; version?: unknown } | undefined;
           if (!output || typeof output.templateId !== 'string' || typeof output.version !== 'number') {
             throw new Error('Job AI hoàn tất nhưng chưa trả về template.');
@@ -1305,7 +1362,7 @@ export function AiGeneratorPage({
         return;
       }
       setTemplateRuns(result.runs);
-      setActiveReviewIndex(0);
+      setActiveReviewIndex(Math.max(0, result.runs.findIndex((run) => run.review && !templateRuns.find((prior) => prior.kind === run.kind)?.review)));
       setStep(3);
       setNotice({
         message: result.runs.length === 2
@@ -1454,9 +1511,9 @@ export function AiGeneratorPage({
       const completed = await publishAiTemplateBatch(
         targets,
         dependencies,
-        setPublishTargets,
+        checkpointTargets,
       );
-      setPublishTargets(completed);
+      checkpointTargets(completed);
       setPublishProgress(null);
       setNotice({
         message: completed.length > 1
@@ -1470,6 +1527,8 @@ export function AiGeneratorPage({
           'onboarding:ai:template:' + roomId,
           'onboarding:ai:template:' + roomId + ':normal',
           'onboarding:ai:template:' + roomId + ':advanced',
+          'onboarding:ai:publish:' + roomId + ':' + userId,
+          'onboarding:ai:selection:' + roomId,
         ]),
         onComplete,
         onClose,
@@ -1478,7 +1537,7 @@ export function AiGeneratorPage({
       }
     } catch (caught) {
       if (caught instanceof AiPublishBatchError) {
-        setPublishTargets(caught.targets);
+        checkpointTargets(caught.targets);
         setNotice({ message: caught.message + ' Bấm Thử lại để tiếp tục từ bước chưa hoàn tất.', tone: 'error' });
       } else {
         setNotice({ message: generationErrorMessage(caught), tone: 'error' });
@@ -1607,7 +1666,7 @@ export function AiGeneratorPage({
               <section className="ai-workspace-card ai-module-stage">
                 {templateRuns.length > 1 && <nav className="ai-module-actions" aria-label="Chọn template">{templateRuns.map((run, index) => <button type="button" key={run.kind} aria-pressed={run.kind === activeTemplateRun?.kind} onClick={() => setSelectedTemplateKind(run.kind)}>{run.job?.status === 'completed' ? 'Xem' : 'Tiếp tục'} Template {index + 1}</button>)}</nav>}
                 {templateJob.status === 'running' && templateJob.outlineApprovedRevision === templateJob.outline.revision && <button className="button button-secondary" type="button" disabled={busy} onClick={() => void resumeModuleJob()}>Tiếp tục xử lý</button>}
-                {templateJob.status === 'completed' && <div role="status"><strong>Sẵn sàng tạo bản nháp/xuất bản</strong><p>Các module đã được duyệt. Bước tạo bản nháp sẽ được bổ sung sau.</p><button type="button" disabled>Tạo bản nháp</button></div>}
+                {templateJob.status === 'completed' && <div role="status"><strong>Các module đã được duyệt</strong><button type="button" disabled={busy} onClick={() => void resumeModuleJob()}>Rà soát bản nháp</button></div>}
                 {editingOutline || templateJob.outlineApprovedRevision !== templateJob.outline.revision ? <AiOutlineReview key={templateJob.jobId} outline={templateJob.outline} templateKind={templateJob.templateKind ?? 'normal'} responsibilities={templateJob.roleProfile?.responsibilities ?? []} busy={busy} onEdit={(edits) => void moduleAction('update_outline', { expectedRevision: templateJob.outline!.revision, edits })} onApprove={() => { setEditingOutline(false); void moduleAction('approve_outline', { expectedRevision: templateJob.outline!.revision }, true); }} /> : <><button type="button" onClick={() => setEditingOutline(true)}>Chỉnh sửa khung và nguồn</button><AiModuleWorkspace runs={templateJob.moduleRuns ?? []} calls={templateJob.calls} history={templateJob.stageOutputs.__moduleAudit} selectedId={selectedModuleId} busy={busy} onSelect={(id) => { setSelectedModuleId(id); if (roomId) writeAiResumeKey('onboarding:ai:module:' + roomId, id); }} onAction={(action, args) => void moduleAction(action, args, action === 'approve_module_lesson' || action === 'approve_module_questions' || action === 'retry_module')} onSources={() => setStep(0)} /></>}
               </section>
             ) : <section className="ai-workspace-card ai-workspace-input-card">
@@ -1663,6 +1722,7 @@ export function AiGeneratorPage({
         )}
         {canGenerateWithAi && step === 3 && review && activeReviewRun && (
           <div className="ai-review-stage">
+            {review.content?.moduleApproval && <button className="button button-secondary" type="button" disabled={busy} onClick={() => void editApprovedModules()}>Chỉnh sửa module</button>}
             <AiReview
               api={api}
               review={review}
@@ -1795,7 +1855,11 @@ export function AiGeneratorPage({
                   disabled={busy || !reviewNavigation.canNext}
                   onClick={() => {
                     if (reviewNavigation.atPublishSummary) setStep(4);
-                    else setActiveReviewIndex(moveReviewIndex(templateRuns, activeReviewIndex, 'next').index);
+                    else {
+                      const nextIndex = moveReviewIndex(templateRuns, activeReviewIndex, 'next').index;
+                      setActiveReviewIndex(nextIndex);
+                      if (!templateRuns[nextIndex].review) { setSelectedTemplateKind(templateRuns[nextIndex].kind); setStep(2); }
+                    }
                   }}
                 >{reviewNavigation.atPublishSummary ? 'Kiểm tra xuất bản' : `Tiếp: Template ${activeReviewIndex + 2}`}</button>
               </>

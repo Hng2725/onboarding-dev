@@ -271,9 +271,12 @@ export function templateJsonArtifact<T extends { readonly id: string; readonly v
 ): { readonly fileName: string; readonly mimeType: 'application/json'; readonly content: string } {
   const title = slug(template.title, 'template', 80);
   const id = slug(template.id, 'id', 48);
+  const internal = new Set(['publication', 'moduleApproval', 'lessonProvenance', 'approvedLessonVersion',
+    'approvedQuestionVersion', 'questionLessonVersion', 'moduleLocalId', 'featureIds', 'sourceSectionIds',
+    'responsibilityIndexes', 'jobId', 'operationId', 'promptVersion', 'generationNotes', 'flags']);
   return {
     fileName: `${title}-${id}-v${template.version}.json`,
     mimeType: 'application/json',
-    content: `${JSON.stringify(template, null, 2)}\n`,
+    content: `${JSON.stringify(template, (key, value: unknown) => internal.has(key) ? undefined : value, 2)}\n`,
   };
 }
