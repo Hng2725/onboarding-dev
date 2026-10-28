@@ -1,4 +1,4 @@
-﻿import { createHash } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { EmployeeType, OutlineEdit, TemplateOutline, TemplateOutlineModule } from '../contracts';
 import { normalizeForMatch, type RawSourceRef } from './grounding';
 import type { FeatureInventory } from './inventory';
@@ -42,7 +42,7 @@ export function buildTemplateOutline(input: { jobId: string; templateKind: Emplo
       const current = score(text, textForFrame);
       if (current > bestScore) { best = index; bestScore = current; }
     });
-    assignments[best].push(feature);
+    if (bestScore > 0) assignments[best].push(feature);
   }
   const modules: TemplateOutlineModule[] = frames.map((frameKey, order) => {
     const features = assignments[order];
@@ -74,7 +74,7 @@ export function validateTemplateOutline(outline: TemplateOutline, input: { templ
     if (m.responsibilityIndexes.some((index) => !Number.isInteger(index) || index < 0 || index >= input.responsibilities.length)) add('RESPONSIBILITY_INDEX', `modules[${i}]`, 'Invalid responsibility index.');
   });
   if (input.templateKind === 'normal') ['t1-overview', 't1-core'].forEach((frame) => {
-    if (!modules.some((m) => m.frameKey === frame) && !outline.flags.some((f) => f.type === 'missing' && f.severity === 'blocking' && normalizeForMatch(`${f.message} ${f.questionForAdmin}`).includes(frame.replace('t1-', '')))) add('REQUIRED_FRAME', 'modules', `Missing required frame ${frame}.`);
+    if (!modules.some((m) => m.frameKey === frame) && !outline.flags.some((f) => f.type === 'missing' && f.severity === 'blocking' && f.location.frameKey === frame)) add('REQUIRED_FRAME', 'modules', `Missing required frame ${frame}.`);
   });
   if (input.templateKind === 'advanced') {
     const normalized = input.responsibilities.map(normalizeForMatch);
@@ -110,7 +110,6 @@ export function applyTemplateOutlineEdits(outline: TemplateOutline, edits: reado
   active = active.map((m, order) => ({ ...m, order }));
   const allIds = new Set(outline.modules.map((m) => m.moduleLocalId));
   const flags = outline.flags.filter((f) => !(f.type === 'missing' && (f.message.startsWith('Missing module for responsibility:') || (f.message === 'Missing source sections for module.' && f.location.moduleLocalId && !active.some((m) => m.moduleLocalId === f.location.moduleLocalId)))));
-  active.filter((m) => !m.sourceSectionIds.length && (!allIds.has(m.moduleLocalId) || !flags.some((f) => f.type === 'missing' && f.severity === 'blocking' && f.location.moduleLocalId === m.moduleLocalId))).forEach((m) => flags.push(missingSource(m.moduleLocalId)));
+  active.filter((m) => !m.sourceSectionIds.some((id) => id.trim()) && (!allIds.has(m.moduleLocalId) || !flags.some((f) => f.type === 'missing' && f.severity === 'blocking' && f.location.moduleLocalId === m.moduleLocalId))).forEach((m) => flags.push(missingSource(m.moduleLocalId)));
   return { revision: outline.revision + 1, modules: [...active, ...tombstones], flags, taskCoverage: coverage(outline.taskCoverage.map((c) => c.task), active, flags) };
 }
-

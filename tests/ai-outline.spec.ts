@@ -67,3 +67,30 @@ describe('outline edit safeguards', () => {
     expect(added.modules.find((m) => m.moduleLocalId === 'new')?.tombstoned).not.toBe(true);
   });
 });
+
+describe('outline source and required-frame safeguards', () => {
+  it('creates a blocking missing-source flag for added modules with whitespace-only section IDs', () => {
+    const outline = build();
+    const removed = applyTemplateOutlineEdits(outline, [{ type: 'delete', moduleLocalId: outline.modules[1].moduleLocalId }], () => 'new');
+    const module = { ...outline.modules[1], sourceSectionIds: ['   '] };
+    const added = applyTemplateOutlineEdits(removed, [{ type: 'add', module }], () => 'new');
+    expect(added.flags.some((f) => f.type === 'missing' && f.severity === 'blocking' && f.location.moduleLocalId === 'new')).toBe(true);
+  });
+  it('requires a missing-frame flag to identify the specific required frame', () => {
+    const outline = build();
+    const missing = { ...outline, modules: outline.modules.filter((m) => m.frameKey !== 't1-core'), flags: [{ type: 'missing' as const, severity: 'blocking' as const, message: 'core is missing', questionForAdmin: 'Provide core', location: {}, evidence: [] }] };
+    expect(validateTemplateOutline(missing, { templateKind: 'normal', responsibilities }).some((e) => e.code === 'REQUIRED_FRAME')).toBe(true);
+    const marked = { ...missing, flags: [{ ...missing.flags[0], location: { frameKey: 't1-core' } }] };
+    expect(validateTemplateOutline(marked, { templateKind: 'normal', responsibilities }).some((e) => e.code === 'REQUIRED_FRAME')).toBe(false);
+  });
+  it('does not treat unrelated zero-score features as sources for default frames', () => {
+    const unrelated = { ...inventory, systemSummary: { ...inventory.systemSummary, sourceRefs: [] }, features: [{ ...inventory.features[0], name: 'Banana', module: 'Orchard', purpose: 'Harvest fruit' }] };
+    for (const kind of ['normal', 'advanced'] as const) {
+      const outline = build(kind, unrelated);
+      const frame = kind === 'normal' ? 't1-core' : 't2-task-1';
+      const module = outline.modules.find((m) => m.frameKey === frame)!;
+      expect(module.sourceSectionIds).toEqual([]);
+      expect(outline.flags.some((f) => f.type === 'missing' && f.severity === 'blocking' && f.location.moduleLocalId === module.moduleLocalId)).toBe(true);
+    }
+  });
+});

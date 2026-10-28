@@ -45,6 +45,7 @@ export interface GeneratedFlag {
   readonly message: string;
   readonly questionForAdmin: string;
   readonly location: {
+    readonly frameKey?: string;
     readonly moduleLocalId?: string;
     readonly blockLocalId?: string;
     readonly questionLocalId?: string;
