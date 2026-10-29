@@ -71,6 +71,7 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   AI_OUTPUT_INVALID: 'AI chưa tạo được cấu trúc hợp lệ sau các lần tự sửa.',
   TEMPLATE_FLAGS_BLOCKING: 'Cần xử lý hết cờ bắt buộc trước khi xuất bản.',
   REVIEW_CONFLICT: 'Template vừa được cập nhật ở nơi khác. Hãy tải lại bản mới nhất.',
+  REVIEW_INVALID: 'Không thể áp dụng thao tác này cho bản nháp. Hãy chỉnh sửa trực tiếp module.',
   JOB_OWNER_REQUIRED: 'Job AI này do Admin khác tạo; chỉ người tạo mới tiếp tục hoặc hủy được.',
   OPERATION_CONFLICT: 'Dữ liệu vừa thay đổi. Hãy thử lại.',
   JOB_NOT_RUNNING: 'Tiến trình AI không còn chạy. Hãy mở lại hoặc tạo phiên mới.',

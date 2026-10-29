@@ -12,6 +12,7 @@ import { FlagPanel, type FlagResolutionAction } from './flag-panel';
 
 export const LESSON_SAVE_CONFIRM = 'Câu hỏi của module này sẽ được AI tạo lại cho khớp bài học mới.';
 export const REVIEW_UPDATING = 'Đang cập nhật…';
+export const REWRITE_CONFIRM = 'AI sẽ viết lại bài học và câu hỏi của module này. Chỉnh sửa tay sẽ bị thay thế.';
 
 /** The server accepts three to five questions per module. */
 const MIN_QUESTIONS = 3;
@@ -94,6 +95,7 @@ export function AiStepReview({
   const [lesson, setLesson] = useState<GeneratedModule | null>(null);
   const [questions, setQuestions] = useState<readonly GeneratedQuestion[]>([]);
   const [confirming, setConfirming] = useState(false);
+  const [confirmingRewrite, setConfirmingRewrite] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const run = runs.find((item) => item.outline.moduleLocalId === selectedId) ?? runs[0];
@@ -129,19 +131,29 @@ export function AiStepReview({
     setSelectedId(id);
     setEditing(null);
     setConfirming(false);
+    setConfirmingRewrite(false);
   }
 
   function selectTab(next: Tab) {
     setTab(next);
     setEditing(null);
     setConfirming(false);
+    setConfirmingRewrite(false);
   }
 
-  function startEditing() {
-    if (tab === 'lesson') setLesson(lessonView);
+  function startEditing(target: Tab = tab) {
+    if (target === 'lesson') setLesson(lessonView);
     else setQuestions(questionDraft);
+    setTab(target);
     setConfirming(false);
-    setEditing(editKey(run, tab));
+    setConfirmingRewrite(false);
+    setEditing(editKey(run, target));
+  }
+
+  /** A flag's "Chỉnh sửa": fix the flagged content in the module itself (questions when it points at one). */
+  function editFromFlag(flag: VerificationFlag) {
+    const canEditQuestions = lessonApproved && questionDraft.length > 0;
+    startEditing(flag.location.questionId && canEditQuestions ? 'questions' : 'lesson');
   }
 
   function stopEditing() {
@@ -235,7 +247,16 @@ export function AiStepReview({
               )}
             </div>
           )}
-          {moduleFlags.length > 0 && <FlagPanel flags={moduleFlags} busy={locked} onResolve={onResolveFlag} />}
+          {/* Module drafts cannot drop content from the materialized draft; the Admin edits the module instead. */}
+          {moduleFlags.length > 0 && (
+            <FlagPanel
+              flags={moduleFlags}
+              busy={locked || drafting}
+              onResolve={onResolveFlag}
+              allowRemove={false}
+              onEdit={editFromFlag}
+            />
+          )}
 
           <div className="ai-final-review-content" role="tabpanel">
             {tab === 'lesson'
@@ -261,20 +282,31 @@ export function AiStepReview({
                 : <QuestionReadView questions={questionDraft} sourceNames={sourceNames} />}
           </div>
 
-          {!isEditing ? (
+          {!isEditing && confirmingRewrite ? (
+            <div className="ai-final-review-confirm" role="alertdialog" aria-label="AI viết lại">
+              <p>{REWRITE_CONFIRM}</p>
+              <div>
+                <button className="button button-secondary button-sm" type="button" disabled={locked || drafting} onClick={() => {
+                  setConfirmingRewrite(false);
+                  onRewrite(moduleLocalId, run.lessonVersion);
+                }}>Viết lại</button>
+                <button className="button button-ghost button-sm" type="button" onClick={() => setConfirmingRewrite(false)}>Hủy</button>
+              </div>
+            </div>
+          ) : !isEditing ? (
             <div className="ai-final-review-actions">
               <button
                 className="button button-secondary button-sm"
                 type="button"
                 disabled={locked || drafting || (tab === 'questions' && (!lessonApproved || questionDraft.length === 0))}
-                onClick={startEditing}
+                onClick={() => startEditing()}
               >Chỉnh sửa</button>
               {tab === 'lesson' && (
                 <button
                   className="button button-ghost button-sm"
                   type="button"
                   disabled={locked || drafting}
-                  onClick={() => onRewrite(moduleLocalId, run.lessonVersion)}
+                  onClick={() => setConfirmingRewrite(true)}
                 >AI viết lại</button>
               )}
             </div>

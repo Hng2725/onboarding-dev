@@ -34,6 +34,7 @@ vi.mock('../src/ui/onboarding/roomfiles', async (importOriginal) => ({
 
 import { AiGeneratorPage } from '../src/ui/onboarding/ai/ai-generator';
 import { AiStepReview, type AiStepReviewProps } from '../src/ui/onboarding/ai/ai-step-review';
+import { FlagPanel } from '../src/ui/onboarding/ai/flag-panel';
 
 const TITLES = ['Tổng quan chương trình hội nhập', 'Ngày làm việc đầu tiên'];
 const FRAMES = ['t1-overview', 't1-access'];
@@ -208,9 +209,17 @@ describe('AiStepReview', () => {
     expect(props.onSaveQuestions).toHaveBeenCalledWith('m0', expect.arrayContaining([expect.objectContaining({ localId: 'q0' })]), 4);
   });
 
-  it('asks AI to rewrite the lesson with the lesson version', () => {
+  it('asks AI to rewrite the lesson with the lesson version only after an inline confirmation', () => {
     const { view, props } = renderReview();
     act(() => button(view.root, 'AI viết lại').props.onClick());
+    expect(props.onRewrite).not.toHaveBeenCalled();
+    expect(text(view.root)).toContain('AI sẽ viết lại bài học và câu hỏi của module này. Chỉnh sửa tay sẽ bị thay thế.');
+    act(() => button(view.root, 'Hủy').props.onClick());
+    expect(props.onRewrite).not.toHaveBeenCalled();
+    expect(text(view.root)).not.toContain('Chỉnh sửa tay sẽ bị thay thế.');
+    act(() => button(view.root, 'AI viết lại').props.onClick());
+    act(() => button(view.root, 'Viết lại').props.onClick());
+    expect(props.onRewrite).toHaveBeenCalledTimes(1);
     expect(props.onRewrite).toHaveBeenCalledWith('m0', 2);
   });
 
@@ -251,8 +260,39 @@ describe('AiStepReview', () => {
     act(() => moduleButtons(view)[1].props.onClick());
     const panel = view.root.find((node) => String(node.props.className ?? '') === 'ai-flag-panel');
     expect(text(panel)).toContain('Thiếu số điện thoại hỗ trợ.');
-    act(() => buttonsByText(panel, 'Loại bỏ nội dung')[0].props.onClick());
-    expect(props.onResolveFlag).toHaveBeenCalledWith(expect.objectContaining({ id: 'flag-1' }), 'remove');
+    act(() => buttonsByText(panel, 'Thêm ghi chú')[0].props.onClick());
+    act(() => panel.findByProps({ 'aria-label': 'Ghi chú xác minh' }).props.onChange({ target: { value: 'Gọi 1900 1234.' } }));
+    act(() => buttonsByText(panel, 'Lưu ghi chú')[0].props.onClick());
+    expect(props.onResolveFlag).toHaveBeenCalledWith(expect.objectContaining({ id: 'flag-1' }), 'add_note', 'Gọi 1900 1234.');
+  });
+
+  it('never offers Loại bỏ nội dung for a module draft; the flag Chỉnh sửa opens the module editor instead', () => {
+    const { view, props } = renderReview({ review: reviewFor([blockingFlag('ai-mod-0')]) });
+    const panel = view.root.find((node) => String(node.props.className ?? '') === 'ai-flag-panel');
+    expect(buttonsByText(view.root, 'Loại bỏ nội dung')).toHaveLength(0);
+    expect(view.root.findAllByProps({ 'aria-label': 'Tiêu đề bài học' })).toHaveLength(0);
+    act(() => button(panel, 'Chỉnh sửa').props.onClick());
+    expect(view.root.findByProps({ 'aria-label': 'Tiêu đề bài học' }).props.value).toBe(TITLES[0]);
+    expect(props.onResolveFlag).not.toHaveBeenCalled();
+  });
+
+  it('opens the questions editor from a flag that points at a question', () => {
+    const flag = { ...blockingFlag('ai-mod-0'), location: { moduleId: 'ai-mod-0', questionId: 'ai-q-1' } } as VerificationFlag;
+    const { view } = renderReview({ review: reviewFor([flag]) });
+    const panel = view.root.find((node) => String(node.props.className ?? '') === 'ai-flag-panel');
+    act(() => button(panel, 'Chỉnh sửa').props.onClick());
+    expect(view.root.findAllByProps({ 'aria-label': 'Chỉnh sửa câu hỏi' }).length).toBeGreaterThan(0);
+    expect(buttonsByText(view.root, 'Lưu câu hỏi')).toHaveLength(1);
+  });
+
+  it('keeps Loại bỏ nội dung in the legacy flag panel by default', () => {
+    const onResolve = vi.fn();
+    let view!: TestRenderer.ReactTestRenderer;
+    act(() => { view = TestRenderer.create(createElement(FlagPanel, { flags: [blockingFlag('legacy')], busy: false, onResolve })); });
+    views.push(view);
+    act(() => button(view.root, 'Loại bỏ nội dung').props.onClick());
+    expect(onResolve).toHaveBeenCalledWith(expect.objectContaining({ id: 'flag-1' }), 'remove');
+    expect(buttonsByText(view.root, 'Chỉnh sửa')).toHaveLength(0);
   });
 
   it('shows a stuck module with its error and Thử lại once updating stalled', () => {
@@ -392,7 +432,8 @@ describe('Xem lại & xuất bản in the generator', () => {
       next_step: () => ({ kind: 'awaiting_admin', job: stuck }),
     });
     const view = await renderPage(api);
-    await act(async () => { button(view.root, 'AI viết lại').props.onClick(); });
+    act(() => button(view.root, 'AI viết lại').props.onClick());
+    await act(async () => { button(view.root, 'Viết lại').props.onClick(); });
     expect(api.adminAi).toHaveBeenCalledWith('retry_module', { jobId: 'template-1', moduleLocalId: 'm0', target: 'lesson', expectedVersion: 2 });
     expect(activeStep(view)).toBe('Xem lại & xuất bản');
     expect(text(view.root)).toContain('AI chưa viết được bài học.');
@@ -410,7 +451,8 @@ describe('Xem lại & xuất bản in the generator', () => {
       pause_autopilot: () => ({ job: { ...queued, outlineApprovedRevision: 0 } }),
     });
     const view = await renderPage(api);
-    await act(async () => { button(view.root, 'AI viết lại').props.onClick(); });
+    act(() => button(view.root, 'AI viết lại').props.onClick());
+    await act(async () => { button(view.root, 'Viết lại').props.onClick(); });
     await act(async () => { button(footer(view), '← Về độ phủ').props.onClick(); });
     expect(api.adminAi).toHaveBeenCalledWith('pause_autopilot', { jobId: 'template-1' });
     expect(activeStep(view)).toBe('Kiểm tra độ phủ');

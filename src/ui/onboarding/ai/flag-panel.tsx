@@ -20,9 +20,17 @@ export function FlagPanel({
   flags,
   busy,
   onResolve,
+  allowRemove = true,
+  onEdit,
 }: {
   flags: readonly VerificationFlag[];
   busy: boolean;
+  /**
+   * False where the content lives in a module job: the server rejects removing it from the
+   * draft (REVIEW_INVALID), so the Admin edits the module itself through `onEdit` instead.
+   */
+  allowRemove?: boolean;
+  onEdit?: (flag: VerificationFlag) => void;
   onResolve: (
     flag: VerificationFlag,
     action: FlagResolutionAction,
@@ -68,7 +76,8 @@ export function FlagPanel({
                   }}
                 ><EditOutlined /> Thêm ghi chú</button>
               )}
-              <button type="button" disabled={busy} onClick={() => onResolve(flag, 'remove')}><DeleteOutlined /> Loại bỏ nội dung</button>
+              {allowRemove && <button type="button" disabled={busy} onClick={() => onResolve(flag, 'remove')}><DeleteOutlined /> Loại bỏ nội dung</button>}
+              {onEdit && <button type="button" disabled={busy} onClick={() => onEdit(flag)}><EditOutlined /> Chỉnh sửa</button>}
               {flag.severity === 'warning' && <button type="button" disabled={busy} onClick={() => onResolve(flag, 'accept')}><CheckOutlined /> Chấp nhận cảnh báo</button>}
               {noteFlagId === flag.id && (
                 <div className="ai-flag-note-editor">
