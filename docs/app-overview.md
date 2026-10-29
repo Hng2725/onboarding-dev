@@ -61,7 +61,7 @@ Assignment AI dùng `assessmentMode: per_module`. Mỗi module đi qua `availabl
 
 Một resource bắt buộc chỉ hoàn thành sau khi đã được mở thành công. Bài tập chỉ mở khi mọi resource bắt buộc trong mọi module có cả `openedAt` và `completedAt`.
 
-AI sources support text PDFs, DOCX, Markdown, TXT and HTML, up to 2 MiB per file, without OCR. Generation requires Sandbox or both Native AI Chat scopes. Job/lease/operation IDs protect refresh-resume and duplicate dispatch; each call records provider, server-measured request size, and cleanup status.
+AI sources support text PDFs, DOCX, Markdown, TXT and HTML, up to 2 MiB per file, without OCR. Fresh inventory/template jobs and new module-v2 calls use Sandbox and need `sandbox:generate`; Native scopes alone do not reroute fresh generation. Job/lease/operation IDs protect refresh-resume and duplicate dispatch; each call records provider, server-measured request size, and cleanup status.
 
 
 ## Kiểm thử
@@ -77,6 +77,8 @@ The compact outline and two-pane editor use lesson/question cards, flags, and se
 One module is processed at a time. Failed lesson generation produces a deterministic source-only fallback; zero usable source produces a blocking manual placeholder. An advanced fallback does not invent a scenario. Admin-authored content uses explicit manual provenance. Three to five questions must be approved against the exact current lesson version. Historical approvals never satisfy the current publish gate.
 
 A room/project lease serializes provider attempts. At most one transient retry and one schema repair are allowed per module; project-busy responses use bounded backoff. Closing is not cancellation. Reopening adopts an already-dispatched attempt with its persisted provider and original deadline, or waits for explicit Continue. It does not auto-start the next module/template. Explicit Cancel records server cancellation and requests provider cleanup; unknown outcomes remain reserved until terminal evidence permits release.
+
+Native AI Chat is an eligible retry/resume provider, not an equivalent fresh-generation option. The generator requires both Native scopes and a Native preference: a failed job with `AI_FAILED` (including inventory/legacy retry), or a running/failed job with a prior Native attempt. Resuming a dispatched call uses its recorded provider. Module-v2 permission/provider failures remain within bounded retry/backoff and then fallback/manual lesson review or failed-question review; granting Native scopes does not add an automatic or direct Native module retry route.
 
 Both requires Template 1 review, explicit navigation to Template 2 review, and one sequential publish. Current approved pairs materialize to drafts first. Readiness is rechecked before artifact work. PDFs and JSON are checkpointed, so reconnect/retry resumes unfinished work and completed publish is idempotent. The modal remains open on partial failure. Artifacts stay at `Onboarding-app/Created templates/<template-name>/` and open through in-app file preview. Existing assignments keep their snapshot; legacy jobs retain their prior pipeline.
 
