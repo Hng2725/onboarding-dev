@@ -13,6 +13,7 @@ import { AI_GENERATION_LIMITS } from '../src/onboarding/ai/limits';
 import { createTemplateService } from '../src/onboarding/templates';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
+import { completePlan } from './helpers/complete-plan';
 
 const admin: OnboardingActor = { userId: 'admin-1', roomId: 'room-a', access: 'admin' };
 const otherAdmin: OnboardingActor = { userId: 'admin-2', roomId: 'room-b', access: 'admin' };
@@ -112,6 +113,7 @@ describe('AI job service', () => {
     const job = await service.startJob(admin, {
       kind: 'template', inventoryJobId: 'inventory-fallback-questions', templateKind: 'normal', operationId: 'fallback-questions',
     });
+    await completePlan(service, admin, job);
     await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 });
     const run = job.moduleRuns![0];
     const args = { jobId: job.jobId, moduleLocalId: run.outline.moduleLocalId };
@@ -146,6 +148,7 @@ describe('AI job service', () => {
     let job = await service.startJob(admin, {
       kind: 'template', inventoryJobId: 'inventory-related', templateKind: 'normal', operationId: 'related',
     });
+    await completePlan(service, admin, job);
     const modules = job.outline!.modules;
     expect(modules.length).toBeGreaterThanOrEqual(3);
     const tombstoneId = modules[modules.length - 1].moduleLocalId;
@@ -193,6 +196,7 @@ describe('AI job service', () => {
     let job = await service.startJob(admin, {
       kind: 'template', inventoryJobId: 'inventory-source-free-questions', templateKind: 'normal', operationId: 'source-free-questions',
     });
+    await completePlan(service, admin, job);
     const moduleLocalId = job.moduleRuns![0].outline.moduleLocalId;
     job = await service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: [{ type: 'update', moduleLocalId, patch: { sourceSectionIds: [] } }] });
     await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 2 });
@@ -226,6 +230,7 @@ describe('AI job service', () => {
     const job = await service.startJob(admin, {
       kind: 'template', inventoryJobId: 'inventory-question-version', templateKind: 'normal', operationId: 'question-version',
     });
+    await completePlan(service, admin, job);
     await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 });
     const outline = job.moduleRuns![0].outline;
     const input = { jobId: job.jobId, moduleLocalId: outline.moduleLocalId };
@@ -1289,6 +1294,140 @@ describe('AI job service', () => {
       expect.objectContaining({ type: 'generation_error', severity: 'blocking', status: 'open' }),
     ]));
     expect(detail.generationNotes?.join(' ')).toContain(unsupported.id);
+  });
+
+  describe('outline planner call (P)', () => {
+    async function templateStart(operationId: string, templateKind: 'normal' | 'advanced' = 'normal') {
+      const context = await setup();
+      const inventory = await context.service.startJob(admin, { kind: 'inventory', sourceIds: ['source-1'], operationId: 'inventory-' + operationId });
+      await context.service.nextStep(admin, { jobId: inventory.jobId, workerId: 'tab-a' });
+      const done = await context.service.submitAiOutput(admin, { jobId: inventory.jobId, workerId: 'tab-a', callId: 'A1', text: inventoryOutput });
+      const featureId = (done.result as { features: { featureId: string }[] }).features[0].featureId;
+      const job = await context.service.startJob(admin, {
+        kind: 'template', inventoryJobId: inventory.jobId, templateKind, operationId,
+        ...(templateKind === 'advanced' ? { roleProfile: { responsibilities: ['Tạo đơn hàng', 'Duyệt đơn hàng'] } } : {}),
+      });
+      return { ...context, job, featureId };
+    }
+    const plan = (featureId: string) => ({ modules: [
+      { title: 'Tổng quan quy trình bán hàng', description: 'Bức tranh chung.', estimatedMinutes: 10, objectives: ['Nắm quy trình'], featureIds: [featureId], sourceSectionIds: ['source-1#s1'], responsibilityIndexes: [], coverage: 'sufficient', gapNote: '' },
+      { title: 'Gửi duyệt đơn hàng', description: 'Thao tác gửi duyệt.', estimatedMinutes: 15, objectives: ['Gửi duyệt đúng cách'], featureIds: [featureId], sourceSectionIds: ['source-1#s1'], responsibilityIndexes: [], coverage: 'sufficient', gapNote: '' },
+      { title: 'Theo dõi đơn đã gửi', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['bogus#1'], responsibilityIndexes: [], coverage: 'sufficient', gapNote: '' },
+      { title: 'Hỗ trợ khi gặp lỗi', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [], coverage: 'insufficient', gapNote: 'Tài liệu chưa nói về lỗi.' },
+    ] });
+
+    it('enqueues plan-1 at start and dispatches it before anything else', async () => {
+      const { service, job } = await templateStart('plan-dispatch');
+      expect(job.outline!.revision).toBe(1);
+      expect(job.planPending).toBe(true);
+      expect(job.calls).toEqual([{ callId: 'plan-1', stage: 'P', planTarget: 'plan', status: 'pending', operationId: job.jobId + ':plan-1' }]);
+      const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      expect(step).toMatchObject({ kind: 'ai_call', callId: 'plan-1', operationId: job.jobId + ':plan-1' });
+      if (step.kind !== 'ai_call') throw new Error('Expected the planner call.');
+      expect(step.systemContext).toContain('source-1#s1');
+      expect(step.systemContext).not.toContain('Bấm nút Gửi duyệt để chuyển đơn.');
+      await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-b' })).resolves.toMatchObject({ kind: 'wait' });
+      const recorded = await service.recordDispatch(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'plan-1', attemptRef: 'attempt-plan', provider: 'sandbox' });
+      expect(recorded.calls[0]).toMatchObject({ status: 'dispatched', promptChars: step.prompt.length });
+      expect(recorded.planPending).toBe(true);
+    });
+
+    it('rejects outline approval and edits while the planner is pending', async () => {
+      const { service, job } = await templateStart('plan-approve-block');
+      const conflict = { code: 'OPERATION_CONFLICT', message: 'AI đang lập lộ trình, vui lòng chờ.' };
+      await expect(service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 })).rejects.toMatchObject(conflict);
+      await expect(service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: [] })).rejects.toMatchObject(conflict);
+    });
+
+    it('replaces the outline with a valid plan and then awaits the admin', async () => {
+      const { service, job, featureId } = await templateStart('plan-valid');
+      await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      const submitted = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'plan-1', text: JSON.stringify(plan(featureId)) });
+      expect(submitted.planPending).toBe(false);
+      const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      expect(step.kind).toBe('awaiting_admin');
+      if (step.kind !== 'awaiting_admin') throw new Error('Expected admin review.');
+      const outline = step.job.outline!;
+      expect(outline.revision).toBe(2);
+      expect(step.job.planPending).toBe(false);
+      expect(step.job.stageOutputs.__planFallback).toBeUndefined();
+      expect(outline.modules.map((m) => m.title)).toEqual(['Tổng quan quy trình bán hàng', 'Gửi duyệt đơn hàng', 'Theo dõi đơn đã gửi', 'Hỗ trợ khi gặp lỗi']);
+      expect(outline.modules.map((m) => m.frameKey)).toEqual(['t1-overview', 't1-access', 't1-navigation', 't1-core']);
+      expect(outline.modules[2]).toMatchObject({ sourceSectionIds: [], coverage: 'insufficient' });
+      expect(step.job.moduleRuns!.map((run) => run.outline.moduleLocalId)).toEqual(outline.modules.map((m) => m.moduleLocalId));
+      expect(step.job.moduleRuns!.every((run) => run.outlineRevision === 2 && run.lessonState === 'queued')).toBe(true);
+      const approved = await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 2 });
+      expect(approved.outlineApprovedRevision).toBe(2);
+      const lesson = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      expect(lesson).toMatchObject({ kind: 'ai_call', moduleTarget: 'lesson' });
+    });
+
+    it('keeps an advanced plan valid with task coverage built from responsibility indexes', async () => {
+      const { service, job, featureId } = await templateStart('plan-advanced', 'advanced');
+      const modules = [...plan(featureId).modules, { ...plan(featureId).modules[0], title: 'Phối hợp nhóm' }].map((m, i) => ({ ...m, responsibilityIndexes: i === 2 ? [0] : i === 3 ? [1] : [] }));
+      const current = await completePlan(service, admin, job, { modules });
+      expect(current.outline!.revision).toBe(2);
+      expect(current.outline!.taskCoverage.map((c) => c.task)).toEqual(['Tạo đơn hàng', 'Duyệt đơn hàng']);
+      await expect(service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 2 })).resolves.toMatchObject({ outlineApprovedRevision: 2 });
+    });
+
+    it('falls back to the deterministic outline after one schema repair', async () => {
+      const { service, job } = await templateStart('plan-invalid');
+      const deterministic = job.outline;
+      await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      const first = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'plan-1', text: 'not json' });
+      expect(first.planPending).toBe(true);
+      expect(first.calls.at(-1)).toMatchObject({ callId: 'plan-1-r1', stage: 'P', planTarget: 'plan', repairOf: 'plan-1', retryKind: 'schema', status: 'pending' });
+      const repair = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      expect(repair).toMatchObject({ kind: 'ai_call', callId: 'plan-1-r1' });
+      await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'plan-1-r1', text: 'not json' });
+      const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      expect(step.kind).toBe('awaiting_admin');
+      if (step.kind !== 'awaiting_admin') throw new Error('Expected admin review.');
+      expect(step.job.outline).toEqual(deterministic);
+      expect(step.job.outline!.revision).toBe(1);
+      expect(step.job.stageOutputs.__planFallback).toBe(true);
+      expect(step.job.planPending).toBe(false);
+      expect(step.job.calls.filter((call) => call.stage === 'P').map((call) => [call.callId, call.status])).toEqual([['plan-1', 'invalid'], ['plan-1-r1', 'invalid']]);
+      await expect(service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 })).resolves.toMatchObject({ outlineApprovedRevision: 1 });
+    });
+
+    it('retries a transient planner failure once and then falls back', async () => {
+      const { service, job, advance } = await templateStart('plan-transient');
+      await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      const failed = await service.reportAiFailure(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'plan-1', kind: 'failed', message: 'busy', providerErrorCode: 'PROVIDER_TRANSIENT' });
+      expect(failed.calls.at(-1)).toMatchObject({ callId: 'plan-1-retry1', stage: 'P', planTarget: 'plan', retryKind: 'transient', status: 'pending' });
+      expect(failed.calls.at(-1)!.repairOf).toBeUndefined();
+      await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'wait' });
+      advance(3_000);
+      await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'ai_call', callId: 'plan-1-retry1' });
+      await service.reportAiFailure(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'plan-1-retry1', kind: 'failed', message: 'busy', providerErrorCode: 'PROVIDER_TRANSIENT' });
+      const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      expect(step).toMatchObject({ kind: 'awaiting_admin', job: { planPending: false, stageOutputs: expect.objectContaining({ __planFallback: true }), outline: { revision: 1 } } });
+    });
+
+    it('falls back when the provider project stays busy past the wait limit', async () => {
+      const { service, job, advance } = await templateStart('plan-busy');
+      await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      const busy = await service.reportAiFailure(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'plan-1', kind: 'failed', message: 'busy', providerErrorCode: 'PROJECT_BUSY' });
+      expect(busy.calls.at(-1)).toMatchObject({ stage: 'P', retryKind: 'project_busy', status: 'pending' });
+      expect(busy.providerWaitStartedAt).toBeDefined();
+      advance(121_000);
+      const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      expect(step).toMatchObject({ kind: 'awaiting_admin', job: { planPending: false, status: 'running', stageOutputs: expect.objectContaining({ __planFallback: true }) } });
+    });
+
+    it('leaves a persisted module_v2 job without a planner call unchanged', async () => {
+      const { service, store, job } = await templateStart('plan-legacy');
+      const legacyId = 'legacy-v2';
+      const { id: _id, roomId: _room, planPending: _pending, ...persisted } = job;
+      await store.create(admin.roomId, 'onboarding_ai_jobs', { ...persisted, jobId: legacyId, operationId: 'legacy-v2-op', calls: [] });
+      const legacy = await service.getJob(admin, legacyId);
+      expect(legacy.planPending).toBe(false);
+      await expect(service.nextStep(admin, { jobId: legacyId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'awaiting_admin' });
+      await expect(service.approveOutline(admin, { jobId: legacyId, expectedRevision: 1 })).resolves.toMatchObject({ outlineApprovedRevision: 1 });
+      await expect(service.nextStep(admin, { jobId: legacyId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'ai_call', moduleTarget: 'lesson' });
+    });
   });
 
   it('uses typed job errors', () => {

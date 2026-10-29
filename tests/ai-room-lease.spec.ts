@@ -6,11 +6,14 @@ import { AI_GENERATION_LIMITS } from '../src/onboarding/ai/limits';
 import { acquireRoomAiLease, refreshRoomAiLease, releaseRoomAiLease } from '../src/onboarding/ai/room-ai-lease';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
+import { completePlan } from './helpers/complete-plan';
 import { pumpAiJob, type AiPumpApi } from '../src/ui/onboarding/ai/ai-pump';
 import type { AiGateway } from '../src/ui/onboarding/ai/ai-gateway-sandbox';
 import { createNativeChatAiGateway } from '../src/ui/onboarding/ai/ai-gateway-native-chat';
 
 const admin = { userId: 'admin-1', roomId: 'room-a', access: 'admin' as const };
+/** Calls other than the outline planner, which every new template job settles first. */
+function moduleCalls<T extends { readonly stage: string }>(job: { readonly calls: readonly T[] }): T[] { return job.calls.filter((call) => call.stage !== 'P'); }
 const inventory = {
   systemSummary: { purpose: 'Orders', modules: [], sourceRefs: [{ sectionId: 'source-1#s1', quote: aiSource.sections![0].text }] },
   glossary: [], features: [], flags: [],
@@ -37,6 +40,7 @@ async function setup(maxPageSize?: number) {
       kind: 'template', inventoryJobId: 'inventory', templateKind, operationId,
       ...(templateKind === 'advanced' ? { roleProfile: { department: 'Sales', role: 'Agent', responsibilities: ['Create orders', 'Review orders'] } } : {}),
     });
+    await completePlan(service, admin, job);
     await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 });
     return service.getJob(admin, job.jobId);
   }
@@ -588,8 +592,8 @@ describe('bounded provider waiting and module recovery', () => {
       jobId: job.jobId, workerId: 'tab-a', callId: step.callId, kind: 'failed', providerErrorCode: 'PROJECT_BUSY',
     })).rejects.toThrow('Lease release transport failed');
     const waiting = await service.getJob(admin, job.jobId);
-    expect(waiting.calls[0]).toMatchObject({ status: 'failed', providerErrorCode: 'PROJECT_BUSY', leaseHolderId: 'tab-a' });
-    expect(waiting.calls).toHaveLength(2);
+    expect(moduleCalls(waiting)[0]).toMatchObject({ status: 'failed', providerErrorCode: 'PROJECT_BUSY', leaseHolderId: 'tab-a' });
+    expect(moduleCalls(waiting)).toHaveLength(2);
     advance(120_001);
     await expect(other.nextStep(admin, { jobId: job.jobId, workerId: 'tab-new' })).resolves.toMatchObject({ kind: 'awaiting_admin' });
     const fallback = await service.getJob(admin, job.jobId);
@@ -622,7 +626,7 @@ describe('bounded provider waiting and module recovery', () => {
     const fallback = await service.reportAiFailure(admin, { ...failure, callId: retry.callId });
     expect(fallback.moduleRuns![0]).toMatchObject({ lessonState: 'fallback_review', lessonProvenance: 'fallback' });
     expect(fallback.moduleRuns!.slice(1)).toEqual(waiting.moduleRuns!.slice(1));
-    expect(fallback.calls).toHaveLength(2);
+    expect(moduleCalls(fallback)).toHaveLength(2);
     await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'awaiting_admin' });
     await expect(other.nextStep(admin, { jobId: competing.jobId, workerId: 'tab-b' })).resolves.toMatchObject({ kind: 'ai_call' });
   });
@@ -645,8 +649,8 @@ describe('bounded provider waiting and module recovery', () => {
   it('dispatches a queued room waiter after another module enters review', async () => {
     const { service, inventoryJob, templateJob } = await setup();
     const blocker = await inventoryJob('blocker');
-    await service.nextStep(admin, { jobId: blocker.jobId, workerId: 'blocker' });
     const job = await templateJob();
+    await service.nextStep(admin, { jobId: blocker.jobId, workerId: 'blocker' });
     const edited = await service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: job.outline!.modules.map((module) => ({ type: 'update', moduleLocalId: module.moduleLocalId, patch: { sourceSectionIds: ['source-1#s1'] } })) });
     await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 2 });
     await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'wait' });
@@ -696,7 +700,7 @@ describe('bounded provider waiting and module recovery', () => {
     expect(failed.moduleRuns![0]).toMatchObject({ lessonState: 'approved', questionState: 'failed', transientRetries: 1, schemaRepairs: 1 });
     expect(failed.moduleRuns![0].lessonDraft).toEqual(current.moduleRuns![0].lessonDraft);
     await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'awaiting_admin' });
-    expect(failed.calls).toHaveLength(4);
+    expect(moduleCalls(failed)).toHaveLength(4);
   });
 
   it('continues queued lessons while a later module awaits review', async () => {
@@ -707,7 +711,7 @@ describe('bounded provider waiting and module recovery', () => {
     const run = edited.moduleRuns![1];
     await service.updateModuleLesson(admin, { jobId: job.jobId, moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion, module: { ...generatedTemplate.modules[1], localId: run.outline.moduleLocalId, frameKey: run.outline.frameKey, featureIds: run.outline.featureIds, questions: [] } });
     await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'ai_call' });
-    expect((await service.getJob(admin, job.jobId)).calls).toHaveLength(1);
+    expect(moduleCalls(await service.getJob(admin, job.jobId))).toHaveLength(1);
   });
 
   it('retries PROJECT_BUSY with increasing bounded delays and an unchanged original deadline', async () => {
@@ -793,7 +797,7 @@ describe('bounded provider waiting and module recovery', () => {
     const { localId: _id, frameKey: _frame, featureIds: _features, questions: _questions, ...lesson } = generatedTemplate.modules[0];
     await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: step.callId, text: JSON.stringify({ ...lesson, flags: [] }) });
     await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'ai_call' });
-    expect((await service.getJob(admin, job.jobId)).calls).toHaveLength(2);
+    expect(moduleCalls(await service.getJob(admin, job.jobId))).toHaveLength(2);
   });
 });
 
@@ -873,12 +877,12 @@ describe('persisted pump reconnect', () => {
     };
     await expect(pumpAiJob({ api, gateway, provider: 'native_chat', jobId: job.jobId, workerId: 'tab-old', signal: controller.signal })).rejects.toThrow('modal closed');
     expect(gateway.status).not.toHaveBeenCalled();
-    expect((await service.getJob(admin, job.jobId)).calls).toHaveLength(1);
+    expect(moduleCalls(await service.getJob(admin, job.jobId))).toHaveLength(1);
     activeService = other;
     advance(AI_GENERATION_LIMITS.pumpLeaseMs + 1);
     const result = await pumpAiJob({ api, gateway, provider: 'native_chat', jobId: job.jobId, workerId: 'tab-new' });
     expect(result.moduleRuns![0].lessonState).toBe('review_ready');
-    expect(result.calls).toHaveLength(1);
+    expect(moduleCalls(result)).toHaveLength(1);
     expect(gateway.dispatch).toHaveBeenCalledTimes(1);
     expect(gateway.status).toHaveBeenCalledWith('native-chat:s:exact', undefined);
     expect(gateway.cancel).not.toHaveBeenCalled();

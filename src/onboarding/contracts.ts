@@ -199,7 +199,12 @@ export interface AiCallRecord {
   readonly lessonVersion?: number;
   readonly outlineRevision?: number;
   readonly callId: string;
-  readonly stage: 'A' | 'B' | 'C' | 'D';
+  readonly stage: 'A' | 'B' | 'C' | 'D' | 'P' | 'S';
+  /** Outline planner calls only: the whole-outline plan or a per-source supplement. */
+  readonly planTarget?: 'plan' | 'supplement';
+  readonly supplementSourceId?: string;
+  readonly supplementModuleLocalId?: string;
+  readonly supplementBatch?: number;
   readonly repairOf?: string;
   readonly operationId: string;
   readonly status: 'pending' | 'dispatched' | 'completed' | 'invalid' | 'failed';
@@ -227,6 +232,8 @@ export interface AiJobRecord {
   readonly outline?: TemplateOutline;
   readonly outlineApprovedRevision?: number;
   readonly moduleRuns?: readonly AiModuleDraftRun[];
+  /** Computed, never persisted: an outline planner (P) or supplement (S) call is pending or dispatched. */
+  readonly planPending: boolean;
   readonly id: string;
   readonly roomId: string;
   readonly jobId: string;

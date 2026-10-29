@@ -30,6 +30,7 @@ import { sanitizeAiDiagnosticText } from './diagnostics';
 import { materializeAiTemplate, materializeModuleTemplate } from './materialize';
 import { buildTemplateOutline, applyTemplateOutlineEdits } from './outline';
 import { moduleHasUsableSources, usableSectionIds } from './outline-coverage';
+import { buildOutlinePlanPrompt, buildOutlinePlanRepairPrompt, validateOutlinePlanOutput, type OutlinePlanValidationInput } from './outline-plan';
 import { buildFallbackLesson } from './fallback-lessons';
 import { buildFallbackQuestions } from './fallback-questions';
 import { buildModuleLessonPrompt, buildModuleLessonRepairPrompt, buildModuleQuestionRepairPrompt, buildModuleQuestionPrompt, validateModuleLessonOutput, validateModuleQuestionOutput, validApprovedLesson, type ModuleLessonPromptInput } from './module-draft';
@@ -330,6 +331,18 @@ const CLEARED_ERROR = { errorCode: '', errorMessage: '' } as const;
 const CLEARED_WAIT = { nextRetryAt: new Date(0).toISOString(), providerWaitStartedAt: new Date(0).toISOString(), providerWaitAttempts: 0 } as const;
 const MAX_PROVIDER_WAIT_MS = 120_000;
 const PROVIDER_RETRY_MS = 3_000;
+const TRANSIENT_PROVIDER_ERROR = /(?:TRANSIENT|UNAVAILABLE|OVERLOADED|RATE_LIMIT|SERVER_ERROR)/;
+const PLAN_PENDING_MESSAGE = 'AI đang lập lộ trình, vui lòng chờ.';
+
+/** Outline planner calls carry no module, so they must never reach a module-run lookup. */
+function isPlanCall(call: AiCallRecord): boolean {
+  return call.stage === 'P';
+}
+
+/** A planner (P) or supplement (S) call is still pending or dispatched. */
+function planPending(calls: readonly AiCallRecord[]): boolean {
+  return calls.some((call) => (call.stage === 'P' || call.stage === 'S') && (call.status === 'pending' || call.status === 'dispatched'));
+}
 
 export type AiJobNextStep =
   | {
@@ -490,6 +503,7 @@ function jobFrom(row: AiJobDbRecord, roomId: string): AiJobRecord {
     ...(row.outline ? { outline: row.outline } : {}),
     ...(row.outlineApprovedRevision === undefined ? {} : { outlineApprovedRevision: row.outlineApprovedRevision }),
     ...(row.moduleRuns ? { moduleRuns: row.moduleRuns } : {}),
+    planPending: planPending(row.calls),
     id: row.id,
     roomId,
     jobId: row.jobId,
@@ -830,6 +844,7 @@ export function createAiJobService(
     call: AiCallRecord,
   ): Promise<AiPromptRequest> {
     if (job.kind === 'template' && job.pipelineVersion === 'module_v2') {
+      if (isPlanCall(call)) return planPrompt(actor, job, call);
       const run = moduleForCall(job, call);
       const input = (await moduleContext(actor, job, run)).input;
       const questionInput = { ...input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance };
@@ -1293,7 +1308,7 @@ export function createAiJobService(
   ): Promise<AiJobDbRecord> {
     // Retrying persisted terminal evidence also retries a release whose response was lost.
     await releaseCallLease(actor, row, call);
-    if (row.kind === 'template' && row.pipelineVersion === 'module_v2') return processModuleOutput(actor, row, call);
+    if (row.kind === 'template' && row.pipelineVersion === 'module_v2') return isPlanCall(call) ? processPlanOutput(actor, row, call) : processModuleOutput(actor, row, call);
     return row.kind === 'inventory'
       ? processInventory(actor, row, call)
       : processTemplate(actor, row, call);
@@ -1376,6 +1391,12 @@ export function createAiJobService(
     if (row.providerWaitStartedAt && Date.parse(row.providerWaitStartedAt) > 0
       && Date.parse(now()) - Date.parse(row.providerWaitStartedAt) >= MAX_PROVIDER_WAIT_MS) {
       const calls = row.calls.map((call) => call.callId === current.callId ? { ...call, status: 'failed' as const, errors: ['PROJECT_BUSY'], finishedAt: now() } : call);
+      if (row.pipelineVersion === 'module_v2' && row.kind === 'template' && isPlanCall(current)) {
+        // The planner is optional: a project that stays busy keeps the deterministic outline.
+        const updated = await updateJob(actor, row, { calls, stageOutputs: { ...row.stageOutputs, __planFallback: true }, ...CLEARED_WAIT, ...RELEASED_LEASE });
+        await releaseCallLease(actor, row, current);
+        return { kind: 'awaiting_admin', job: jobFrom(updated, actor.roomId) };
+      }
       if (row.pipelineVersion === 'module_v2' && row.kind === 'template') {
         const run = moduleForCall(row, current);
         const next = current.moduleTarget === 'lesson' ? await fallbackRun(actor, row, run) : { ...clearRunWait(run), questionState: 'failed' as const };
@@ -1451,6 +1472,10 @@ export function createAiJobService(
     return jobFrom(await updateJob(actor, row, { moduleRuns: replaceRun(row, run), calls, status: 'running', result: null,
       ...(audit ? { stageOutputs: { ...row.stageOutputs, __moduleAudit: [...history, { ...audit, moduleLocalId: run.outline.moduleLocalId, outlineRevision: run.outlineRevision, sourceFingerprint: run.sourceFingerprint, approvedBy: actor.userId, approvedAt: now() }] } } : {}), ...leaseAfterChanges(calls) }), actor.roomId);
   }
+  /** The planner may still replace the outline, so neither edits nor approval may race it. */
+  function assertPlanSettled(row: AiJobDbRecord): void {
+    if (planPending(row.calls)) throw new AiJobServiceError('OPERATION_CONFLICT', PLAN_PENDING_MESSAGE);
+  }
   function assertOutlineRevision(row: AiJobDbRecord, revision: number): void {
     if (row.outline!.revision !== revision || !Number.isSafeInteger(revision)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Outline revision conflict.');
   }
@@ -1493,8 +1518,99 @@ export function createAiJobService(
     }
     return updateJob(actor, row, { moduleRuns: replaceRun(row, clearRunWait(next)), calls, stageOutputs: { ...row.stageOutputs, ['processed:' + call.callId]: true }, ...CLEARED_WAIT, ...RELEASED_LEASE });
   }
+  async function liveJobSources(actor: OnboardingActor, row: AiJobDbRecord): Promise<readonly SourceRecord[]> {
+    const sources = await Promise.all((row.sourceIds ?? []).map((id) => sourceById(actor.roomId, id)));
+    return sources.filter((s): s is SourceRecord => !!s && s.status === 'ready' && !s.deletedAt);
+  }
+  function planRange(row: AiJobDbRecord): { readonly min: number; readonly max: number } {
+    return row.templateKind === 'advanced' ? AI_GENERATION_LIMITS.advancedModuleRange : AI_GENERATION_LIMITS.normalModuleRange;
+  }
+  async function planInput(actor: OnboardingActor, row: AiJobDbRecord): Promise<OutlinePlanValidationInput> {
+    const inventory = row.stageOutputs.__inventory as FeatureInventory;
+    return {
+      jobId: row.jobId, templateKind: row.templateKind ?? 'normal', previous: row.outline!,
+      usable: usableSectionIds(await liveJobSources(actor, row)),
+      featureIds: new Set(inventory.features.map((feature) => feature.featureId)),
+      responsibilities: row.roleProfile?.responsibilities ?? [],
+    };
+  }
+  async function planPrompt(actor: OnboardingActor, row: AiJobDbRecord, call: AiCallRecord): Promise<AiPromptRequest> {
+    const records = await liveJobSources(actor, row);
+    const usable = usableSectionIds(records);
+    const sections = records.flatMap((source) => (source.sections ?? []).filter((section) => usable.has(section.id))
+      .map((section) => ({ id: section.id, sourceId: source.sourceId, fileName: source.fileName, headingPath: section.headingPath, chars: section.text.length })));
+    const input = { templateKind: row.templateKind ?? 'normal', inventory: row.stageOutputs.__inventory as FeatureInventory, sections, responsibilities: row.roleProfile?.responsibilities ?? [], range: planRange(row) } as const;
+    if (!call.repairOf) return buildOutlinePlanPrompt(input);
+    const invalid = row.calls.filter((item) => isPlanCall(item) && item.status === 'invalid').slice(-1)[0] as AiCallRecord | undefined;
+    let previous: unknown = {};
+    try { previous = invalid ? parseAiJsonObject(rawOutput(row.stageOutputs, invalid.callId) ?? '', { allowLeadingNarration: callProvider(invalid) === 'native_chat' }) : {}; } catch { /* Do not forward malformed untrusted text. */ }
+    return buildOutlinePlanRepairPrompt({ ...input, previous, errors: invalid?.errors ?? ['Invalid outline plan output'] });
+  }
+  /** Planner retries mirror `retryCall`: one schema repair (`-r1`) and one transient retry (`-retryN`) per plan. */
+  function planRetryCall(row: AiJobDbRecord, call: AiCallRecord, kind: NonNullable<AiCallRecord['retryKind']>): AiCallRecord {
+    const root = rootCall(call);
+    const callId = kind === 'schema'
+      ? root + '-r' + String(row.calls.filter((item) => item.repairOf === root && /-r\d+$/.test(item.callId)).length + 1)
+      : root + '-retry' + String(row.calls.filter((item) => item.callId.startsWith(root + '-retry')).length + 1);
+    return {
+      callId, operationId: row.jobId + ':' + callId, stage: call.stage, status: 'pending', retryKind: kind,
+      ...(call.planTarget ? { planTarget: call.planTarget } : {}),
+      ...(kind === 'schema' ? { repairOf: root } : call.repairOf ? { repairOf: call.repairOf } : {}),
+    };
+  }
+  function planRetryUsed(row: AiJobDbRecord, kind: NonNullable<AiCallRecord['retryKind']>): boolean {
+    return row.calls.some((item) => isPlanCall(item) && item.retryKind === kind);
+  }
+  async function processPlanOutput(actor: OnboardingActor, row: AiJobDbRecord, call: AiCallRecord): Promise<AiJobDbRecord> {
+    const text = rawOutput(row.stageOutputs, call.callId) ?? '';
+    let errors: readonly string[] = ['Outline is missing.'];
+    let outline: TemplateOutline | undefined;
+    if (row.outline && row.moduleRuns) {
+      try {
+        const result = validateOutlinePlanOutput(parseAiJsonObject(text, { allowLeadingNarration: callProvider(call) === 'native_chat' }), await planInput(actor, row));
+        if (result.ok) outline = result.value;
+        else errors = result.errors;
+      } catch (error) {
+        errors = validationMessages(error);
+      }
+    }
+    const stageOutputs = { ...row.stageOutputs, ['processed:' + call.callId]: true };
+    if (outline) return updateJob(actor, row, { outline, moduleRuns: reconcileModuleRuns(row.moduleRuns!, outline), stageOutputs, ...CLEARED_WAIT, ...RELEASED_LEASE });
+    const calls = row.calls.map((item): AiCallRecord => item.callId === call.callId ? { ...item, status: 'invalid', errors: errors.slice(0, 30), rawExcerpt: text.slice(0, 50 * 1024) } : item);
+    if (!planRetryUsed(row, 'schema')) return updateJob(actor, row, { calls: [...calls, planRetryCall(row, call, 'schema')], stageOutputs, ...CLEARED_WAIT, ...RELEASED_LEASE });
+    return updateJob(actor, row, { calls, stageOutputs: { ...stageOutputs, __planFallback: true }, ...CLEARED_WAIT, ...RELEASED_LEASE });
+  }
+  /**
+   * Settles the outline planner before any admin gate: processes a completed planner call,
+   * then dispatches a pending one. Returns a step only while planner work remains.
+   */
+  async function nextPlanStep(actor: OnboardingActor, initial: AiJobDbRecord, workerId: string): Promise<{ readonly row: AiJobDbRecord; readonly step?: AiJobNextStep }> {
+    let row = initial;
+    const completed = row.calls.find((call) => isPlanCall(call) && call.status === 'completed' && rawOutput(row.stageOutputs, call.callId) !== undefined && row.stageOutputs['processed:' + call.callId] !== true);
+    if (completed) row = await processCompleted(actor, row, completed);
+    const call = row.calls.find((item) => isPlanCall(item) && (item.status === 'pending' || item.status === 'dispatched'));
+    if (!call) return { row };
+    const waiting = await providerWaitStep(actor, row);
+    if (waiting) return { row, step: waiting };
+    if (row.pumpLeaseUntil && Date.parse(row.pumpLeaseUntil) >= Date.parse(now()) && row.pumpedBy !== workerId) return { row, step: { kind: 'wait', job: jobFrom(row, actor.roomId) } };
+    let request: AiPromptRequest;
+    try { request = await promptFor(actor, row, call); }
+    catch (error) {
+      // An unbuildable plan prompt (for example, too large) keeps the deterministic outline.
+      row = await updateJob(actor, row, {
+        calls: row.calls.map((item): AiCallRecord => item.callId === call.callId ? { ...item, status: 'failed', errors: validationMessages(error), finishedAt: now(), ...(aiCallMayBeLive(item) ? { cleanupState: 'pending', cleanupUpdatedAt: now() } as const : {}) } : item),
+        stageOutputs: { ...row.stageOutputs, __planFallback: true }, ...CLEARED_WAIT, ...RELEASED_LEASE,
+      });
+      if (!aiCallMayBeLive(call)) await releaseCallLease(actor, row, call);
+      return { row };
+    }
+    return { row, step: await callStep(actor, row, call, workerId, request) };
+  }
   async function nextModuleStep(actor: OnboardingActor, initial: AiJobDbRecord, workerId: string): Promise<AiJobNextStep> {
     let row = await syncModuleSources(actor, initial);
+    const planned = await nextPlanStep(actor, row, workerId);
+    if (planned.step) return planned.step;
+    row = planned.row;
     if (row.outlineApprovedRevision !== row.outline!.revision) return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
     const completed = row.calls.find((call) => call.status === 'completed' && rawOutput(row.stageOutputs, call.callId) !== undefined && row.stageOutputs['processed:' + call.callId] !== true);
     if (completed) row = await processCompleted(actor, row, completed);
@@ -1644,7 +1760,8 @@ export function createAiJobService(
           sourceIds: inventoryJob.sourceIds,
           inventoryJobId: inventoryJob.jobId,
           promptVersion: PROMPT_VERSION,
-          calls: [],
+          // The deterministic outline is revision 1; the AI plan call may replace it before review.
+          calls: [{ callId: 'plan-1', stage: 'P', planTarget: 'plan', status: 'pending', operationId: jobId + ':plan-1' }],
           stageOutputs: {
             __requestHash: requestHash,
             __inventory: inventoryJob.result,
@@ -1679,6 +1796,7 @@ export function createAiJobService(
 
     async updateOutline(actor, input) {
       const row = await requireModuleJob(actor, input.jobId);
+      assertPlanSettled(row);
       assertOutlineRevision(row, input.expectedRevision);
       if (!Array.isArray(input.edits) || input.edits.some((edit) => !edit || !['add', 'delete', 'reorder', 'update'].includes(edit.type))) throw new AiJobServiceError('OPERATION_CONFLICT', 'Outline edit type is invalid.');
       let outline: TemplateOutline;
@@ -1704,6 +1822,7 @@ export function createAiJobService(
     },
     async supplementModuleSources(actor, input) {
       const row = await requireModuleJob(actor, input.jobId);
+      assertPlanSettled(row);
       assertOutlineRevision(row, input.expectedRevision);
       const run = row.moduleRuns!.find((item) => !item.outline.tombstoned && item.outline.moduleLocalId === input.moduleLocalId);
       if (!run || row.calls.some(aiCallMayBeLive)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Module is unavailable or an AI call is still active.');
@@ -1724,6 +1843,7 @@ export function createAiJobService(
     },
     async approveOutline(actor, input) {
       const row = await requireModuleJob(actor, input.jobId);
+      assertPlanSettled(row);
       assertOutlineRevision(row, input.expectedRevision);
       validateOutline(row, row.outline!);
       const history = (row.stageOutputs.__outlineAudit ?? []) as readonly unknown[];
@@ -1960,7 +2080,7 @@ export function createAiJobService(
         startedAt: candidate.startedAt ?? now(),
         finishedAt: now(),
       } : candidate);
-      if (row.pipelineVersion === 'module_v2' && row.kind === 'template') moduleForCall(row, current);
+      if (row.pipelineVersion === 'module_v2' && row.kind === 'template' && !isPlanCall(current)) moduleForCall(row, current);
       row = await updateJob(actor, row, {
         calls,
         ...CLEARED_WAIT,
@@ -2049,10 +2169,22 @@ export function createAiJobService(
       const canWait = isBusy && Date.parse(now()) - Date.parse(waitStartedAt) < MAX_PROVIDER_WAIT_MS;
       const busyCount = (row.providerWaitAttempts ?? 0) + 1;
       const nextRetryAt = new Date(Math.min(Date.parse(waitStartedAt) + MAX_PROVIDER_WAIT_MS, Date.parse(now()) + Math.min(30_000, PROVIDER_RETRY_MS * (2 ** Math.min(busyCount - 1, 4))))).toISOString();
+      if (row.pipelineVersion === 'module_v2' && row.kind === 'template' && isPlanCall(current)) {
+        const transient = !isBusy && input.kind === 'failed' && !planRetryUsed(row, 'transient') && TRANSIENT_PROVIDER_ERROR.test(providerErrorCode ?? '');
+        const retry = canWait ? planRetryCall(row, current, 'project_busy') : transient ? planRetryCall(row, current, 'transient') : undefined;
+        const updated = await updateJob(actor, row, {
+          calls: retry ? [...calls, retry] : calls, ...RELEASED_LEASE,
+          ...(canWait ? { providerWaitStartedAt: waitStartedAt, nextRetryAt, providerWaitAttempts: busyCount } : { ...CLEARED_WAIT, ...(transient ? { nextRetryAt: new Date(Date.parse(now()) + PROVIDER_RETRY_MS).toISOString() } : {}) }),
+          // Out of retries: keep the deterministic outline for the admin.
+          ...(retry ? {} : { stageOutputs: { ...row.stageOutputs, __planFallback: true } }),
+        });
+        if (!aiCallMayBeLive(calls.find((call) => call.callId === current.callId)!)) await releaseCallLease(actor, row, current);
+        return jobFrom(updated, actor.roomId);
+      }
       if (row.pipelineVersion === 'module_v2' && row.kind === 'template') {
         const run = moduleForCall(row, current);
         const transient = !isBusy && input.kind === 'failed' && (run.transientRetries ?? 0) < 1
-          && /(?:TRANSIENT|UNAVAILABLE|OVERLOADED|RATE_LIMIT|SERVER_ERROR)/.test(providerErrorCode ?? '');
+          && TRANSIENT_PROVIDER_ERROR.test(providerErrorCode ?? '');
         const next = canWait ? { ...run, providerWaitStartedAt: waitStartedAt, nextRetryAt }
           : transient ? { ...clearRunWait(run), transientRetries: (run.transientRetries ?? 0) + 1, nextRetryAt: new Date(Date.parse(now()) + PROVIDER_RETRY_MS).toISOString() }
             : current.moduleTarget === 'lesson' ? await fallbackRun(actor, row, run) : { ...clearRunWait(run), questionState: 'failed' as const };

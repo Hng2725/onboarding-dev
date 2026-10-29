@@ -6,6 +6,7 @@ import { validApprovedLesson } from '../src/onboarding/ai/module-draft';
 import { buildFallbackLesson } from '../src/onboarding/ai/fallback-lessons';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
+import { completePlan } from './helpers/complete-plan';
 
 const admin = { userId: 'admin-1', roomId: 'room-a', access: 'admin' as const };
 const outline: TemplateOutline = { revision: 1, flags: [], taskCoverage: [], modules: generatedTemplate.modules.map((m, order) => ({ moduleLocalId: m.localId, frameKey: m.frameKey, order, title: m.title, description: m.description, estimatedMinutes: m.estimatedMinutes, objectives: m.objectives, featureIds: m.featureIds, sourceSectionIds: ['source-1#s1'], responsibilityIndexes: [] })) };
@@ -25,7 +26,7 @@ async function setup(kind: 'normal' | 'advanced' = 'normal') {
     operationId: 'inventory', createdBy: 'admin-1', createdAt: '2026-10-28T00:00:00.000Z', updatedAt: '2026-10-28T00:00:00.000Z',
   });
   const service = createAiJobService(store, { now: () => '2026-10-28T01:00:00.000Z' });
-  const job = await service.startJob(admin, { kind: 'template', inventoryJobId: 'inventory', templateKind: kind, operationId: 'template', ...(kind === 'advanced' ? { roleProfile: { department: 'Sales', role: 'Agent', responsibilities: ['Create orders', 'Review orders'] } } : {}) });
+  const job = await completePlan(service, admin, await service.startJob(admin, { kind: 'template', inventoryJobId: 'inventory', templateKind: kind, operationId: 'template', ...(kind === 'advanced' ? { roleProfile: { department: 'Sales', role: 'Agent', responsibilities: ['Create orders', 'Review orders'] } } : {}) }));
   return { store, service, job };
 }
 function active(job: AiJobRecord) { return job.moduleRuns![0]; }
@@ -317,7 +318,7 @@ describe('persisted module jobs', () => {
   });
   it('starts module_v2 awaiting outline approval, then reviews lesson and questions before completion', async () => {
     const { service, job } = await setup();
-    expect(job).toMatchObject({ pipelineVersion: 'module_v2', outline: { revision: 1 }, calls: [] });
+    expect(job).toMatchObject({ pipelineVersion: 'module_v2', outline: { revision: 1 }, planPending: false, calls: [expect.objectContaining({ callId: 'plan-1', stage: 'P', status: 'failed' })] });
     await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' })).resolves.toMatchObject({ kind: 'awaiting_admin' });
     await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 });
     const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' });
@@ -362,7 +363,7 @@ describe('persisted module jobs', () => {
     await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' })).resolves.toMatchObject({ kind: 'awaiting_admin' });
     const missing = await service.getJob(admin, job.jobId);
     expect(active(missing).lessonState).toBe('manual_required');
-    expect(missing.calls).toEqual([]);
+    expect(missing.calls.filter((call) => call.stage !== 'P')).toEqual([]);
     await expect(service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId, expectedVersion: active(missing).lessonVersion })).rejects.toThrow();
     await expect(service.retryModule(admin, { jobId: job.jobId, moduleLocalId, target: 'questions', expectedVersion: 0 })).rejects.toThrow();
   });

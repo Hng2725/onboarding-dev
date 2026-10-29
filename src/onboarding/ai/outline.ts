@@ -7,7 +7,7 @@ import { AI_GENERATION_LIMITS } from './limits';
 import { validateOutlineMetadata } from './outline-validation';
 import { ADVANCED_FRAMES, NORMAL_FRAMES, type GeneratedFlag, type GeneratedTaskCoverage } from './validate';
 
-const GAP_NOTE = 'Chưa tìm thấy nội dung tài liệu cho module này.';
+export const GAP_NOTE = 'Chưa tìm thấy nội dung tài liệu cho module này.';
 const MISSING_SOURCE_MESSAGE = 'Module chưa có đoạn tài liệu nguồn.';
 const LEGACY_MISSING_SOURCE_MESSAGE = 'Missing source sections for module.';
 const TASK_FLAG_PREFIX = 'Nhiệm vụ "';
@@ -26,14 +26,15 @@ const featureRefs = (features: readonly InventoryFeature[]): RawSourceRef[] => f
 const moduleId = (jobId: string, frameKey: string, salt = 0): string =>
   `outline-${createHash('sha256').update(JSON.stringify(salt ? [jobId, frameKey, salt] : [jobId, frameKey])).digest('hex')}`;
 const union = <T>(lists: readonly (readonly T[])[]): T[] => [...new Set(lists.flat())];
-const missingSource = (id: string): GeneratedFlag => ({
+export const missingSource = (id: string): GeneratedFlag => ({
   type: 'missing', severity: 'blocking', message: MISSING_SOURCE_MESSAGE,
   questionForAdmin: 'Bổ sung tài liệu cho module này hoặc bỏ module.', location: { moduleLocalId: id }, evidence: [],
 });
-const isMissingSourceFlag = (f: GeneratedFlag): boolean => f.message === MISSING_SOURCE_MESSAGE || f.message === LEGACY_MISSING_SOURCE_MESSAGE;
-const isTaskCoverageFlag = (f: GeneratedFlag): boolean =>
+export const isMissingSourceFlag = (f: GeneratedFlag): boolean => f.message === MISSING_SOURCE_MESSAGE || f.message === LEGACY_MISSING_SOURCE_MESSAGE;
+export const isTaskCoverageFlag = (f: GeneratedFlag): boolean =>
   f.message.startsWith(LEGACY_TASK_FLAG_PREFIX) || (f.message.startsWith(TASK_FLAG_PREFIX) && f.message.endsWith(TASK_FLAG_SUFFIX));
-function coverage(tasks: readonly string[], modules: readonly TemplateOutlineModule[], flags: GeneratedFlag[]): GeneratedTaskCoverage[] {
+/** Maps each responsibility to the first live module that claims it, pushing a blocking flag for any unassigned one. */
+export function coverage(tasks: readonly string[], modules: readonly TemplateOutlineModule[], flags: GeneratedFlag[]): GeneratedTaskCoverage[] {
   return tasks.map((task, index) => {
     const module = modules.find((item) => !item.tombstoned && item.responsibilityIndexes.includes(index));
     if (module) return { task, featureIds: module.featureIds, relevance: 'inferred', relevanceRationale: 'Assigned to outline module.', moduleLocalId: module.moduleLocalId, flagIndex: null };

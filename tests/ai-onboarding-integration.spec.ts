@@ -13,6 +13,7 @@ import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { generatedTemplate } from './helpers/ai-template-fixture';
 import { seedAiSource } from './helpers/ai-template-fixture';
 import { approvedModuleJob } from './helpers/approved-module-fixture';
+import { completePlan } from './helpers/complete-plan';
 import { generateValidatedTemplateRuns, moveReviewIndex, reviewAdvanceState } from '../src/ui/onboarding/ai/ai-template-batch';
 import { publishAiTemplateBatch } from '../src/ui/onboarding/ai/ai-publish-batch';
 
@@ -64,8 +65,10 @@ describe('AI onboarding integration', () => {
     const jobs = createAiJobService(store);
     let job = await jobs.startJob(admin, { kind: 'template', inventoryJobId: 'inventory-safe', templateKind: 'advanced', roleProfile: { responsibilities: ['Create orders', 'Review orders'] }, operationId: 'advanced-safe' });
     expect(job.roleProfile).toEqual({ responsibilities: ['Create orders', 'Review orders'] });
+    expect(job.calls.map((call) => [call.callId, call.stage])).toEqual([['plan-1', 'P']]);
+    job = await completePlan(jobs, admin, job, undefined, 'worker');
     expect(await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'worker' })).toMatchObject({ kind: 'awaiting_admin' });
-    expect(job.calls).toEqual([]);
+    expect(job.calls.filter((call) => call.stage !== 'P')).toEqual([]);
     job = await jobs.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: job.outline!.modules.map((module, index) => ({ type: 'update', moduleLocalId: module.moduleLocalId, patch: { sourceSectionIds: index === 2 ? [] : ['source-1#s1'] } })) });
     job = await jobs.approveOutline(admin, { jobId: job.jobId, expectedRevision: 2 });
     const sample = generatedTemplate.modules[0];
