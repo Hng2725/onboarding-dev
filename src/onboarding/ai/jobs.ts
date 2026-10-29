@@ -1408,7 +1408,8 @@ export function createAiJobService(
     const usable = ids.length > 0 && ids.every((id) => id.trim()) && new Set(ids).size === ids.length && matches.every((items) => items.length === 1 && items[0].section.text.trim().length >= AI_GENERATION_LIMITS.minQuoteChars && /[\p{L}\p{N}]/u.test(normalizeForMatch(items[0].section.text)));
     const sections = usable ? matches.map((items) => items[0].section) : [];
     const inventory = row.stageOutputs.__inventory as FeatureInventory;
-    return { input: { module: run.outline, sections, features: inventory.features, responsibilities: row.roleProfile?.responsibilities ?? [], templateKind: row.templateKind ?? 'normal' }, fingerprint: stableHash(matches), usable };
+    const relatedModules = (row.moduleRuns ?? []).filter((item) => !item.outline.tombstoned && item.outline.moduleLocalId !== run.outline.moduleLocalId).map((item) => item.outline).sort((a, b) => a.order - b.order).map((outline) => ({ order: outline.order, title: outline.title }));
+    return { input: { module: run.outline, sections, features: inventory.features, responsibilities: row.roleProfile?.responsibilities ?? [], templateKind: row.templateKind ?? 'normal', relatedModules }, fingerprint: stableHash(matches), usable };
   }
   function obsoleteCalls(row: AiJobDbRecord, ids: ReadonlySet<string>): readonly AiCallRecord[] {
     return row.calls.map((call) => call.moduleLocalId && ids.has(call.moduleLocalId) && (['pending', 'dispatched'].includes(call.status) || (call.status === 'completed' && row.stageOutputs['processed:' + call.callId] !== true))

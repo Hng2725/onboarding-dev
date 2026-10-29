@@ -2,7 +2,9 @@ import type { EmployeeType, RoleProfile, SourceRecord } from '../contracts';
 import { AI_GENERATION_LIMITS } from './limits';
 import { ADVANCED_FRAMES, NORMAL_FRAMES } from './validate';
 
-export const PROMPT_VERSION = '2026-10-28.1';
+export const PROMPT_VERSION = '2026-10-29.1';
+
+export const VIETNAMESE_OUTPUT_RULE = 'Mọi trường hiển thị cho người học/Admin (title, description, objectives, body, steps.text, prompt, options.label, explanation, message, questionForAdmin, gapNote, reason) viết bằng tiếng Việt có dấu, kể cả khi tài liệu nguồn bằng tiếng Anh. Riêng quote trong sourceRefs/evidence phải chép nguyên văn từ nguồn, không dịch.';
 
 /**
  * Agent file readers truncate very long lines (observed on Native AI Chat), which made the
