@@ -1,5 +1,6 @@
 /*
- * AI template generator: modal shell (header stepper, body, footer) and step 1 "Nguồn & loại".
+ * AI template generator: modal shell (header stepper, body, footer), step 1 "Nguồn & loại" and
+ * step 2 "Kiểm tra độ phủ".
  * Colours come from the --on-* tokens so light and dark themes both work. Colour marks state only:
  * success = done, warning = needs action, primary = running/selected, danger = error.
  */
@@ -81,6 +82,64 @@
 .ai-source-none { margin: 0; color: var(--on-text-soft); font-size: 13px; }
 .ai-note-toggle { justify-self: start; }
 
+/* Step 2: Kiểm tra độ phủ */
+.ai-coverage { display: grid; gap: 16px; min-width: 0; }
+/* Four equal, centred cells across the full width: no empty space on the right. */
+.ai-coverage-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 16px 20px; border: 1px solid var(--on-border); border-radius: var(--on-radius-md); background: var(--on-surface-raised); }
+.ai-coverage-stat { display: grid; justify-items: center; gap: 2px; min-width: 0; text-align: center; }
+.ai-coverage-stat b { font-size: 20px; line-height: 1.2; }
+.ai-coverage-stat span { color: var(--on-text-soft); font-size: 12px; }
+.ai-coverage-stat.ok b { color: var(--on-success); }
+.ai-coverage-stat.warn b { color: var(--on-warning); }
+
+.ai-coverage-modules { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.ai-coverage-module { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto auto; align-items: center; gap: 8px 14px; padding: 14px 16px; border: 1px solid var(--on-border); border-radius: var(--on-radius-md); }
+.ai-coverage-module.warn { border-color: color-mix(in srgb, var(--on-warning) 45%, var(--on-border)); }
+.ai-coverage-order { color: var(--on-text-soft); font-weight: 700; }
+.ai-coverage-title { min-width: 0; }
+.ai-coverage-title strong { display: block; overflow-wrap: anywhere; }
+.ai-coverage-title small { display: block; overflow: hidden; color: var(--on-text-soft); text-overflow: ellipsis; white-space: nowrap; }
+.ai-coverage-actions { display: flex; gap: 6px; }
+
+.ai-chip { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.ai-chip.ok { color: var(--on-success); background: color-mix(in srgb, var(--on-success) 14%, transparent); }
+.ai-chip.warn { color: var(--on-warning); background: color-mix(in srgb, var(--on-warning) 14%, transparent); }
+.ai-chip.run { color: var(--on-primary); background: var(--on-primary-soft); }
+
+.ai-coverage-gap { display: flex; flex-wrap: wrap; grid-column: 2 / -1; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 12px; border-radius: 8px; color: var(--on-text-soft); background: color-mix(in srgb, var(--on-warning) 10%, transparent); font-size: 13px; }
+.ai-coverage-gap p { flex: 1 1 240px; margin: 0; }
+.ai-coverage-gap-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.ai-coverage-upload { position: relative; cursor: pointer; }
+.ai-coverage-upload.disabled { cursor: not-allowed; opacity: .45; }
+.ai-coverage-upload input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); opacity: 0; }
+.ai-coverage-upload:focus-within { outline: 3px solid color-mix(in srgb, var(--on-primary) 35%, transparent); outline-offset: 2px; }
+
+.ai-coverage-panel { display: grid; grid-column: 1 / -1; gap: 12px; padding: 14px 16px; border: 1px solid var(--on-border); border-radius: var(--on-radius-md); background: var(--on-surface-raised); }
+.ai-coverage-add-panel { grid-column: auto; }
+.ai-coverage-fields { display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: 12px; }
+.ai-coverage-wide { grid-column: 1 / -1; }
+.ai-coverage-fields .ai-label { margin-bottom: 6px; }
+.ai-coverage-tasks, .ai-coverage-picker-source { display: grid; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.ai-coverage-picker-source legend { margin-bottom: 6px; padding: 0; font-weight: 600; }
+.ai-coverage-check { display: flex; align-items: center; gap: 10px; min-height: 30px; cursor: pointer; }
+.ai-coverage-check input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--on-primary); }
+.ai-coverage-check small { color: var(--on-text-soft); }
+.ai-coverage-panel-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.ai-coverage-empty, .ai-coverage-hint { margin: 0; color: var(--on-text-soft); font-size: 13px; }
+.ai-coverage-add { justify-self: start; }
+
+.ai-coverage-loading-label { display: flex; align-items: center; gap: 10px; margin: 0; color: var(--on-text); font-weight: 600; }
+.ai-coverage-pulse { width: 10px; height: 10px; border-radius: 50%; background: var(--on-primary); animation: ai-coverage-pulse 1.2s ease-in-out infinite; }
+.ai-skeleton-bar { display: block; width: 70%; height: 12px; margin: 4px 0; border-radius: 6px; background: color-mix(in srgb, var(--on-text) 9%, transparent); animation: ai-coverage-pulse 1.6s ease-in-out infinite; }
+.ai-skeleton-bar.short { width: 40%; }
+.ai-skeleton-bar.dot { width: 16px; }
+.ai-skeleton-bar.chip { width: 84px; height: 20px; border-radius: 999px; }
+.ai-coverage-skeleton .ai-coverage-stat { justify-items: center; width: 100%; }
+@keyframes ai-coverage-pulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) {
+  .ai-coverage-pulse, .ai-skeleton-bar { animation: none; }
+}
+
 @media (max-width: 900px) {
   .ai-generator-header { flex-wrap: wrap; gap: 12px; padding: 14px 16px; }
   .ai-generator-close { margin-left: auto; }
@@ -89,9 +148,15 @@
   .ai-stepper-step:not(.active) .ai-stepper-label { display: none; }
   .ai-generator-body { padding: 20px 16px; }
   .ai-step-sources { grid-template-columns: 1fr; gap: 24px; }
+  .ai-coverage-module { grid-template-columns: 28px minmax(0, 1fr) auto; }
+  .ai-coverage-actions { grid-column: 2 / -1; justify-content: flex-start; }
+  .ai-coverage-fields { grid-template-columns: 1fr; }
   .ai-generator-footer { flex-wrap: wrap; padding: 12px 16px; padding-right: 88px; }
 }
 
 @media (max-width: 480px) {
   .ai-kind-options, .ai-more-fields { grid-template-columns: 1fr; }
+  .ai-coverage-summary { padding: 12px; gap: 6px; }
+  .ai-coverage-stat b { font-size: 17px; }
+  .ai-coverage-stat span { font-size: 11px; }
 }

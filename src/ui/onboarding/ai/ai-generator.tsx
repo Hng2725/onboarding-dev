@@ -50,7 +50,8 @@ import {
   loadAiGeneratorResetReviews,
   resetAiGeneratorServerState,
 } from './ai-generator-reset';
-import { AiOutlineReview, type ModuleSourceCatalog } from './ai-outline-review';
+import { AiCoverageSkeleton, AiStepCoverage, type ModuleSourceCatalog } from './ai-step-coverage';
+import { outlineReadiness } from '../../../onboarding/ai/outline-coverage';
 import { AiModuleWorkspace } from './ai-module-workspace';
 import {
   AiPublishBatchError,
@@ -145,7 +146,9 @@ export function aiCallDisplayLabel(
       .filter((candidate) => new RegExp('^' + batch[1] + '\\d+$').test(candidate))).size;
     label = (batch[1] === 'A' ? 'Phân tích tài liệu' : 'Kiểm chứng nội dung')
       + ' (lô ' + batch[2] + '/' + String(Math.max(total, Number(batch[2]))) + ')';
-  } else if (/-lessons$/.test(step)) label = 'Tạo bài học';
+  } else if (/^plan-/.test(step)) label = 'Lập lộ trình';
+  else if (/^supplement-/.test(step)) label = 'Đọc tài liệu bổ sung';
+  else if (/-lessons$/.test(step)) label = 'Tạo bài học';
   else if (/-questions$/.test(step)) label = 'Tạo câu hỏi';
   else label = step;
   const repair = /-r(\d+)$/.exec(call.callId);
@@ -779,11 +782,12 @@ export function AiGeneratorPage({
   const [publishProgress, setPublishProgress] = useState<AiPublishFileProgress | null>(null);
   const [activeReviewIndex, setActiveReviewIndex] = useState(0);
   /** The operation in flight; busy labels and the close confirmation depend on which one it is. */
-  const [operation, setOperation] = useState<'upload' | 'analyze' | 'save' | 'publish' | null>(null);
+  const [operation, setOperation] = useState<'upload' | 'analyze' | 'approve' | 'save' | 'publish' | null>(null);
   const busy = operation !== null;
   const [editingOutline, setEditingOutline] = useState(false);
   const [outlineFocusModuleId, setOutlineFocusModuleId] = useState<string | null>(null);
-  const [moduleSourceCatalog, setModuleSourceCatalog] = useState<ModuleSourceCatalog>([]);
+  /** `list_module_sources` of one job; null until it has loaded for the current job. */
+  const [moduleSourceCatalog, setModuleSourceCatalog] = useState<{ readonly jobId: string; readonly sources: ModuleSourceCatalog } | null>(null);
   const [selectedTemplateKind, setSelectedTemplateKind] = useState<EmployeeType | null>(null);
   const [selectedModuleId, setSelectedModuleId] = useState(() => roomId ? readAiResumeKey('onboarding:ai:module:' + roomId) ?? '' : '');
   const [notice, setNotice] = useState<InlineNoticeMessage | null>(null);
@@ -798,6 +802,8 @@ export function AiGeneratorPage({
   const abortRef = useRef<AbortController | null>(null);
   const inventoryRecoveryAbortRef = useRef<AbortController | null>(null);
   const cleanupAbortRef = useRef<AbortController | null>(null);
+  /** Template jobs dropped by a kind change; the next analyse cancels the ones still running. */
+  const supersededJobsRef = useRef<AiJobRecord[]>([]);
   const appRef = useRef(app);
   appRef.current = app;
   const { userId } = context;
@@ -930,13 +936,20 @@ export function AiGeneratorPage({
     return result.review;
   }, [api, setReview]);
 
+  // The coverage step needs to know which sections can ground a module; reload when the outline or sources change.
+  const catalogJobId = templateJob?.pipelineVersion === 'module_v2' && templateJob.outline
+    && (step === 1 || editingOutline || templateJob.outlineApprovedRevision !== templateJob.outline.revision)
+    ? templateJob.jobId
+    : null;
   useEffect(() => {
     let active = true;
-    if (templateJob?.pipelineVersion === 'module_v2' && (editingOutline || templateJob.outlineApprovedRevision !== templateJob.outline?.revision)) {
-      void api.adminAi<{ sources: ModuleSourceCatalog }>('list_module_sources', { jobId: templateJob.jobId }).then((result) => { if (active) setModuleSourceCatalog(result.sources); }).catch(() => { if (active) setModuleSourceCatalog([]); });
+    if (catalogJobId) {
+      void api.adminAi<{ sources: ModuleSourceCatalog }>('list_module_sources', { jobId: catalogJobId })
+        .then((result) => { if (active) setModuleSourceCatalog({ jobId: catalogJobId, sources: result.sources }); })
+        .catch(() => { if (active) setModuleSourceCatalog({ jobId: catalogJobId, sources: [] }); });
     }
     return () => { active = false; };
-  }, [api, templateJob?.jobId, templateJob?.pipelineVersion, templateJob?.outlineApprovedRevision, templateJob?.outline?.revision, editingOutline, sources]);
+  }, [api, catalogJobId, templateJob?.outline?.revision, templateJob?.sourceIds?.length, sources]);
 
   useEffect(() => {
     let active = true;
@@ -1063,6 +1076,7 @@ export function AiGeneratorPage({
     abortRef.current = null;
     inventoryRecoveryAbortRef.current = null;
     cleanupAbortRef.current = null;
+    supersededJobsRef.current = [];
     setStep(0);
     setSources(nextSources);
     setSelectedIds(new Set(nextSources.map((source) => source.sourceId)));
@@ -1080,7 +1094,7 @@ export function AiGeneratorPage({
     setOperation(null);
     setEditingOutline(false);
     setOutlineFocusModuleId(null);
-    setModuleSourceCatalog([]);
+    setModuleSourceCatalog(null);
     setSelectedTemplateKind(null);
     setSelectedModuleId('');
     setNotice(null);
@@ -1190,50 +1204,64 @@ export function AiGeneratorPage({
     });
   }
 
-  async function uploadSource(file: File) {
+  /** Checks a file before upload; returns the system name to ingest it under, or null after showing why not. */
+  function prepareUpload(file: File): string | null {
     const validation = validateSourceFile(file);
     if (validation) {
       setNotice({ message: validation, tone: 'error' });
-      return;
+      return null;
     }
     const uploadSystemName = resolveUploadSystemName(systemName, file.name);
     if (!systemName.trim()) setSystemName(uploadSystemName);
     if (!uploadSystemName) {
       setNotice({ message: 'Nhập tên hệ thống trước khi tải tài liệu.', tone: 'error' });
-      return;
+      return null;
     }
     if (!roomId) {
       setNotice({ message: 'Không xác định được room để tải tài liệu.', tone: 'error' });
-      return;
+      return null;
     }
+    return uploadSystemName;
+  }
+
+  /** Uploads a file to Roomfiles and ingests it as a source; resolves with the new source ID. */
+  async function uploadAndIngest(file: File, uploadSystemName: string): Promise<string> {
+    if (!roomId) throw new Error('Không xác định được room để tải tài liệu.');
+    const encoded = await readFile(file);
+    const folders = await ensureOnboardingRoomfiles(app, roomId);
+    const uploadResult = await app.uploadFile({
+      channelId: roomId,
+      folderId: folders.documentsId,
+      fileName: file.name,
+      base64Data: encoded.dataUrl,
+      mimeType: file.type || undefined,
+      duplicateAction: 'keep_both',
+    });
+    const uploaded = normalizeUploadedRoomFile(uploadResult, {
+      fileName: file.name,
+      mimeType: file.type || undefined,
+      size: file.size,
+    });
+    const result = await api.adminAi<{ source: SourceSummary }>('ingest_source', {
+      operationId: crypto.randomUUID(),
+      fileName: uploaded.fileName,
+      mimeType: uploaded.mimeType,
+      base64: encoded.base64,
+      systemName: uploadSystemName,
+      softwareVersion: softwareVersion.trim() || undefined,
+      effectiveDate: effectiveDate || undefined,
+      fileId: uploaded.fileId,
+    });
+    return result.source.sourceId;
+  }
+
+  async function uploadSource(file: File) {
+    const uploadSystemName = prepareUpload(file);
+    if (!uploadSystemName) return;
     setOperation('upload');
     setNotice(null);
     try {
-      const encoded = await readFile(file);
-      const folders = await ensureOnboardingRoomfiles(app, roomId);
-      const uploadResult = await app.uploadFile({
-        channelId: roomId,
-        folderId: folders.documentsId,
-        fileName: file.name,
-        base64Data: encoded.dataUrl,
-        mimeType: file.type || undefined,
-        duplicateAction: 'keep_both',
-      });
-      const uploaded = normalizeUploadedRoomFile(uploadResult, {
-        fileName: file.name,
-        mimeType: file.type || undefined,
-        size: file.size,
-      });
-      await api.adminAi('ingest_source', {
-        operationId: crypto.randomUUID(),
-        fileName: uploaded.fileName,
-        mimeType: uploaded.mimeType,
-        base64: encoded.base64,
-        systemName: uploadSystemName,
-        softwareVersion: softwareVersion.trim() || undefined,
-        effectiveDate: effectiveDate || undefined,
-        fileId: uploaded.fileId,
-      });
+      await uploadAndIngest(file, uploadSystemName);
       await loadSources();
       setNotice({ message: 'Đã thêm tài liệu nguồn.', tone: 'success' });
     } catch (caught) {
@@ -1328,6 +1356,7 @@ export function AiGeneratorPage({
     setNotice(null);
     try {
       let existing = templateRuns.find((run) => run.kind === kind);
+      const stale: AiJobRecord[] = supersededJobsRef.current.splice(0);
       const staleJob = existing?.job;
       const plannedFrom = staleJob?.inventoryJobId
         ? [inventoryJob, ...roomJobs].find((job) => job?.jobId === staleJob.inventoryJobId)
@@ -1337,15 +1366,17 @@ export function AiGeneratorPage({
         existing = undefined;
         setTemplateRuns([{ kind, job: null, review: null }]);
         setSelectedTemplateKind(null);
-        if (roomId) clearAiResumeKeys(['onboarding:ai:template:' + roomId]);
-        if (staleJob.status === 'running') {
-          try {
-            const cancelled = await cancelRunningAiJob(api, staleJob.jobId, () => abortRef.current?.abort(),
-              (call) => confirmAttempt(call, undefined, 'cancel'));
-            setRoomJobs((current) => current.map((job) => job.jobId === cancelled.job.jobId ? cancelled.job : job));
-          } catch {
-            // Best effort: the old job no longer belongs to this session either way.
-          }
+        stale.push(staleJob);
+      }
+      if (stale.length > 0 && roomId) clearAiResumeKeys(['onboarding:ai:template:' + roomId]);
+      for (const job of stale) {
+        if (job.status !== 'running') continue;
+        try {
+          const cancelled = await cancelRunningAiJob(api, job.jobId, () => abortRef.current?.abort(),
+            (call) => confirmAttempt(call, undefined, 'cancel'));
+          setRoomJobs((current) => current.map((candidate) => candidate.jobId === cancelled.job.jobId ? cancelled.job : candidate));
+        } catch {
+          // Best effort: the old job no longer belongs to this session either way.
         }
       }
       const inventory = await runInventory();
@@ -1361,6 +1392,12 @@ export function AiGeneratorPage({
   }
 
   function chooseTemplateSelection(selection: Exclude<TemplateSelection, null>) {
+    // A job planned for another kind no longer belongs to this session; the next analyse cancels it.
+    for (const run of templateRuns) {
+      if (run.kind !== selection && run.job && !supersededJobsRef.current.some((job) => job.jobId === run.job!.jobId)) {
+        supersededJobsRef.current.push(run.job);
+      }
+    }
     setSelectedTemplateKind(null);
     setTemplateSelection(selection);
     setActiveReviewIndex(0);
@@ -1417,13 +1454,81 @@ export function AiGeneratorPage({
     finally { setOperation(null); }
   }
 
-  async function approveOutlineAndStartDrafting(): Promise<void> {
-    if (!templateJob?.outline) return;
+  /**
+   * Runs a coverage action that may queue planner (S) calls, then pumps them so AI reads the new
+   * material right away. The outline stays on screen; the module AI reads shows its own status.
+   */
+  async function coverageAction(action: string, args: Record<string, unknown>, before?: () => Promise<Record<string, unknown>>) {
+    const current = templateJob;
+    if (!current?.outline) return;
+    setNotice(null);
+    try {
+      const extra = before ? await before() : {};
+      setOperation('analyze');
+      let job = (await api.adminAi<{ job: AiJobRecord }>(action, {
+        jobId: current.jobId, expectedRevision: current.outline.revision, ...args, ...extra,
+      })).job;
+      setTemplateJob(job);
+      if (job.planPending) {
+        job = await pump(job);
+        setTemplateJob(job);
+      }
+    } catch (caught) {
+      if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
+    } finally {
+      setOperation(null);
+    }
+  }
+
+  function supplementFromFile(moduleLocalId: string, file: File) {
+    const uploadSystemName = prepareUpload(file);
+    if (!uploadSystemName) return;
+    setOperation('upload');
+    void coverageAction('supplement_module_document', { moduleLocalId }, async () => {
+      const sourceId = await uploadAndIngest(file, uploadSystemName);
+      await loadSources();
+      return { sourceId };
+    });
+  }
+
+  /**
+   * Footer "Tạo template": approve the outline, and only once the server confirms the approved
+   * revision move to AI tạo nội dung and let autopilot write the modules.
+   */
+  async function approveOutlineAndStart(): Promise<void> {
+    const current = templateJob;
+    if (!current?.outline) return;
+    setOperation('approve');
+    setNotice(null);
+    let approved: AiJobRecord;
+    try {
+      approved = (await api.adminAi<{ job: AiJobRecord }>('approve_outline', {
+        jobId: current.jobId, expectedRevision: current.outline.revision,
+      })).job;
+      setTemplateJob(approved);
+    } catch (caught) {
+      setNotice({ message: generationErrorMessage(caught), tone: 'error' });
+      setOperation(null);
+      return;
+    }
+    if (!approved.outline || approved.outlineApprovedRevision !== approved.outline.revision) {
+      setNotice({ message: 'Lộ trình vừa thay đổi nên chưa thể bắt đầu. Hãy kiểm tra lại rồi bấm Tạo template.', tone: 'error' });
+      setOperation(null);
+      return;
+    }
     setEditingOutline(false);
     setOutlineFocusModuleId(null);
     setStep(2);
-    const approved = await moduleAction('approve_outline', { expectedRevision: templateJob.outline.revision }, true);
-    if (!approved) setStep(1);
+    setOperation('analyze');
+    try {
+      const job = await pump(approved);
+      setTemplateJob(job);
+      await openCompletedModuleReview(job);
+    } catch (caught) {
+      if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
+    } finally {
+      setOperation(null);
+    }
   }
 
   async function generateTemplate(inventory: AiJobRecord, kind: EmployeeType, existing: AiTemplateRun | undefined) {
@@ -1673,10 +1778,9 @@ export function AiGeneratorPage({
   }), [responsibilities, templateSelection]);
   const requestHasErrors = Object.keys(requestErrors).length > 0;
   const outlineApproved = outlineApprovedFor(templateJob);
-  const outlineReady = templateJob?.pipelineVersion === 'module_v2' && Boolean(templateJob.outline) && !templateJob.planPending;
   const publishing = publishTargets.some((target) => PUBLISHING_PHASES.has(target.phase));
   /** True while closing the modal would interrupt AI work; closing then asks first. */
-  const aiWorking = operation === 'analyze' || operation === 'publish' || operation === 'upload'
+  const aiWorking = operation === 'analyze' || operation === 'approve' || operation === 'publish' || operation === 'upload'
     || (inventoryJob?.status === 'running' && inventoryRecoveryAbortRef.current !== null)
     || Boolean(templateJob?.planPending)
     || (templateJob?.autoApprove === true && templateJob.status === 'running' && outlineApproved)
@@ -1717,7 +1821,24 @@ export function AiGeneratorPage({
   const inventoryRunning = inventoryJob?.status === 'running';
   const progressJob = inventoryRunning ? inventoryJob : templateJob ?? inventoryJob;
   const planning = Boolean(templateJob) && !inventoryRunning;
-  const showOutline = outlineReady && !inventoryRunning;
+  // The coverage screen owns a module job from its first plan (skeleton) until approval; failures stay on the progress card.
+  const coverageJob = templateJob?.pipelineVersion === 'module_v2' && !inventoryRunning
+    && templateJob.status !== 'failed' && templateJob.status !== 'cancelled'
+    && (templateJob.outline || templateJob.planPending)
+    ? templateJob
+    : null;
+  const showOutline = Boolean(coverageJob);
+  const coverageCatalog = moduleSourceCatalog && moduleSourceCatalog.jobId === coverageJob?.jobId ? moduleSourceCatalog.sources : null;
+  const usableSectionIds = useMemo(() => new Set((coverageCatalog ?? []).flatMap((source) => source.sections
+    .filter((section) => section.usable).map((section) => section.id))), [coverageCatalog]);
+  const sourceNames = useMemo(() => new Map(sources.map((source) => [source.sourceId, source.fileName] as const)), [sources]);
+  const coverageReadiness = coverageJob?.outline && !coverageJob.planPending
+    ? outlineReadiness(coverageJob.outline, usableSectionIds, {
+        templateKind: coverageJob.templateKind ?? 'normal',
+        responsibilities: coverageJob.roleProfile?.responsibilities ?? [],
+      })
+    : null;
+  const readingSupplement = Boolean(coverageJob?.calls.some((call) => call.stage === 'S' && (call.status === 'pending' || call.status === 'dispatched')));
   const progressFailed = progressJob?.status === 'failed';
   const cleanupStatus = cancelling
     ? <p className="ai-cleanup-status" role="status"><LoadingOutlined spin /> Đang chờ PrivOS xác nhận hủy tiến trình AI nền</p>
@@ -1745,8 +1866,24 @@ export function AiGeneratorPage({
     hint = sourcesHint;
     primary = { label: analyzing ? 'Đang phân tích…' : 'Phân tích tài liệu', working: analyzing, disabled: !canAnalyze, onClick: () => void analyzeAndPlan() };
   } else if (step === 1) {
-    if (showOutline) hint = 'Duyệt lộ trình để AI viết nội dung';
-    else {
+    if (coverageJob?.planPending && !busy) {
+      // Restored while AI was still planning: nothing runs the planner until the Admin continues.
+      hint = 'AI chưa lập xong lộ trình';
+      primary = { label: 'Tiếp tục', disabled: restoring || resetting, onClick: () => void resumeModuleJob() };
+    } else if (coverageJob) {
+      const approving = operation === 'approve';
+      hint = coverageJob.planPending
+        ? readingSupplement ? 'AI đang đọc tài liệu bổ sung…' : 'AI đang lập lộ trình…'
+        : !coverageCatalog
+          ? 'Đang kiểm tra độ phủ…'
+          : coverageReadiness?.ready ? null : coverageReadiness?.reasons[0] ?? null;
+      primary = {
+        label: approving ? 'Đang bắt đầu…' : 'Tạo template',
+        working: approving,
+        disabled: busy || restoring || resetting || coverageJob.planPending || !coverageCatalog || !coverageReadiness?.ready,
+        onClick: () => void approveOutlineAndStart(),
+      };
+    } else {
       primary = {
         label: analyzing ? 'AI đang xử lý…' : progressFailed ? 'Thử lại' : 'Tiếp tục',
         working: analyzing,
@@ -1769,7 +1906,9 @@ export function AiGeneratorPage({
       onClick: () => void publish(),
     };
   }
-  const progressCancellable = step === 1 && !showOutline && progressJob?.status === 'running';
+  // The whole job can be cancelled while it reads or plans; a supplement read is not worth losing the outline for.
+  const progressCancellable = step === 1 && progressJob?.status === 'running'
+    && (!showOutline || (Boolean(coverageJob?.planPending) && !readingSupplement));
 
   return (
     <div
@@ -1837,10 +1976,29 @@ export function AiGeneratorPage({
           )}
           {canGenerateWithAi && step === 1 && (
             <div className="ai-step-coverage">
-              {showOutline && templateJob?.outline ? (
-                <section className="ai-workspace-card ai-module-stage">
-                  <AiOutlineReview key={templateJob.jobId} outline={templateJob.outline} templateKind={templateJob.templateKind ?? 'normal'} responsibilities={templateJob.roleProfile?.responsibilities ?? []} busy={busy} initialModuleId={outlineFocusModuleId ?? selectedModuleId} initialPanel={outlineFocusModuleId ? 'source' : 'closed'} sourceCatalog={moduleSourceCatalog} onSupplement={(moduleLocalId, sourceIds, sectionIds) => void moduleAction('supplement_module_sources', { expectedRevision: templateJob.outline!.revision, moduleLocalId, sourceIds, sectionIds })} onEdit={(edits) => void moduleAction('update_outline', { expectedRevision: templateJob.outline!.revision, edits })} onApprove={() => void approveOutlineAndStartDrafting()} />
-                </section>
+              {coverageJob ? (
+                coverageJob.outline && !coverageJob.planPending && !coverageCatalog
+                  ? <AiCoverageSkeleton label="Đang kiểm tra độ phủ…" />
+                  : (
+                    <AiStepCoverage
+                      key={coverageJob.jobId}
+                      job={coverageJob}
+                      usableSectionIds={usableSectionIds}
+                      sourceCatalog={coverageCatalog ?? []}
+                      sourceNames={sourceNames}
+                      busy={busy || restoring || resetting}
+                      initialPickerModuleId={outlineFocusModuleId}
+                      onEdit={(edits) => void moduleAction('update_outline', { expectedRevision: coverageJob.outline!.revision, edits })}
+                      onUploadFor={supplementFromFile}
+                      onPickSections={(moduleLocalId, sourceIds, sectionIds) => void moduleAction('supplement_module_sources', {
+                        expectedRevision: coverageJob.outline!.revision, moduleLocalId, sourceIds, sectionIds,
+                      })}
+                      onOverride={(moduleLocalId) => void moduleAction('set_coverage_override', {
+                        expectedRevision: coverageJob.outline!.revision, moduleLocalId, override: true,
+                      })}
+                      onAddModule={(title, description) => void coverageAction('add_outline_module', { title, description })}
+                    />
+                  )
               ) : (
                 <section className="ai-workspace-card ai-workspace-progress-card">
                   <h3>{planning
@@ -1971,7 +2129,8 @@ export function AiGeneratorPage({
         {canGenerateWithAi && (
           <footer className="ai-generator-footer">
             <div className="ai-generator-footer-start">
-              {!initialTemplate && (
+              {/* Steps 1–2 go back instead. Step 3 keeps reset until its own footer (← Về độ phủ) exists. */}
+              {!initialTemplate && (step === 0 || step === 3) && (
                 <button className="button button-ghost" type="button" disabled={busy || resetting || restoring} onClick={() => setResetConfirmOpen(true)}>
                   Xóa phiên
                 </button>
@@ -1982,7 +2141,7 @@ export function AiGeneratorPage({
                   type="button"
                   disabled={busy || resetting}
                   onClick={() => { if (step === 2) backToOutline(); else setStep(0); }}
-                >Quay lại</button>
+                >← Quay lại</button>
               )}
               {progressCancellable && progressJob && (
                 <button

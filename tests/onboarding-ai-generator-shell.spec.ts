@@ -274,7 +274,7 @@ describe('AI generator shell', () => {
     views.push(view);
     expect(JSON.stringify(view.toJSON())).toContain('Module kế hoạch cũ');
 
-    act(() => buttonByText(view, 'Quay lại')!.props.onClick());
+    act(() => buttonByText(view, '← Quay lại')!.props.onClick());
     const policy = view.root.findByProps({ 'aria-label': 'Danh sách tài liệu nguồn' }).findAllByType('input')[1];
     expect(policy.props.checked).toBe(false);
     act(() => policy.props.onChange());
@@ -289,6 +289,40 @@ describe('AI generator shell', () => {
 
     await act(async () => { buttonByText(view, 'Hủy job')!.props.onClick(); });
     expect(api.adminAi).toHaveBeenLastCalledWith('cancel_job', { jobId: 'inventory-2' });
+  });
+
+  it('cancels the planned job when the kind changes and plans the new kind on the next analyse', async () => {
+    const module = { moduleLocalId: 'm0', frameKey: 't1-overview', order: 0, title: 'Module thông thường', description: '', estimatedMinutes: 10,
+      objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] };
+    const planned: AiJobRecord = {
+      ...completedInventory, id: 'template-row', jobId: 'template-1', kind: 'template', status: 'running',
+      templateKind: 'normal', inventoryJobId: 'inventory-1', result: undefined, pipelineVersion: 'module_v2', planPending: false,
+      outline: { revision: 1, modules: [module], flags: [], taskCoverage: [] } as never, outlineApprovedRevision: 0,
+      moduleRuns: [{ outline: module, outlineRevision: 1, lessonState: 'queued', lessonVersion: 0, questionState: 'blocked', questionVersion: 0 }] as never,
+    };
+    const advanced: AiJobRecord = { ...planned, jobId: 'template-2', templateKind: 'advanced', planPending: true, outline: undefined, moduleRuns: [] };
+    const api = { adminAi: vi.fn(async (action: string, args?: Record<string, unknown>) => {
+      if (action === 'list_sources') return { sources: [source] };
+      if (action === 'list_jobs') return { jobs: [completedInventory, planned] };
+      if (action === 'list_module_sources') return { sources: [] };
+      if (action === 'cancel_job') return { job: { ...planned, status: 'cancelled' } };
+      if (action === 'start_job' && args?.kind === 'template') return { job: advanced };
+      if (action === 'next_step') return new Promise(() => undefined);
+      throw new Error('Unexpected action: ' + action);
+    }) };
+    const { view } = await render(api);
+    views.push(view);
+    expect(activeStep(view)).toBe('Kiểm tra độ phủ');
+
+    act(() => buttonByText(view, '← Quay lại')!.props.onClick());
+    chooseKind(view, 'Nâng cao');
+    act(() => view.root.findByType('textarea').props.onChange({ target: { value: 'Duyệt đơn\nLập báo cáo' } }));
+    await act(async () => { buttonByText(view, 'Phân tích tài liệu')!.props.onClick(); });
+
+    expect(api.adminAi).toHaveBeenCalledWith('cancel_job', { jobId: 'template-1' });
+    expect(api.adminAi).toHaveBeenCalledWith('start_job', expect.objectContaining({ kind: 'template', templateKind: 'advanced', inventoryJobId: 'inventory-1' }));
+    expect(activeStep(view)).toBe('Kiểm tra độ phủ');
+    expect(JSON.stringify(view.toJSON())).not.toContain('Module thông thường');
   });
 
   it('labels a save without analysing and closes without asking', async () => {

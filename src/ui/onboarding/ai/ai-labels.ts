@@ -81,10 +81,16 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   COVERAGE_INCOMPLETE: 'Còn module chưa đủ tài liệu.',
 };
 
+/** Codes whose server message, when written in Vietnamese, says more than the generic text. */
+const SPECIFIC_MESSAGE_CODES: ReadonlySet<string> = new Set(['OPERATION_CONFLICT', 'COVERAGE_INCOMPLETE']);
+
 export function vietnameseErrorMessage(error: unknown): string {
   const providerMessage = error instanceof Error ? actionableProviderFailure(error.message) : null;
   if (providerMessage) return providerMessage;
   const code = errorCode(error);
+  if (code && SPECIFIC_MESSAGE_CODES.has(code) && error instanceof Error && hasVietnameseText(error.message)) {
+    return error.message.trim();
+  }
   if (code && Object.prototype.hasOwnProperty.call(ERROR_MESSAGES, code)) return ERROR_MESSAGES[code];
   if (error instanceof Error && error.message && hasVietnameseText(error.message)) return error.message;
   return 'Không thể hoàn tất yêu cầu AI.' + (code ? ' (mã ' + code + ')' : '');

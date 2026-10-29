@@ -399,7 +399,8 @@ export type AiJobNextStep =
 export interface AiJobService {
   updateOutline(actor: OnboardingActor, input: OutlineVersionInput & { readonly edits: readonly OutlineEdit[] }): Promise<AiJobRecord>;
   approveOutline(actor: OnboardingActor, input: OutlineVersionInput): Promise<AiJobRecord>;
-  listModuleSources(actor: OnboardingActor, jobId: string): Promise<readonly { sourceId: string; fileName: string; sections: readonly { id: string; headingPath: readonly string[] }[] }[]>;
+  /** Ready room sources with each section's headings and whether it can ground a module (`usableSectionIds`). */
+  listModuleSources(actor: OnboardingActor, jobId: string): Promise<readonly { sourceId: string; fileName: string; sections: readonly { id: string; headingPath: readonly string[]; usable: boolean }[] }[]>;
   supplementModuleSources(actor: OnboardingActor, input: OutlineVersionInput & ModuleInput & { readonly sourceIds: readonly string[]; readonly sectionIds: readonly string[] }): Promise<AiJobRecord>;
   /** Adds one new ready room source and lets AI read only that file (S calls) to fill the module. */
   supplementModuleDocument(actor: OnboardingActor, input: OutlineVersionInput & ModuleInput & { readonly sourceId: string }): Promise<AiJobRecord>;
@@ -2166,7 +2167,8 @@ export function createAiJobService(
         all.push(...page.records.map((record) => sourceFrom(record, actor.roomId)).filter((source) => source.status === 'ready' && !source.deletedAt));
         cursor = page.nextCursor;
       } while (cursor);
-      return all.map((source) => ({ sourceId: source.sourceId, fileName: source.fileName, sections: (source.sections ?? []).filter((section) => section.text.trim()).map(({ id, headingPath }) => ({ id, headingPath })) }));
+      const usable = usableSectionIds(all);
+      return all.map((source) => ({ sourceId: source.sourceId, fileName: source.fileName, sections: (source.sections ?? []).filter((section) => section.text.trim()).map(({ id, headingPath }) => ({ id, headingPath, usable: usable.has(id) })) }));
     },
     async supplementModuleSources(actor, input) {
       const row = await requireModuleJob(actor, input.jobId);

@@ -1736,6 +1736,20 @@ describe('AI job service', () => {
       expect(isModuleCovered(module, usableIds(['source-1#s1']))).toBe(true);
     });
 
+    it('lists room sources with whether each section can ground a module', async () => {
+      const { service, store, job } = await coverageJob('list-usable');
+      await addSource(store, 'source-2', [...supportSections, { id: 'source-2#s3', headingPath: ['Ngắn'], text: 'Ok.' }]);
+      const sources = await service.listModuleSources(admin, job.jobId);
+      const second = sources.find((source) => source.sourceId === 'source-2')!;
+      expect(second.sections).toEqual([
+        { id: 'source-2#s1', headingPath: ['Xử lý lỗi'], usable: true },
+        { id: 'source-2#s2', headingPath: ['Gửi lại đơn'], usable: true },
+        { id: 'source-2#s3', headingPath: ['Ngắn'], usable: false },
+      ]);
+      const first = sources.find((source) => source.sourceId === 'source-1')!;
+      expect(first.sections.find((section) => section.id === 'source-1#s1')).toMatchObject({ usable: true });
+    });
+
     it('marks a module sufficient after the admin picks sections for it', async () => {
       const { service, job, target } = await coverageJob('picker-sufficient');
       expect(target.gapNote).toBeTruthy();

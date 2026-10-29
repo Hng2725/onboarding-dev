@@ -380,7 +380,7 @@ describe('AI generator lifecycle', () => {
     const [retryButton] = renderer.root.findByType('footer').findAllByProps({ className: 'button button-primary' });
     expect(retryButton.children.join('')).toBe('Thử lại');
     expect(retryButton.props.disabled).toBe(false);
-    act(() => renderer.root.findAllByType('button').find((button) => button.children.join('') === 'Quay lại')!.props.onClick());
+    act(() => renderer.root.findAllByType('button').find((button) => button.children.join('') === '← Quay lại')!.props.onClick());
     const textarea = renderer.root.findByType('textarea');
     expect(textarea.props.value).toBe(failedTemplateJob.roleProfile?.responsibilities.join('\n'));
     expect(renderer.root.findAllByType('select')).toHaveLength(0);
@@ -488,26 +488,29 @@ it('restores an approved running module job directly in AI tạo nội dung', as
   view.unmount(); vi.unstubAllGlobals();
 });
 
-it('moves to AI tạo nội dung immediately after outline approval and starts the module pump', async () => {
+const usableCatalog = { sources: [{ sourceId: 'source-1', fileName: 'Guide.pdf', sections: [{ id: 's', headingPath: ['Hướng dẫn'], usable: true }] }] };
+const footerButton = (view: TestRenderer.ReactTestRenderer, label: string) => view.root.findByType('footer').findAllByType('button')
+  .find((item) => item.children.join('').endsWith(label))!;
+
+it('moves to AI tạo nội dung after the server confirms outline approval and starts the module pump', async () => {
   const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
   vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
   const modules = ['t1-overview', 't1-access', 't1-navigation', 't1-core'].map((frameKey, order) => ({ moduleLocalId: `m${order}`, frameKey, order, title: frameKey, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] }));
   const job = { ...failedTemplateJob, templateKind: 'normal' as const, roleProfile: undefined, status: 'running' as const, pipelineVersion: 'module_v2' as const, outline: { revision: 4, modules, flags: [], taskCoverage: [] }, outlineApprovedRevision: 0, moduleRuns: modules.map((outline) => ({ outline, outlineRevision: 4, lessonState: 'queued' as const, lessonVersion: 0, questionState: 'blocked' as const, questionVersion: 0 })) };
   const approved = { ...job, outlineApprovedRevision: 4 };
-  const api = { adminAi: vi.fn(async (action: string) => { if (action === 'list_sources') return { sources: [] }; if (action === 'list_jobs') return { jobs: [inventoryJob, job] }; if (action === 'approve_outline') return { job: approved }; if (action === 'next_step') return { kind: 'awaiting_admin', job: approved }; throw new Error('Unexpected action: ' + action); }) };
+  const api = { adminAi: vi.fn(async (action: string) => { if (action === 'list_sources') return { sources: [] }; if (action === 'list_jobs') return { jobs: [inventoryJob, job] }; if (action === 'list_module_sources') return usableCatalog; if (action === 'approve_outline') return { job: approved }; if (action === 'next_step') return { kind: 'awaiting_admin', job: approved }; throw new Error('Unexpected action: ' + action); }) };
   let view!: TestRenderer.ReactTestRenderer;
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
   expect(activeStepLabel(view)).toBe('Kiểm tra độ phủ');
   expect(api.adminAi.mock.calls.some(([action]) => action === 'next_step')).toBe(false);
-  const button = view.root.findAllByType('button').find((item) => item.children.join('') === 'Duyệt lộ trình và tiếp tục')!;
-  await act(async () => { button.props.onClick(); });
+  await act(async () => { footerButton(view, 'Tạo template').props.onClick(); });
   expect(api.adminAi).toHaveBeenCalledWith('approve_outline', { jobId: 'template-1', expectedRevision: 4 });
   expect(api.adminAi).toHaveBeenCalledWith('next_step', expect.objectContaining({ jobId: 'template-1' }));
   expect(activeStepLabel(view)).toBe('AI tạo nội dung');
   view.unmount(); vi.unstubAllGlobals();
 });
 
-it('returns to Kiểm tra độ phủ when outline approval fails', async () => {
+it('stays on Kiểm tra độ phủ while approval is pending and after it fails', async () => {
   const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
   vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
   const modules = ['t1-overview', 't1-access', 't1-navigation', 't1-core'].map((frameKey, order) => ({ moduleLocalId: `m${order}`, frameKey, order, title: frameKey, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] }));
@@ -516,16 +519,21 @@ it('returns to Kiểm tra độ phủ when outline approval fails', async () => 
   const api = { adminAi: vi.fn(async (action: string) => {
     if (action === 'list_sources') return { sources: [] };
     if (action === 'list_jobs') return { jobs: [inventoryJob, job] };
+    if (action === 'list_module_sources') return usableCatalog;
     if (action === 'approve_outline') return approval.promise;
     throw new Error('Unexpected action: ' + action);
   }) };
   let view!: TestRenderer.ReactTestRenderer;
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
 
-  act(() => { view.root.findAllByType('button').find((item) => item.children.join('') === 'Duyệt lộ trình và tiếp tục')!.props.onClick(); });
-  expect(activeStepLabel(view)).toBe('AI tạo nội dung');
+  act(() => { footerButton(view, 'Tạo template').props.onClick(); });
+  // No early jump: the step changes only once the server confirms the approved revision.
+  expect(activeStepLabel(view)).toBe('Kiểm tra độ phủ');
+  expect(footerButton(view, 'Đang bắt đầu…').props.disabled).toBe(true);
   await act(async () => { approval.reject(new Error('Approval failed')); await Promise.resolve(); await Promise.resolve(); });
   expect(activeStepLabel(view)).toBe('Kiểm tra độ phủ');
+  expect(footerButton(view, 'Tạo template').props.disabled).toBe(false);
+  expect(api.adminAi.mock.calls.some(([action]) => action === 'next_step')).toBe(false);
   view.unmount(); vi.unstubAllGlobals();
 });
 
@@ -752,7 +760,7 @@ describe('AI generator reset UI', () => {
     view.unmount(); vi.unstubAllGlobals();
   });
 
-  it('keeps the current step when reloading sources for reset fails', async () => {
+  it('keeps the session when reloading sources for reset fails', async () => {
     let sourceLoads = 0;
     const api = { adminAi: vi.fn(async (action: string) => {
       if (action === 'list_sources') {
@@ -767,11 +775,16 @@ describe('AI generator reset UI', () => {
     let view!: TestRenderer.ReactTestRenderer;
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
     expect(activeStepLabel(view)).toBe('Kiểm tra độ phủ');
+    // Xóa phiên lives on step 0 only; the coverage step goes back first.
+    expect(view.root.findAllByType('button').some((button) => button.children.join('') === 'Xóa phiên')).toBe(false);
+    act(() => view.root.findAllByType('button').find((button) => button.children.join('') === '← Quay lại')!.props.onClick());
     act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Xóa phiên')!.props.onClick());
     await act(async () => { view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => button.children.join('') === 'Xóa dữ liệu')!.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
 
-    expect(activeStepLabel(view)).toBe('Kiểm tra độ phủ');
+    expect(activeStepLabel(view)).toBe('Nguồn & loại');
     expect(JSON.stringify(view.toJSON())).toContain('Không thể hoàn tất yêu cầu AI.');
+    // A failed reset leaves the restored session alone: the role profile is still filled in.
+    expect(view.root.findByType('textarea').props.value).toBe(failedTemplateJob.roleProfile?.responsibilities.join('\n'));
     view.unmount();
   });
 
