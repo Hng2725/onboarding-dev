@@ -221,11 +221,21 @@ describe('AiStepGenerating', () => {
     const stuck = templateJob([doneRun(0), run(1, { lessonState: 'approved', lessonVersion: 1, approvedLessonVersion: 1, questionState: 'failed', questionVersion: 2 })]);
     const running = renderStep(stuck);
     expect(buttonsByText(running.view.root, 'Thử lại')).toHaveLength(0);
+    const notAutopilot = renderStep({ ...stuck, autoApprove: undefined }, { stalled: true });
+    expect(buttonsByText(notAutopilot.view.root, 'Thử lại')).toHaveLength(1);
+    expect(rows(notAutopilot.view).every((row) => buttonsByText(row, 'Thử lại').length === 0)).toBe(true);
     const { view, props } = renderStep(stuck, { stalled: true });
     expect(rows(view)[1].props.className).toContain('error');
     expect(text(rows(view)[1])).toContain('AI chưa tạo được câu hỏi.');
     act(() => buttonsByText(rows(view)[1], 'Thử lại')[0].props.onClick());
     expect(props.onRetryModule).toHaveBeenCalledWith('m1', 'questions', 2);
+  });
+
+  it('labels the stuck half Cần thử lại: amber for a lesson autopilot could not approve', () => {
+    const { view } = renderStep(templateJob([run(0, { lessonState: 'review_ready', lessonVersion: 2 })]), { stalled: true });
+    const chips = rows(view)[0].findAll((node) => String(node.props.className ?? '').startsWith('ai-chip'));
+    expect(chips.map(text)).toEqual(['Cần thử lại', 'Câu hỏi']);
+    expect(chips[0].props.className).toBe('ai-chip warn');
   });
 
   it('never leaves a stall silent: without a stuck module it offers a step-level Thử lại', () => {
@@ -353,14 +363,17 @@ describe('AI tạo nội dung in the generator', () => {
     const stuckRun = run(1, { lessonState: 'approved', lessonVersion: 1, approvedLessonVersion: 1, questionState: 'failed', questionVersion: 2 });
     const stuck = templateJob([doneRun(0), stuckRun]);
     const requeued = templateJob([doneRun(0), { ...stuckRun, questionState: 'queued', questionVersion: 3 }]);
-    let pumps = 0;
+    let retried = false;
     const api = apiFor(stuck, {
-      next_step: () => ({ kind: 'awaiting_admin', job: pumps++ === 0 ? stuck : requeued }),
-      retry_module: () => ({ job: requeued }),
+      next_step: () => ({ kind: 'awaiting_admin', job: retried ? requeued : stuck }),
+      retry_module: () => { retried = true; return { job: requeued }; },
     });
     const view = await renderPage(api);
     expect(activeStep(view)).toBe('AI tạo nội dung');
     expect(rows(view)[1].props.className).toContain('error');
+    const chips = rows(view)[1].findAll((node) => String(node.props.className ?? '').startsWith('ai-chip'));
+    expect(chips.map(text)).toEqual(['Bài học ✓', 'Cần thử lại']);
+    expect(chips[1].props.className).toBe('ai-chip error');
     await act(async () => { buttonsByText(rows(view)[1], 'Thử lại')[0].props.onClick(); });
     expect(api.adminAi).toHaveBeenCalledWith('retry_module', { jobId: 'template-1', moduleLocalId: 'm1', target: 'questions', expectedVersion: 2 });
     expect(actions(api).lastIndexOf('next_step')).toBeGreaterThan(actions(api).indexOf('retry_module'));
@@ -419,6 +432,92 @@ describe('AI tạo nội dung in the generator', () => {
     expect(activeStep(view)).toBe('Kiểm tra độ phủ');
     await act(async () => { step.resolve({ kind: 'awaiting_admin', job }); await Promise.resolve(); });
     expect(activeStep(view)).toBe('Kiểm tra độ phủ');
+  });
+
+  it('never pumps a job whose autopilot upgrade failed; the banner retries the upgrade first', async () => {
+    const legacy = templateJob([doneRun(0), run(1, { lessonState: 'review_ready', lessonVersion: 1 })], { autoApprove: undefined });
+    const enabled = { ...legacy, autoApprove: true };
+    let upgrades = 0;
+    const api = apiFor(legacy, {
+      enable_autopilot: () => {
+        if (upgrades++ === 0) throw Object.assign(new Error('Project busy'), { code: 'PROJECT_BUSY' });
+        return { job: enabled };
+      },
+      next_step: () => ({ kind: 'awaiting_admin', job: enabled }),
+    });
+    const view = await renderPage(api);
+    expect(activeStep(view)).toBe('AI tạo nội dung');
+    expect(actions(api)).not.toContain('next_step');
+    expect(allText(view)).toContain('AI của room đang bận. Hãy thử lại sau ít phút.');
+    const banner = view.root.findByProps({ className: 'ai-generating-banner error' });
+    expect(text(banner)).toContain('Chưa bật được chế độ AI tự động cho job này.');
+    // A draft-rewriting retry is never offered for a job autopilot does not approve.
+    expect(rows(view).every((row) => buttonsByText(row, 'Thử lại').length === 0)).toBe(true);
+    await act(async () => { buttonsByText(banner, 'Thử lại')[0].props.onClick(); });
+    expect(actions(api).filter((action) => action === 'enable_autopilot')).toHaveLength(2);
+    expect(actions(api).indexOf('next_step')).toBeGreaterThan(actions(api).lastIndexOf('enable_autopilot'));
+    expect(actions(api)).not.toContain('retry_module');
+  });
+
+  it('keeps going through more than 12 recoveries while the job progresses', async () => {
+    const lessonDraft = { localId: 'm1', frameKey: 't1-access', title: 'Ngày làm việc đầu tiên', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], questions: [], blocks: [{ localId: 'b', kind: 'concept' as const, body: 'Nội dung có nguồn.', sourceRefs: [{ sectionId: 'handbook#s2', quote: 'Nội dung có nguồn.' }] }] };
+    const lessonDone = { lessonState: 'approved' as const, lessonVersion: 1, approvedLessonVersion: 1, lessonDraft, lessonProvenance: 'ai' as const };
+    const failedAt = (k: number) => templateJob([doneRun(0), run(1, { ...lessonDone, questionState: 'failed', questionVersion: 2 * k })], {
+      calls: [{ ...moduleCall('module-' + String(k), 'm1', 'questions', 'failed', 2 * k), provider: 'sandbox', attemptRef: 'sandbox-' + String(k) }],
+    });
+    const readyAt = (k: number) => templateJob([doneRun(0), run(1, { ...lessonDone, questionState: 'review_ready', questionVersion: 2 * k + 1, questionLessonVersion: 1, questionProvenance: 'fallback', questionDraft: questions(3) })]);
+    const done = templateJob([doneRun(0), doneRun(1)], { status: 'completed', result: { templateId: 'draft-1', version: 1 } });
+    const RECOVERIES = 15;
+    let pumps = 0;
+    const api = apiFor(templateJob([doneRun(0), run(1, lessonDone)]), {
+      next_step: () => {
+        pumps += 1;
+        return pumps <= RECOVERIES ? { kind: 'awaiting_admin', job: failedAt(pumps) } : { kind: 'done', job: done };
+      },
+      use_question_fallback: (args) => ({ job: readyAt(Number(args.expectedVersion) / 2) }),
+    });
+    const view = await renderPage(api);
+    expect(actions(api).filter((action) => action === 'use_question_fallback')).toHaveLength(RECOVERIES);
+    expect(actions(api).filter((action) => action === 'next_step')).toHaveLength(RECOVERIES + 1);
+    expect(view.root.findAll((node) => String(node.props.className ?? '').startsWith('ai-generating-banner'))).toHaveLength(0);
+    expect(activeStep(view)).toBe('Xem lại & xuất bản');
+  });
+
+  it('shows the error of a failed retry_job call itself, not the stored job error', async () => {
+    const job = templateJob([doneRun(0), run(1)], { status: 'failed', errorCode: 'AI_TIMEOUT', errorMessage: 'Timed out.' });
+    const api = apiFor(job, {
+      retry_job: () => { throw Object.assign(new Error('No failed AI call is available to retry.'), { code: 'JOB_CALL_MISMATCH' }); },
+    });
+    const view = await renderPage(api);
+    const before = view.root.findByProps({ className: 'ai-generating-banner error' });
+    expect(text(before)).toContain('AI xử lý quá thời gian. Hãy thử lại job.');
+    expect(actions(api)).not.toContain('next_step');
+    await act(async () => { buttonsByText(before, 'Thử lại')[0].props.onClick(); });
+    const after = view.root.findByProps({ className: 'ai-generating-banner error' });
+    expect(text(after)).toContain('Lượt gọi AI không còn khớp. Hãy thử lại.');
+    expect(text(after)).not.toContain('AI xử lý quá thời gian');
+  });
+
+  it('starts exactly one pump chain when Tạo template approves the outline', async () => {
+    const draft = templateJob([0, 1, 2, 3].map((index) => run(index)), { outlineApprovedRevision: 0 });
+    const approved = { ...draft, outlineApprovedRevision: 3 };
+    const first = deferred<unknown>();
+    let steps = 0;
+    const api = apiFor(draft, {
+      approve_outline: () => ({ job: approved }),
+      next_step: () => (steps++ === 0 ? first.promise : { kind: 'awaiting_admin', job: approved }),
+    });
+    const view = await renderPage(api);
+    expect(activeStep(view)).toBe('Kiểm tra độ phủ');
+    await act(async () => { footerPrimary(view).props.onClick(); });
+    expect(activeStep(view)).toBe('AI tạo nội dung');
+    // While the first next_step is in flight nothing else starts a pump for the job.
+    expect(actions(api).filter((action) => action === 'next_step')).toHaveLength(1);
+    await act(async () => { first.resolve({ kind: 'awaiting_admin', job: approved }); await Promise.resolve(); });
+    // One chain: the first pass plus the idle pass that ends it; a second chain would add more.
+    expect(actions(api).filter((action) => action === 'next_step')).toHaveLength(2);
+    const workers = new Set(api.adminAi.mock.calls.filter(([action]) => action === 'next_step').map(([, args]) => (args as { workerId: string }).workerId));
+    expect(workers.size).toBe(2);
   });
 
   it('opens a restored completed job on its review without pumping', async () => {

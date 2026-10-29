@@ -87,10 +87,11 @@ class ModuleReviewPending extends Error {}
 
 const QUESTION_RECOVERY_NATIVE_TIMEOUT_MS = 90_000;
 
-/** Upper bound on pump passes in one generation run; a pass is only repeated after progress. */
-const MAX_GENERATION_PASSES = 12;
+/** A generation run stops after this many consecutive pump passes that changed nothing. */
+const MAX_IDLE_GENERATION_PASSES = 2;
 
 export const OUTLINE_RECHECK_NOTICE = 'Lộ trình cần kiểm tra lại trước khi tạo tiếp.';
+export const AUTOPILOT_MISSING_NOTICE = 'Chưa bật được chế độ AI tự động cho job này.';
 
 /** Changes whenever a pump pass moved the job; an unchanged fingerprint means it stalled. */
 function generationFingerprint(job: AiJobRecord): string {
@@ -814,8 +815,11 @@ export function AiGeneratorPage({
   const [moduleSourceCatalog, setModuleSourceCatalog] = useState<{ readonly jobId: string; readonly sources: ModuleSourceCatalog } | null>(null);
   const [selectedTemplateKind, setSelectedTemplateKind] = useState<EmployeeType | null>(null);
   const [notice, setNotice] = useState<InlineNoticeMessage | null>(null);
-  /** AI tạo nội dung: an unrecoverable failure (Vietnamese) and whether the pump stopped short. */
-  const [generationError, setGenerationError] = useState<string | null>(null);
+  /**
+   * AI tạo nội dung: an unrecoverable failure (Vietnamese) and whether the pump stopped short.
+   * `fromPrepare` marks a failed retry/upgrade call, whose own error beats a stored job error.
+   */
+  const [generationError, setGenerationError] = useState<{ readonly message: string; readonly fromPrepare: boolean } | null>(null);
   const [stalled, setStalled] = useState(false);
   const [pausing, setPausing] = useState(false);
   const [roomJobs, setRoomJobs] = useState<readonly AiJobRecord[]>([]);
@@ -1513,22 +1517,30 @@ export function AiGeneratorPage({
     if (!latest) return;
     const run = generationRunRef.current + 1;
     generationRunRef.current = run;
+    // This job is being pumped now; reopening the step must not start a second chain for it.
+    autoPumpedJobRef.current = latest.jobId;
     setOperation('analyze');
     setNotice(null);
     setGenerationError(null);
     setStalled(false);
+    let preparing = Boolean(prepare);
     try {
       if (prepare) {
         latest = await prepare();
         recordJob(latest);
       }
+      preparing = false;
+      // Progressing jobs keep going however many recoveries they need; only idle passes end the run.
       let seen = generationFingerprint(latest);
-      for (let pass = 0; pass < MAX_GENERATION_PASSES && generationRunRef.current === run; pass += 1) {
+      let idlePasses = 0;
+      while (generationRunRef.current === run) {
         latest = await pump(latest);
         if (latest.status !== 'running' || !outlineApprovedFor(latest)) break;
         const next = generationFingerprint(latest);
-        if (next === seen) break;
-        seen = next;
+        if (next !== seen) {
+          seen = next;
+          idlePasses = 0;
+        } else if (++idlePasses >= MAX_IDLE_GENERATION_PASSES) break;
       }
       // A pause or reset took over while the last call returned: it owns the screen now.
       if (generationRunRef.current !== run) return;
@@ -1545,7 +1557,9 @@ export function AiGeneratorPage({
         setStalled(true);
       }
     } catch (caught) {
-      if (generationRunRef.current === run && !isAbortError(caught)) setGenerationError(generationErrorMessage(caught));
+      if (generationRunRef.current === run && !isAbortError(caught)) {
+        setGenerationError({ message: generationErrorMessage(caught), fromPrepare: preparing });
+      }
     } finally {
       setOperation((current) => current === 'analyze' ? null : current);
     }
@@ -1560,13 +1574,18 @@ export function AiGeneratorPage({
     })).job);
   }
 
-  /** Banner Thử lại: a failed job is retried first; otherwise the pump simply resumes. */
+  /**
+   * Banner Thử lại: a failed job is retried first, a job still without autopilot is upgraded
+   * first; otherwise the pump simply resumes.
+   */
   function retryGeneration() {
     const current = templateJob;
     if (!current) return;
     void runGeneration(current.status === 'failed'
       ? async () => (await api.adminAi<{ job: AiJobRecord }>('retry_job', { jobId: current.jobId })).job
-      : undefined);
+      : current.pipelineVersion === 'module_v2' && current.autoApprove !== true
+        ? async () => (await api.adminAi<{ job: AiJobRecord }>('enable_autopilot', { jobId: current.jobId })).job
+        : undefined);
   }
 
   /** Asks the provider to stop each call the pause left possibly live, and records the outcome. */
@@ -1669,8 +1688,6 @@ export function AiGeneratorPage({
     setEditingOutline(false);
     setOutlineFocusModuleId(null);
     setStep(2);
-    // This start already pumps; reopening the step must not start a second pump for the job.
-    autoPumpedJobRef.current = approved.jobId;
     await runGeneration(async () => approved);
   }
 
@@ -1954,6 +1971,8 @@ export function AiGeneratorPage({
   // Reopen-resume: an approved, running module job continues by itself once AI tạo nội dung is open.
   const autoResumeJobId = canGenerateWithAi && !restoring && !resetting && !pausing && operation === null && step === 2
     && templateJob?.pipelineVersion === 'module_v2' && templateJob.status === 'running' && outlineApproved
+    // A job that was never upgraded would stop at every draft; it waits for the banner's Thử lại.
+    && templateJob.autoApprove === true
     ? templateJob.jobId
     : null;
   const runGenerationRef = useRef(runGeneration);
@@ -2018,8 +2037,16 @@ export function AiGeneratorPage({
 
   const generationReviewLoaded = Boolean(activeTemplateRun?.review);
   const generationRunning = templateJob?.status === 'running' && outlineApproved;
-  /** A failed job always explains itself in the banner, also when it was restored that way. */
-  const generationBanner = templateJob?.status === 'failed' ? failedJobMessage(templateJob) : generationError;
+  const autopilotMissing = templateJob?.pipelineVersion === 'module_v2' && generationRunning && templateJob.autoApprove !== true;
+  /**
+   * A failed retry/upgrade call shows its own error; a failed job explains itself, also when it
+   * was restored that way; a job without autopilot is never pumped until the Admin retries.
+   */
+  const generationBanner = generationError?.fromPrepare
+    ? generationError.message
+    : templateJob?.status === 'failed'
+      ? failedJobMessage(templateJob)
+      : generationError?.message ?? (autopilotMissing ? AUTOPILOT_MISSING_NOTICE : null);
   /** Never silently stalled: a completed job whose review did not load can be pumped again. */
   const generationStalled = stalled
     || (templateJob?.status === 'completed' && !generationReviewLoaded && !busy && !restoring);

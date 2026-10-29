@@ -85,6 +85,9 @@ const CHIP_TONE: Readonly<Record<GenerationHalfState, string>> = {
   fallback: 'warn',
 };
 
+/** The chip of the half a stuck module needs retried, instead of in-progress text. */
+const STUCK_CHIP = 'Cần thử lại';
+
 function lessonChip(state: GenerationHalfState): string {
   return { waiting: 'Chờ', running: 'Đang viết…', done: 'Bài học ✓', fallback: 'Bản từ nguồn' }[state];
 }
@@ -108,7 +111,9 @@ export interface AiStepGeneratingProps {
 export function AiStepGenerating({ job, stalled, error, busy, onRetryModule, onRetry }: AiStepGeneratingProps) {
   const runs = [...activeRuns(job.moduleRuns ?? [])].sort((left, right) => left.outline.order - right.outline.order);
   const percent = generationPercent(runs);
-  const attention = new Map(runs.map((run) => [run.outline.moduleLocalId, stalled ? moduleAttention(run) : null] as const));
+  // A per-module retry only helps when autopilot approves the rewrite; other jobs retry from the banner.
+  const autopilot = job.autoApprove === true;
+  const attention = new Map(runs.map((run) => [run.outline.moduleLocalId, stalled && autopilot ? moduleAttention(run) : null] as const));
   const anyAttention = [...attention.values()].some(Boolean);
   return (
     <section className="ai-generating" aria-label="AI tạo nội dung">
@@ -150,8 +155,12 @@ export function AiStepGenerating({ job, stalled, error, busy, onRetryModule, onR
             <li className={'ai-generating-module' + (issue ? ' ' + issue.tone : '')} key={run.outline.moduleLocalId}>
               <span className="ai-coverage-order">{run.outline.order + 1}</span>
               <strong className="ai-generating-title">{outlineModuleDisplayTitle(run.outline)}</strong>
-              <span className={'ai-chip ' + lessonTone} title="Bài học">{lessonChip(progress.lesson)}</span>
-              <span className={'ai-chip ' + questionTone} title="Câu hỏi">{questionChip(progress.questions, progress.questionCount)}</span>
+              <span className={'ai-chip ' + lessonTone} title="Bài học">
+                {issue?.target === 'lesson' ? STUCK_CHIP : lessonChip(progress.lesson)}
+              </span>
+              <span className={'ai-chip ' + questionTone} title="Câu hỏi">
+                {issue?.target === 'questions' ? STUCK_CHIP : questionChip(progress.questions, progress.questionCount)}
+              </span>
               {issue && (
                 <div className="ai-generating-attention">
                   <p>{issue.message}</p>

@@ -570,8 +570,8 @@ it('resumes an interrupted autopilot module job by itself on reopen, exactly onc
   let view!: TestRenderer.ReactTestRenderer;
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
   expect(api.adminAi).toHaveBeenCalledWith('next_step', expect.objectContaining({ jobId: 'template-1' }));
-  // The pump stalled without progress: it is not restarted in a loop.
-  expect(api.adminAi.mock.calls.filter(([action]) => action === 'next_step')).toHaveLength(1);
+  // The pump stalled without progress: two idle passes, then it is not restarted in a loop.
+  expect(api.adminAi.mock.calls.filter(([action]) => action === 'next_step')).toHaveLength(2);
   expect(api.adminAi.mock.calls.some(([action]) => action === 'start_job' || action === 'cancel_job' || action === 'retry_module' || action === 'enable_autopilot')).toBe(false);
   expect(view.root.findAllByType('button').some((item) => item.children.join('').includes('Tiếp tục xử lý'))).toBe(false);
   view.unmount(); vi.unstubAllGlobals();
