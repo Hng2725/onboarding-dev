@@ -13,7 +13,7 @@ const lesson = generatedTemplate.modules[0];
 function approvedRun(): AiModuleDraftRun {
   let run = updateLesson(createModuleRuns(outline)[0], 0, lesson, 'ai');
   run = approveLesson(run, 1);
-  run = updateQuestions(run, 0, lesson.questions);
+  run = updateQuestions(run, 0, lesson.questions, 'ai');
   return approveQuestions(run, 1);
 }
 async function setup(kind: 'normal' | 'advanced' = 'normal') {
@@ -46,6 +46,22 @@ async function approveManualPair(service: ReturnType<typeof createAiJobService>,
 }
 
 describe('module lifecycle transitions', () => {
+  it.each(['ai', 'fallback', 'manual'] as const)('persists %s question provenance with the current lesson version', (provenance) => {
+    const lessonApproved = approveLesson(updateLesson(createModuleRuns(outline)[0], 0, lesson, 'ai'), 1);
+    const updated = updateQuestions(lessonApproved, 0, lesson.questions, provenance);
+
+    expect(updated).toMatchObject({
+      questionState: 'review_ready',
+      questionVersion: 1,
+      questionLessonVersion: 1,
+      questionProvenance: provenance,
+    });
+    expect(updated.approvedQuestionVersion).toBeUndefined();
+
+    const replaced = updateLesson(updated, 1, { ...lesson, title: 'Replacement lesson' }, 'manual');
+    expect(replaced.questionState).toBe('stale');
+    expect(replaced.questionProvenance).toBeUndefined();
+  });
   it('rejects a first-question request captured before an approved lesson is replaced', () => {
     const firstLesson = approveLesson(updateLesson(createModuleRuns(outline)[0], 0, lesson, 'manual'), 1);
     const staleQuestionVersion = firstLesson.questionVersion;
@@ -55,22 +71,22 @@ describe('module lifecycle transitions', () => {
     const replacement = updateLesson(firstLesson, 1, { ...lesson, title: 'Lesson version two' }, 'manual');
     const secondLesson = approveLesson(replacement, 2);
 
-    expect(() => updateQuestions(secondLesson, staleQuestionVersion, lesson.questions)).toThrow('Questions require the current approved lesson and version.');
+    expect(() => updateQuestions(secondLesson, staleQuestionVersion, lesson.questions, 'ai')).toThrow('Questions require the current approved lesson and version.');
     expect(secondLesson.questionVersion).toBe(1);
     expect(secondLesson.questionDraft).toBeUndefined();
-    expect(updateQuestions(secondLesson, 1, lesson.questions)).toMatchObject({ questionVersion: 2, questionLessonVersion: 2, questionState: 'review_ready' });
+    expect(updateQuestions(secondLesson, 1, lesson.questions, 'ai')).toMatchObject({ questionVersion: 2, questionLessonVersion: 2, questionState: 'review_ready' });
   });
   it('does not carry flags from a replaced draft into a new lesson or question version', () => {
     const flag = { type: 'ambiguous' as const, severity: 'warning' as const, message: 'Old draft', questionForAdmin: 'Verify?', location: { blockLocalId: 'old-block' }, evidence: [] };
     const run = { ...approvedRun(), lessonFlags: [flag], questionFlags: [flag] };
     expect(updateLesson(run, 1, lesson, 'manual').lessonFlags).toEqual([]);
-    expect(updateQuestions(run, 1, lesson.questions).questionFlags).toEqual([]);
+    expect(updateQuestions(run, 1, lesson.questions, 'manual').questionFlags).toEqual([]);
   });
   it('increments versions, requires approval order, and rejects stale versions', () => {
     const run = createModuleRuns(outline)[0];
     expect(run).toMatchObject({ lessonState: 'queued', lessonVersion: 0, questionState: 'blocked', questionVersion: 0 });
     expect(() => approveLesson(run, 0)).toThrow();
-    expect(() => updateQuestions(run, 0, lesson.questions)).toThrow();
+    expect(() => updateQuestions(run, 0, lesson.questions, 'ai')).toThrow();
     const approved = approvedRun();
     expect(approved).toMatchObject({ lessonState: 'approved', lessonVersion: 1, approvedLessonVersion: 1, questionState: 'approved', questionVersion: 1, approvedQuestionVersion: 1, questionLessonVersion: 1 });
     expect(() => updateLesson(approved, 0, lesson, 'manual')).toThrow();

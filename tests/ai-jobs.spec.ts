@@ -98,6 +98,72 @@ async function setup() {
 }
 
 describe('AI job service', () => {
+  it('creates a grounded fallback question draft and records its provenance in approval audit', async () => {
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    await store.create(admin.roomId, 'onboarding_ai_jobs', {
+      jobId: 'inventory-fallback-questions', kind: 'inventory', status: 'completed', sourceIds: ['source-1'],
+      promptVersion: 'old', calls: [], stageOutputs: {},
+      result: { systemSummary: { purpose: 'Orders', modules: [], sourceRefs: generatedTemplate.modules[0].blocks[0].sourceRefs }, glossary: [], features: [], flags: [] },
+      operationId: 'inventory-fallback-questions', createdBy: admin.userId,
+      createdAt: '2026-10-29T00:00:00.000Z', updatedAt: '2026-10-29T00:00:00.000Z',
+    });
+    const service = createAiJobService(store, { now: () => '2026-10-29T01:00:00.000Z' });
+    const job = await service.startJob(admin, {
+      kind: 'template', inventoryJobId: 'inventory-fallback-questions', templateKind: 'normal', operationId: 'fallback-questions',
+    });
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 });
+    const run = job.moduleRuns![0];
+    const args = { jobId: job.jobId, moduleLocalId: run.outline.moduleLocalId };
+    const module = { ...generatedTemplate.modules[0], localId: run.outline.moduleLocalId, frameKey: run.outline.frameKey, featureIds: run.outline.featureIds, questions: [] };
+    let current = await service.updateModuleLesson(admin, { ...args, expectedVersion: 0, module });
+    current = await service.approveModuleLesson(admin, { ...args, expectedVersion: current.moduleRuns![0].lessonVersion });
+
+    await expect(service.useQuestionFallback(admin, { ...args, expectedVersion: 1 })).rejects.toMatchObject({ code: 'OPERATION_CONFLICT' });
+    current = await service.useQuestionFallback(admin, { ...args, expectedVersion: 0 });
+    expect(current.moduleRuns![0]).toMatchObject({
+      questionState: 'review_ready', questionVersion: 1, questionLessonVersion: 1, questionProvenance: 'fallback',
+    });
+    expect(current.moduleRuns![0].questionDraft).toHaveLength(3);
+
+    current = await service.approveModuleQuestions(admin, { ...args, expectedVersion: 1 });
+    expect((current.stageOutputs.__moduleAudit as readonly Record<string, unknown>[]).at(-1)).toMatchObject({
+      target: 'questions', provenance: 'fallback', version: 1, lessonVersion: 1,
+    });
+  });
+
+  it('rejects deterministic question fallback without grounded lesson blocks and leaves the run unchanged', async () => {
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    await store.create(admin.roomId, 'onboarding_ai_jobs', {
+      jobId: 'inventory-source-free-questions', kind: 'inventory', status: 'completed', sourceIds: ['source-1'],
+      promptVersion: 'old', calls: [], stageOutputs: {},
+      result: { systemSummary: { purpose: 'Orders', modules: [], sourceRefs: generatedTemplate.modules[0].blocks[0].sourceRefs }, glossary: [], features: [], flags: [] },
+      operationId: 'inventory-source-free-questions', createdBy: admin.userId,
+      createdAt: '2026-10-29T00:00:00.000Z', updatedAt: '2026-10-29T00:00:00.000Z',
+    });
+    const service = createAiJobService(store, { now: () => '2026-10-29T01:00:00.000Z' });
+    let job = await service.startJob(admin, {
+      kind: 'template', inventoryJobId: 'inventory-source-free-questions', templateKind: 'normal', operationId: 'source-free-questions',
+    });
+    const moduleLocalId = job.moduleRuns![0].outline.moduleLocalId;
+    job = await service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: [{ type: 'update', moduleLocalId, patch: { sourceSectionIds: [] } }] });
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 2 });
+    const run = job.moduleRuns![0];
+    const module = {
+      ...generatedTemplate.modules[0], localId: moduleLocalId, frameKey: run.outline.frameKey,
+      featureIds: run.outline.featureIds, blocks: generatedTemplate.modules[0].blocks.map((block) => ({ ...block, sourceRefs: [] })), questions: [],
+    };
+    const args = { jobId: job.jobId, moduleLocalId };
+    job = await service.updateModuleLesson(admin, { ...args, expectedVersion: run.lessonVersion, module });
+    job = await service.approveModuleLesson(admin, { ...args, expectedVersion: job.moduleRuns![0].lessonVersion });
+    const before = job.moduleRuns![0];
+
+    await expect(service.useQuestionFallback(admin, { ...args, expectedVersion: before.questionVersion }))
+      .rejects.toMatchObject({ code: 'AI_OUTPUT_INVALID' });
+    expect((await service.getJob(admin, job.jobId)).moduleRuns![0]).toEqual(before);
+  });
+
   it('propagates optimistic conflict for questions captured before the first approved lesson is replaced', async () => {
     const store = new MemoryOnboardingStore();
     await seedAiSource(store);

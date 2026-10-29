@@ -634,6 +634,7 @@ export interface AiModuleDraftRun {
   readonly approvedQuestionVersion?: number;
   readonly questionLessonVersion?: number;
   readonly questionDraft?: readonly import('./ai/validate').GeneratedQuestion[];
+  readonly questionProvenance?: 'ai' | 'fallback' | 'manual';
   readonly questionFlags?: readonly import('./ai/validate').GeneratedFlag[];
   readonly nextRetryAt?: string;
   readonly providerWaitStartedAt?: string;

@@ -30,6 +30,7 @@ import { sanitizeAiDiagnosticText } from './diagnostics';
 import { materializeAiTemplate, materializeModuleTemplate } from './materialize';
 import { buildTemplateOutline, applyTemplateOutlineEdits } from './outline';
 import { buildFallbackLesson } from './fallback-lessons';
+import { buildFallbackQuestions } from './fallback-questions';
 import { buildModuleLessonPrompt, buildModuleLessonRepairPrompt, buildModuleQuestionRepairPrompt, buildModuleQuestionPrompt, validateModuleLessonOutput, validateModuleQuestionOutput, validApprovedLesson, type ModuleLessonPromptInput } from './module-draft';
 import { createModuleRuns, reconcileModuleRuns, invalidateModule, updateLesson, approveLesson, updateQuestions, approveQuestions, retryModuleRun, lessonApproved, modulesComplete } from './module-lifecycle';
 import { parseAiJsonObject } from './parse';
@@ -352,6 +353,7 @@ export interface AiJobService {
   updateModuleLesson(actor: OnboardingActor, input: ModuleVersionInput & { readonly module: GeneratedModule }): Promise<AiJobRecord>;
   approveModuleLesson(actor: OnboardingActor, input: ModuleVersionInput): Promise<AiJobRecord>;
   useSourceFallback(actor: OnboardingActor, input: ModuleVersionInput): Promise<AiJobRecord>;
+  useQuestionFallback(actor: OnboardingActor, input: ModuleVersionInput): Promise<AiJobRecord>;
   updateModuleQuestions(actor: OnboardingActor, input: ModuleVersionInput & { readonly questions: readonly GeneratedQuestion[] }): Promise<AiJobRecord>;
   approveModuleQuestions(actor: OnboardingActor, input: ModuleVersionInput): Promise<AiJobRecord>;
   retryModule(actor: OnboardingActor, input: ModuleInput & { readonly target: 'lesson' | 'questions'; readonly expectedVersion: number }): Promise<AiJobRecord>;
@@ -1467,7 +1469,7 @@ export function createAiJobService(
       } else {
         const validated = validateModuleQuestionOutput(raw, { ...context.input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance });
         if (!validated.ok) throw validated;
-        next = { ...updateQuestions(run, run.questionVersion, validated.value.questions), questionFlags: validated.value.flags };
+        next = { ...updateQuestions(run, run.questionVersion, validated.value.questions, 'ai'), questionFlags: validated.value.flags };
       }
     } catch (error) {
       errors = validationMessages(error);
@@ -1736,10 +1738,25 @@ export function createAiJobService(
       if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion !== run.lessonVersion || !['review_ready', 'approved', 'fallback_review', 'failed', 'manual_required', 'queued', 'stale'].includes(run.lessonState) || run.questionState === 'drafting') throw new AiJobServiceError('OPERATION_CONFLICT', 'Lesson version conflict or an active call prevents fallback.');
       return saveRun(actor, row, await fallbackRun(actor, row, run));
     },
+    async useQuestionFallback(actor, input) {
+      const row = await requireModuleJob(actor, input.jobId);
+      const run = requireRun(row, input.moduleLocalId);
+      if (!lessonApproved(run) || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion !== run.questionVersion || run.questionState === 'drafting') {
+        throw new AiJobServiceError('OPERATION_CONFLICT', 'Question version conflict or an active call prevents fallback.');
+      }
+      const fallback = buildFallbackQuestions({ lesson: run.lessonDraft! });
+      if (fallback.kind !== 'draft') throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Grounded lesson content is required for question fallback.');
+      const validation = validateModuleQuestionOutput({ questions: fallback.questions, flags: [] }, {
+        ...(await moduleContext(actor, row, run)).input,
+        lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance,
+      });
+      if (!validation.ok) throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Fallback questions are invalid or ungrounded.');
+      return saveRun(actor, row, updateQuestions(run, input.expectedVersion, validation.value.questions, 'fallback'));
+    },
     async updateModuleQuestions(actor, input) {
       const row = await requireModuleJob(actor, input.jobId);
       const run = requireRun(row, input.moduleLocalId);
-      const next = updateQuestions(run, input.expectedVersion, input.questions);
+      const next = updateQuestions(run, input.expectedVersion, input.questions, 'manual');
       const validation = validateModuleQuestionOutput({ questions: input.questions, flags: [] }, { ...(await moduleContext(actor, row, run)).input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance }, true);
       if (!validation.ok) throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Questions are invalid or ungrounded.');
       return saveRun(actor, row, next);
@@ -1750,7 +1767,7 @@ export function createAiJobService(
       const next = approveQuestions(run, input.expectedVersion);
       const validation = validateModuleQuestionOutput({ questions: next.questionDraft, flags: next.questionFlags ?? [] }, { ...(await moduleContext(actor, row, run)).input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance }, true);
       if (!validation.ok) throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Questions are invalid or ungrounded.');
-      return saveRun(actor, row, next, { target: 'questions', version: next.questionVersion, lessonVersion: next.lessonVersion, questions: next.questionDraft, flags: next.questionFlags ?? [] });
+      return saveRun(actor, row, next, { target: 'questions', version: next.questionVersion, lessonVersion: next.lessonVersion, questions: next.questionDraft, provenance: next.questionProvenance, flags: next.questionFlags ?? [] });
     },
     async retryModule(actor, input) {
       const row = await requireModuleJob(actor, input.jobId);
