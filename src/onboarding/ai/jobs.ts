@@ -341,6 +341,7 @@ const PROVIDER_RETRY_MS = 3_000;
 const TRANSIENT_PROVIDER_ERROR = /(?:TRANSIENT|UNAVAILABLE|OVERLOADED|RATE_LIMIT|SERVER_ERROR)/;
 const PLAN_PENDING_MESSAGE = 'AI đang lập lộ trình, vui lòng chờ.';
 const SUPPLEMENT_FAILED_NOTE = 'AI chưa đọc được tài liệu bổ sung. Hãy thử lại hoặc chọn đoạn thủ công.';
+const CATALOG_FAILED_NOTE = 'AI chưa tìm được đoạn phù hợp. Hãy tải tài liệu bổ sung hoặc chọn đoạn thủ công.';
 const SUPPLEMENT_CALL = /^supplement-(\d+)-b(\d+)/;
 
 /**
@@ -1510,6 +1511,21 @@ export function createAiJobService(
     if (!module) throw new AiJobServiceError('OPERATION_CONFLICT', 'Active module not found.');
     return module;
   }
+  /** A request's root calls (one per batch it ran), in batch order. */
+  function supplementRoots(row: AiJobDbRecord, requestNumber: number): readonly AiCallRecord[] {
+    return row.calls.filter((call) => supplementRequest(call) === requestNumber && call.callId === rootCall(call))
+      .sort((a, b) => (a.supplementBatch ?? 0) - (b.supplementBatch ?? 0));
+  }
+  /**
+   * Batch numbers skipped by the most recent new-file request for this source, so "Thử lại" can
+   * re-run just those. Empty when the source was never supplemented or its last request read every batch.
+   */
+  function skippedSupplementBatches(row: AiJobDbRecord, sourceId: string): readonly number[] {
+    const latest = Math.max(0, ...row.calls.map(supplementRequest).filter((n): n is number => n !== undefined
+      && (row.stageOutputs['supplement:' + String(n)] as SupplementRequest | undefined)?.sourceId === sourceId));
+    if (!latest) return [];
+    return supplementRoots(row, latest).filter((call) => row.stageOutputs['result:' + call.callId] === undefined).map((call) => call.supplementBatch ?? 1);
+  }
   function nextSupplementNumber(row: AiJobDbRecord): number {
     return Math.max(0, ...row.calls.map(supplementRequest).filter((n): n is number => n !== undefined)) + 1;
   }
@@ -1725,32 +1741,41 @@ export function createAiJobService(
     const stageOutputs = { ...row.stageOutputs, ['applied:supplement-' + String(requestNumber)]: true };
     const settledOnly = { stageOutputs, ...CLEARED_WAIT, ...RELEASED_LEASE };
     if (!row.outline || !row.moduleRuns || !request) return updateJob(actor, row, settledOnly);
-    const roots = row.calls.filter((call) => supplementRequest(call) === requestNumber && call.callId === rootCall(call))
-      .sort((a, b) => (a.supplementBatch ?? 0) - (b.supplementBatch ?? 0));
+    const roots = supplementRoots(row, requestNumber);
     const results = roots.map((call) => row.stageOutputs['result:' + call.callId] as SupplementOutput | undefined);
     const skipped = results.some((result) => !result);
+    const failureNote = request.sourceId ? SUPPLEMENT_FAILED_NOTE : CATALOG_FAILED_NOTE;
     const usable = usableSectionIds(await liveJobSources(actor, row));
     const attached = new Map<string, string[]>();
     const updates = new Map<string, SupplementCoverageUpdate>();
     for (const result of results) {
       for (const attachment of result?.attachments ?? []) {
-        attached.set(attachment.moduleLocalId, [...new Set([...(attached.get(attachment.moduleLocalId) ?? []), ...attachment.sectionIds.filter((id) => usable.has(id))])]);
+        const ids = attachment.sectionIds.filter((id) => usable.has(id));
+        if (ids.length) attached.set(attachment.moduleLocalId, [...new Set([...(attached.get(attachment.moduleLocalId) ?? []), ...ids])]);
       }
       for (const update of result?.coverageUpdates ?? []) updates.set(update.moduleLocalId, update);
     }
-    const touched = new Set([request.moduleLocalId, ...attached.keys(), ...updates.keys()]);
+    // The call saw other modules only as titles and headings, so it may change only the target
+    // and modules it attached sections to; anything else in coverageUpdates is ignored.
+    const touched = new Set([request.moduleLocalId, ...attached.keys()]);
     const edits = row.outline.modules.filter((module) => !module.tombstoned && touched.has(module.moduleLocalId)).map((module): OutlineEdit => {
       const extra = attached.get(module.moduleLocalId) ?? [];
       const sourceSectionIds = extra.length ? [...new Set([...module.sourceSectionIds.filter((id) => usable.has(id)), ...extra])] : module.sourceSectionIds;
       const update = updates.get(module.moduleLocalId);
+      if (module.moduleLocalId !== request.moduleLocalId) {
+        // A non-target module only gains sections: it may be upgraded to sufficient by them, never
+        // downgraded, and its gapNote is never rewritten.
+        const upgrade = update?.coverage === 'sufficient' && moduleHasUsableSources({ ...module, sourceSectionIds }, usable);
+        return { type: 'update', moduleLocalId: module.moduleLocalId, patch: { sourceSectionIds, ...(upgrade ? { coverage: 'sufficient' as const } : {}) } };
+      }
       let coverage = update?.coverage ?? module.coverage;
       let gapNote = update ? update.gapNote : module.gapNote;
       if (!moduleHasUsableSources({ ...module, sourceSectionIds }, usable)) coverage = 'insufficient';
-      if (skipped && module.moduleLocalId === request.moduleLocalId) { coverage = 'insufficient'; gapNote = SUPPLEMENT_FAILED_NOTE; }
+      if (skipped) { coverage = 'insufficient'; gapNote = failureNote; }
       if (coverage === 'insufficient' && !gapNote) gapNote = GAP_NOTE;
       return { type: 'update', moduleLocalId: module.moduleLocalId, patch: { sourceSectionIds, ...(coverage ? { coverage } : {}), ...(gapNote !== undefined ? { gapNote } : {}) } };
     });
-    const failedNote: OutlineEdit = { type: 'update', moduleLocalId: request.moduleLocalId, patch: { coverage: 'insufficient', gapNote: SUPPLEMENT_FAILED_NOTE } };
+    const failedNote: OutlineEdit = { type: 'update', moduleLocalId: request.moduleLocalId, patch: { coverage: 'insufficient', gapNote: failureNote } };
     // A result the outline cannot take still settles: first the target's retry note, then nothing.
     for (const attempt of [edits, [failedNote]]) {
       try {
@@ -2043,24 +2068,30 @@ export function createAiJobService(
       const authorized = await Promise.all(sourceIds.map((id) => sourceById(actor.roomId, id)));
       const usableSections = authorized.filter((source): source is SourceRecord => !!source && source.status === 'ready' && !source.deletedAt).flatMap((source) => source.sections ?? []);
       const retained = run.outline.sourceSectionIds.filter((id) => usableSections.filter((section) => section.id === id && section.text.trim()).length === 1);
-      // The Admin picked these sections, so the module counts as sufficient.
+      // The Admin picked these sections, so the module counts as sufficient and its gap note is stale.
       return jobFrom(await applyOutlineEdits(actor, row, {
         sourceIds,
-        edits: [{ type: 'update', moduleLocalId: input.moduleLocalId, patch: { sourceSectionIds: [...new Set([...retained, ...input.sectionIds])], coverage: 'sufficient' } }],
+        edits: [{ type: 'update', moduleLocalId: input.moduleLocalId, patch: { sourceSectionIds: [...new Set([...retained, ...input.sectionIds])], coverage: 'sufficient', gapNote: '' } }],
       }), actor.roomId);
     },
     async supplementModuleDocument(actor, input) {
       const row = await requireOutlineEdit(actor, input);
       const module = requireActiveModule(row, input.moduleLocalId);
       const sourceId = required(typeof input.sourceId === 'string' ? input.sourceId : '', 'Source ID');
-      if ((row.sourceIds ?? []).includes(sourceId)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Tài liệu này đã có trong lộ trình. Hãy dùng "Chọn đoạn từ tài liệu đã có".');
-      const sourceIds = [...(row.sourceIds ?? []), sourceId];
+      // A source already in the job may only be re-read to retry the batches its last request skipped.
+      const known = (row.sourceIds ?? []).includes(sourceId);
+      const retryBatches = known ? skippedSupplementBatches(row, sourceId) : [];
+      if (known && !retryBatches.length) throw new AiJobServiceError('OPERATION_CONFLICT', 'Tài liệu này đã có trong lộ trình. Hãy dùng "Chọn đoạn từ tài liệu đã có".');
+      const sourceIds = known ? row.sourceIds! : [...(row.sourceIds ?? []), sourceId];
       if (sourceIds.length > AI_GENERATION_LIMITS.maxSourcesPerRoom) throw new AiJobServiceError('SOURCE_NOT_FOUND', 'Too many selected sources.');
       // Room-scoped lookup: a source from another room, or one not ready, is not found.
       const [source] = await loadSources(actor.roomId, [sourceId]);
       const batches = planBatches([source]);
       const request = nextSupplementNumber(row);
-      const supplementCalls = batches.map((_batch, index) => supplementCall(row, request, index + 1, module.moduleLocalId, sourceId));
+      // Batch numbers stay those of the file, so a retried batch reads the same sections.
+      const batchNumbers = known ? retryBatches.filter((batch) => batch <= batches.length) : batches.map((_batch, index) => index + 1);
+      if (!batchNumbers.length) throw new AiJobServiceError('OPERATION_CONFLICT', 'Tài liệu này đã có trong lộ trình. Hãy dùng "Chọn đoạn từ tài liệu đã có".');
+      const supplementCalls = batchNumbers.map((batch) => supplementCall(row, request, batch, module.moduleLocalId, sourceId));
       // Queued module work is superseded so the S calls are the job's current calls.
       const calls = [...obsoleteCalls(row, new Set(row.moduleRuns!.map((item) => item.outline.moduleLocalId))), ...supplementCalls];
       const supplement: SupplementRequest = { moduleLocalId: module.moduleLocalId, sourceId, batches };

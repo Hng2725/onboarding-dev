@@ -1551,6 +1551,92 @@ describe('AI job service', () => {
       await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'awaiting_admin', job: { outline: { revision: 2 } } });
     });
 
+    it('never lets an S call downgrade or rewrite a module it did not attach sections to', async () => {
+      const { service, store, job, covered, target } = await coverageJob('supplement-scope');
+      const other = job.outline!.modules.find((m) => m.coverage === 'insufficient' && m.moduleLocalId !== target.moduleLocalId)!;
+      const coveredRun = job.moduleRuns!.find((run) => run.outline.moduleLocalId === covered.moduleLocalId)!;
+      await addSource(store, 'source-2', supportSections);
+      await service.supplementModuleDocument(admin, { jobId: job.jobId, expectedRevision: 1, moduleLocalId: target.moduleLocalId, sourceId: 'source-2' });
+      await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      const done = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'supplement-1-b1', text: JSON.stringify({
+        attachments: [
+          { moduleLocalId: target.moduleLocalId, sectionIds: ['source-2#s1'], reason: 'Xử lý lỗi.' },
+          { moduleLocalId: other.moduleLocalId, sectionIds: ['source-2#s2'], reason: 'Gửi lại đơn.' },
+        ],
+        coverageUpdates: [
+          { moduleLocalId: target.moduleLocalId, coverage: 'sufficient', gapNote: '' },
+          { moduleLocalId: covered.moduleLocalId, coverage: 'insufficient', gapNote: 'Bị hạ.' },
+          { moduleLocalId: other.moduleLocalId, coverage: 'sufficient', gapNote: 'Không được ghi đè.' },
+        ],
+      }) });
+      expect(done.outline!.revision).toBe(2);
+      expect(done.outline!.modules.find((m) => m.moduleLocalId === covered.moduleLocalId)).toEqual(covered);
+      const nextCoveredRun = done.moduleRuns!.find((run) => run.outline.moduleLocalId === covered.moduleLocalId)!;
+      expect(nextCoveredRun).toMatchObject({ lessonState: coveredRun.lessonState, lessonVersion: coveredRun.lessonVersion, questionVersion: coveredRun.questionVersion });
+      expect(nextCoveredRun.outline).toEqual(covered);
+      const nextOther = done.outline!.modules.find((m) => m.moduleLocalId === other.moduleLocalId)!;
+      expect(nextOther).toMatchObject({ sourceSectionIds: ['source-2#s2'], coverage: 'sufficient', gapNote: other.gapNote });
+    });
+
+    it('does not let a non-target module downgrade even when it gains sections', async () => {
+      const { service, store, job, covered, target } = await coverageJob('supplement-no-downgrade');
+      await addSource(store, 'source-2', supportSections);
+      await service.supplementModuleDocument(admin, { jobId: job.jobId, expectedRevision: 1, moduleLocalId: target.moduleLocalId, sourceId: 'source-2' });
+      await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      const done = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'supplement-1-b1', text: JSON.stringify({
+        attachments: [{ moduleLocalId: covered.moduleLocalId, sectionIds: ['source-2#s2'], reason: 'Bổ sung.' }],
+        coverageUpdates: [{ moduleLocalId: covered.moduleLocalId, coverage: 'insufficient', gapNote: 'Bị hạ.' }],
+      }) });
+      const module = done.outline!.modules.find((m) => m.moduleLocalId === covered.moduleLocalId)!;
+      expect(module).toMatchObject({ sourceSectionIds: ['source-1#s1', 'source-2#s2'], coverage: covered.coverage });
+      expect(module.gapNote).toBe(covered.gapNote);
+    });
+
+    it('retries only the skipped batches of the same file and does not count it twice', async () => {
+      const { service, store, job, target } = await coverageJob('supplement-retry');
+      const sections = Array.from({ length: 34 }, (_, i) => ({ id: 'source-3#s' + String(i + 1), headingPath: ['Mục ' + String(i + 1)], text: 'Nội dung mục ' + String(i + 1) + ' ' + 'a'.repeat(3_980) }));
+      await addSource(store, 'source-3', sections);
+      await service.supplementModuleDocument(admin, { jobId: job.jobId, expectedRevision: 1, moduleLocalId: target.moduleLocalId, sourceId: 'source-3' });
+      await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'supplement-1-b1', text: JSON.stringify({
+        attachments: [{ moduleLocalId: target.moduleLocalId, sectionIds: ['source-3#s1'], reason: 'Liên quan.' }],
+        coverageUpdates: [{ moduleLocalId: target.moduleLocalId, coverage: 'insufficient', gapNote: 'Còn thiếu.' }],
+      }) });
+      await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'ai_call', callId: 'supplement-1-b2' });
+      const skipped = await service.reportAiFailure(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'supplement-1-b2', kind: 'failed', message: 'boom' });
+      expect(skipped.outline!.modules.find((m) => m.moduleLocalId === target.moduleLocalId)).toMatchObject({ sourceSectionIds: ['source-3#s1'], gapNote: FAILED_NOTE });
+
+      const retried = await service.supplementModuleDocument(admin, { jobId: job.jobId, expectedRevision: skipped.outline!.revision, moduleLocalId: target.moduleLocalId, sourceId: 'source-3' });
+      expect(retried.sourceIds).toEqual(['source-1', 'source-3']);
+      expect(retried.calls.filter((call) => call.status === 'pending').map((call) => [call.callId, call.supplementBatch, call.supplementSourceId])).toEqual([['supplement-2-b2', 2, 'source-3']]);
+      const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      if (step.kind !== 'ai_call') throw new Error('Expected the retried batch.');
+      expect(step.callId).toBe('supplement-2-b2');
+      expect(step.systemContext).toContain('source-3#s34"');
+      expect(step.systemContext).not.toContain('source-3#s1"');
+      const done = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'supplement-2-b2', text: JSON.stringify({
+        attachments: [{ moduleLocalId: target.moduleLocalId, sectionIds: ['source-3#s34'], reason: 'Phần cuối.' }],
+        coverageUpdates: [{ moduleLocalId: target.moduleLocalId, coverage: 'sufficient', gapNote: '' }],
+      }) });
+      const module = done.outline!.modules.find((m) => m.moduleLocalId === target.moduleLocalId)!;
+      expect(module).toMatchObject({ sourceSectionIds: ['source-3#s1', 'source-3#s34'], coverage: 'sufficient' });
+      expect(isModuleCovered(module, usableIds(['source-3#s1', 'source-3#s34']))).toBe(true);
+      await expect(service.supplementModuleDocument(admin, { jobId: job.jobId, expectedRevision: done.outline!.revision, moduleLocalId: target.moduleLocalId, sourceId: 'source-3' }))
+        .rejects.toMatchObject({ code: 'OPERATION_CONFLICT', message: 'Tài liệu này đã có trong lộ trình. Hãy dùng "Chọn đoạn từ tài liệu đã có".' });
+    });
+
+    it('uses the catalog failure note when an added module call is skipped', async () => {
+      const { service, job } = await coverageJob('add-module-skip');
+      const added = await service.addOutlineModule(admin, { jobId: job.jobId, expectedRevision: 1, title: 'Mẹo sử dụng', description: '' });
+      const moduleLocalId = added.calls.at(-1)!.supplementModuleLocalId!;
+      await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      const failed = await service.reportAiFailure(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'supplement-1-b1', kind: 'failed', message: 'boom' });
+      expect(failed.planPending).toBe(false);
+      expect(failed.outline!.modules.find((m) => m.moduleLocalId === moduleLocalId)).toMatchObject({
+        coverage: 'insufficient', gapNote: 'AI chưa tìm được đoạn phù hợp. Hãy tải tài liệu bổ sung hoặc chọn đoạn thủ công.',
+      });
+    });
+
     it('runs one S call per batch in order and applies their merged result once', async () => {
       const { service, store, job, target } = await coverageJob('supplement-batches');
       const sections = Array.from({ length: 34 }, (_, i) => ({ id: 'source-3#s' + String(i + 1), headingPath: ['Mục ' + String(i + 1)], text: 'Nội dung mục ' + String(i + 1) + ' ' + 'a'.repeat(3_980) }));
@@ -1645,9 +1731,10 @@ describe('AI job service', () => {
 
     it('marks a module sufficient after the admin picks sections for it', async () => {
       const { service, job, target } = await coverageJob('picker-sufficient');
+      expect(target.gapNote).toBeTruthy();
       const updated = await service.supplementModuleSources(admin, { jobId: job.jobId, expectedRevision: 1, moduleLocalId: target.moduleLocalId, sourceIds: ['source-1'], sectionIds: ['source-1#s1'] });
       const module = updated.outline!.modules.find((m) => m.moduleLocalId === target.moduleLocalId)!;
-      expect(module).toMatchObject({ sourceSectionIds: ['source-1#s1'], coverage: 'sufficient' });
+      expect(module).toMatchObject({ sourceSectionIds: ['source-1#s1'], coverage: 'sufficient', gapNote: '' });
       expect(isModuleCovered(module, usableIds(['source-1#s1']))).toBe(true);
     });
 
