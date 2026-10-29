@@ -46,6 +46,7 @@ import {
   buildTemplateQuestionsPrompt,
   buildTemplateRepairBase,
   buildVerificationPrompt,
+  PromptError,
   type AiPromptRequest,
 } from './prompts';
 import {
@@ -503,7 +504,7 @@ function jobFrom(row: AiJobDbRecord, roomId: string): AiJobRecord {
     ...(row.outline ? { outline: row.outline } : {}),
     ...(row.outlineApprovedRevision === undefined ? {} : { outlineApprovedRevision: row.outlineApprovedRevision }),
     ...(row.moduleRuns ? { moduleRuns: row.moduleRuns } : {}),
-    planPending: planPending(row.calls),
+    planPending: row.status === 'running' && planPending(row.calls),
     id: row.id,
     roomId,
     jobId: row.jobId,
@@ -1472,9 +1473,15 @@ export function createAiJobService(
     return jobFrom(await updateJob(actor, row, { moduleRuns: replaceRun(row, run), calls, status: 'running', result: null,
       ...(audit ? { stageOutputs: { ...row.stageOutputs, __moduleAudit: [...history, { ...audit, moduleLocalId: run.outline.moduleLocalId, outlineRevision: run.outlineRevision, sourceFingerprint: run.sourceFingerprint, approvedBy: actor.userId, approvedAt: now() }] } } : {}), ...leaseAfterChanges(calls) }), actor.roomId);
   }
-  /** The planner may still replace the outline, so neither edits nor approval may race it. */
+  /**
+   * The planner may still replace the outline, so neither edits nor approval may race it. A
+   * completed planner output that was not yet processed (its processing write failed) still
+   * counts: the next step would apply it over the admin's change.
+   */
   function assertPlanSettled(row: AiJobDbRecord): void {
-    if (planPending(row.calls)) throw new AiJobServiceError('OPERATION_CONFLICT', PLAN_PENDING_MESSAGE);
+    const unprocessed = row.calls.some((call) => (call.stage === 'P' || call.stage === 'S') && call.status === 'completed'
+      && rawOutput(row.stageOutputs, call.callId) !== undefined && row.stageOutputs['processed:' + call.callId] !== true);
+    if (unprocessed || planPending(row.calls)) throw new AiJobServiceError('OPERATION_CONFLICT', PLAN_PENDING_MESSAGE);
   }
   function assertOutlineRevision(row: AiJobDbRecord, revision: number): void {
     if (row.outline!.revision !== revision || !Number.isSafeInteger(revision)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Outline revision conflict.');
@@ -1596,7 +1603,9 @@ export function createAiJobService(
     let request: AiPromptRequest;
     try { request = await promptFor(actor, row, call); }
     catch (error) {
-      // An unbuildable plan prompt (for example, too large) keeps the deterministic outline.
+      // Only an unbuildable plan prompt (too large, or invalid job input) keeps the deterministic
+      // outline; store and transport failures are rethrown so the planner can be retried.
+      if (!(error instanceof PromptError) && !(error instanceof AiJobServiceError)) throw error;
       row = await updateJob(actor, row, {
         calls: row.calls.map((item): AiCallRecord => item.callId === call.callId ? { ...item, status: 'failed', errors: validationMessages(error), finishedAt: now(), ...(aiCallMayBeLive(item) ? { cleanupState: 'pending', cleanupUpdatedAt: now() } as const : {}) } : item),
         stageOutputs: { ...row.stageOutputs, __planFallback: true }, ...CLEARED_WAIT, ...RELEASED_LEASE,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { OnboardingActor } from '../src/onboarding/auth';
 import {
@@ -1415,6 +1415,63 @@ describe('AI job service', () => {
       advance(121_000);
       const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
       expect(step).toMatchObject({ kind: 'awaiting_admin', job: { planPending: false, status: 'running', stageOutputs: expect.objectContaining({ __planFallback: true }) } });
+    });
+
+    it('blocks outline approval and edits until a completed plan is processed, then applies it', async () => {
+      const { service, store, job, featureId } = await templateStart('plan-unprocessed');
+      await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      const update = store.update.bind(store);
+      let failRelease = true;
+      const spy = vi.spyOn(store, 'update').mockImplementation(async (room, collection, id, data, options) => {
+        if (failRelease && collection === 'onboarding_ai_room_leases' && data.expiresAt === '1970-01-01T00:00:00.000Z') {
+          failRelease = false;
+          throw new Error('Lease release transport failed');
+        }
+        return update(room, collection, id, data, options);
+      });
+      await expect(service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'plan-1', text: JSON.stringify(plan(featureId)) })).rejects.toThrow('Lease release transport failed');
+      spy.mockRestore();
+      const stored = await service.getJob(admin, job.jobId);
+      expect(stored.calls[0].status).toBe('completed');
+      expect(stored.planPending).toBe(false);
+      expect(stored.outline!.revision).toBe(1);
+      const conflict = { code: 'OPERATION_CONFLICT', message: 'AI đang lập lộ trình, vui lòng chờ.' };
+      await expect(service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 })).rejects.toMatchObject(conflict);
+      await expect(service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: [] })).rejects.toMatchObject(conflict);
+      const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      expect(step).toMatchObject({ kind: 'awaiting_admin', job: { outline: { revision: 2 }, planPending: false } });
+      await expect(service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 2 })).resolves.toMatchObject({ outlineApprovedRevision: 2 });
+    });
+
+    it('falls back when the plan prompt is too large but rethrows store failures', async () => {
+      const { service, store, job } = await templateStart('plan-too-large');
+      const source = (await store.query<{ id: string }>(admin.roomId, 'onboarding_sources', { filter: { sourceId: 'source-1' } })).records[0];
+      const sections = Array.from({ length: 1_500 }, (_, i) => ({ id: 'source-1#s' + String(i + 1), headingPath: ['Mục ' + String(i) + ' ' + 'x'.repeat(120)], text: 'Bấm nút Gửi duyệt để chuyển đơn số ' + String(i) + '.' }));
+      await store.update(admin.roomId, 'onboarding_sources', source.id, { sections });
+      const query = store.query.bind(store);
+      let reads = 0;
+      const spy = vi.spyOn(store, 'query').mockImplementation(async (room, collection, options) => {
+        // syncModuleSources reads each module's source first; fail the planner's own read.
+        if (collection === 'onboarding_sources' && ++reads > job.outline!.modules.length) throw new Error('Store unavailable');
+        return query(room, collection, options);
+      });
+      await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).rejects.toThrow('Store unavailable');
+      spy.mockRestore();
+      const pending = await service.getJob(admin, job.jobId);
+      expect(pending.planPending).toBe(true);
+      expect(pending.stageOutputs.__planFallback).toBeUndefined();
+      const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      expect(step).toMatchObject({ kind: 'awaiting_admin', job: { planPending: false, outline: { revision: 1 }, stageOutputs: expect.objectContaining({ __planFallback: true }) } });
+      expect(step.kind === 'awaiting_admin' && step.job.calls[0]).toMatchObject({ status: 'failed' });
+    });
+
+    it('does not report planning for a cancelled job', async () => {
+      const { service, job } = await templateStart('plan-cancelled');
+      expect(job.planPending).toBe(true);
+      const cancelled = await service.cancelJob(admin, job.jobId);
+      expect(cancelled.status).toBe('cancelled');
+      expect(cancelled.calls[0].status).toBe('pending');
+      expect(cancelled.planPending).toBe(false);
     });
 
     it('leaves a persisted module_v2 job without a planner call unchanged', async () => {
