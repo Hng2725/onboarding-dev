@@ -7,6 +7,10 @@ const stylesheet = readFileSync(
   fileURLToPath(new URL('../src/ui/onboarding/styles.css', import.meta.url)),
   'utf8',
 );
+const shellStylesheet = readFileSync(
+  fileURLToPath(new URL('../src/ui/onboarding/ai/ai-generator.css', import.meta.url)),
+  'utf8',
+);
 
 function balancedBlock(source: string, openingBrace: number): string {
   let depth = 0;
@@ -43,13 +47,13 @@ function mobileGeneratorBlock(): string {
   return mediaBlock('@media (max-width: 700px)', '.ai-generator-backdrop');
 }
 
-function mediaBlock(marker: string, requiredSelector: string): string {
+function mediaBlock(marker: string, requiredSelector: string, source = stylesheet): string {
   let offset = 0;
-  while (offset < stylesheet.length) {
-    const mediaOffset = stylesheet.indexOf(marker, offset);
+  while (offset < source.length) {
+    const mediaOffset = source.indexOf(marker, offset);
     if (mediaOffset < 0) break;
-    const openingBrace = stylesheet.indexOf('{', mediaOffset + marker.length);
-    const block = balancedBlock(stylesheet, openingBrace);
+    const openingBrace = source.indexOf('{', mediaOffset + marker.length);
+    const block = balancedBlock(source, openingBrace);
     if (block.includes(requiredSelector)) return block;
     offset = openingBrace + block.length + 2;
   }
@@ -68,12 +72,18 @@ describe('AI Generator compact modal density', () => {
       'calc(100dvh - 16px)',
     ]);
     expect(declarationValues(panel, 'font-size')).toEqual(['13px']);
+    expect(declarationValues(panel, 'display')).toEqual(['flex']);
     expect(panel).not.toContain('transform: scale');
 
-    expect(declarationValues(rule('.ai-generator-header'), 'padding')).toEqual(['12px 16px']);
-    expect(declarationValues(rule('.ai-generator-steps'), 'padding')).toEqual(['8px 16px']);
-    expect(declarationValues(rule('.ai-generator-body'), 'padding')).toEqual(['12px 14px']);
-    expect(declarationValues(rule('.ai-generator-footer'), 'padding')).toEqual(['8px 14px']);
+    expect(declarationValues(rule('.ai-generator-header', shellStylesheet), 'padding')).toEqual(['16px 24px']);
+    expect(declarationValues(rule('.ai-generator-body', shellStylesheet), 'padding')).toEqual(['28px 32px']);
+    const footer = rule('.ai-generator-footer', shellStylesheet);
+    expect(declarationValues(footer, 'padding')).toEqual(['12px 24px']);
+    expect(declarationValues(footer, 'padding-right')).toEqual(['88px']);
+    // The old header, step strip and kind cards no longer live in the shared stylesheet.
+    for (const removed of ['.ai-generator-header', '.ai-generator-steps', '.ai-generator-body', '.ai-generator-footer', '.ai-template-kind']) {
+      expect(stylesheet).not.toContain(removed);
+    }
 
     const buttons = rule('.ai-generator-panel .button');
     expect(declarationValues(buttons, 'min-height')).toEqual(['34px']);
@@ -96,7 +106,7 @@ describe('AI Generator compact modal density', () => {
     expect(declarationValues(workspace, 'grid-template-columns')).toEqual(['200px minmax(0, 1fr)']);
     expect(declarationValues(workspace, 'gap')).toEqual(['12px']);
     expect(declarationValues(workspace, 'min-width')).toEqual(['0']);
-    expect(declarationValues(rule('.ai-generator-body'), 'overflow-x')).toEqual(['hidden']);
+    expect(declarationValues(rule('.ai-generator-body', shellStylesheet), 'overflow-x')).toEqual(['hidden']);
     expect(declarationValues(review, 'max-height')).toEqual(['54dvh']);
     expect(declarationValues(review, 'overflow')).toEqual(['auto']);
     expect(declarationValues(rule('.ai-outline-review > .ai-review-scroll'), 'max-height')).toEqual(['56dvh']);
@@ -141,5 +151,38 @@ describe('AI Generator compact modal density', () => {
     expect(declarationValues(milestones, 'grid-template-columns')).toEqual([
       'repeat(4, minmax(0, 1fr))',
     ]);
+  });
+
+  it('lays out the shell and step 1 like the approved mockup', () => {
+    const stepper = rule('.ai-stepper', shellStylesheet);
+    expect(declarationValues(stepper, 'display')).toEqual(['flex']);
+    expect(declarationValues(stepper, 'gap')).toEqual(['10px']);
+    expect(declarationValues(rule('.ai-stepper-step.done .ai-stepper-dot', shellStylesheet), 'color')).toEqual(['var(--on-success)']);
+    expect(declarationValues(rule('.ai-stepper-step.active .ai-stepper-dot', shellStylesheet), 'background')).toEqual(['var(--on-primary)']);
+
+    const kind = rule('.ai-generator-panel .ai-kind-option', shellStylesheet);
+    expect(declarationValues(kind, 'border-radius')).toEqual(['var(--on-radius-md)']);
+    expect(declarationValues(rule('.ai-drop', shellStylesheet), 'border-radius')).toEqual(['var(--on-radius-md)']);
+    expect(declarationValues(rule('.ai-generator-panel .ai-workspace-card', shellStylesheet), 'border-radius')).toEqual(['var(--on-radius-md)']);
+
+    const px = (value: string) => Number.parseFloat(value);
+    for (const [selector, property] of [
+      ['.ai-generator-panel .ai-kind-option', 'min-height'],
+      ['.ai-generator-panel .button-sm', 'min-height'],
+      ['.ai-generator-close', 'min-height'],
+      ['.ai-generator-footer .button-primary', 'min-height'],
+      ['.ai-source-file label', 'min-height'],
+      ['.ai-more > summary', 'min-height'],
+    ] as const) {
+      expect(px(declarationValues(rule(selector, shellStylesheet), property)[0]), selector).toBeGreaterThanOrEqual(30);
+    }
+    for (const selector of ['.ai-kind-options', '.ai-source-files', '.ai-generator-footer-start, .ai-generator-footer-end', '.ai-step-sources']) {
+      expect(px(declarationValues(rule(selector, shellStylesheet), 'gap')[0]), selector).toBeGreaterThanOrEqual(6);
+    }
+
+    const narrow = mediaBlock('@media (max-width: 900px)', '.ai-step-sources', shellStylesheet);
+    expect(declarationValues(rule('.ai-step-sources', narrow), 'grid-template-columns')).toEqual(['1fr']);
+    expect(declarationValues(rule('.ai-generator-footer', narrow), 'padding-right')).toEqual(['88px']);
+    expect(declarationValues(rule('.ai-generator-header', narrow), 'flex-wrap')).toEqual(['wrap']);
   });
 });

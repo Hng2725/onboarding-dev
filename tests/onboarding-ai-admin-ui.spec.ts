@@ -8,7 +8,6 @@ import type { AiCallRecord, AiJobRecord, VerificationFlag } from '../src/onboard
 import type { AdminTemplateDetail } from '../src/onboarding/templates';
 import {
   AI_GENERATOR_STEPS,
-  AiTemplateSelection,
   aiGeneratorStepFor,
   aiCallDisplayLabel,
   aiCallRuntimeText,
@@ -34,6 +33,7 @@ import {
 } from '../src/ui/onboarding/ai/ai-generator';
 import { FlagPanel } from '../src/ui/onboarding/ai/flag-panel';
 import { AiReview } from '../src/ui/onboarding/ai/ai-review';
+import { AiStepSources } from '../src/ui/onboarding/ai/ai-step-sources';
 import {
   AiMilestoneProgress,
   inventoryMilestones,
@@ -219,26 +219,18 @@ describe('Admin AI template UI model', () => {
     expect(resolveUploadSystemName('  Payroll Portal  ', 'guide.pdf')).toBe('Payroll Portal');
   });
 
-  it('models the five source-to-publish steps in the requested order', () => {
+  it('models the four source-to-publish steps in the requested order', () => {
     expect(AI_GENERATOR_STEPS).toEqual([
-      'Tài liệu nguồn', 'Phân tích', 'Tạo lộ trình', 'Rà soát', 'Xuất bản',
+      'Nguồn & loại', 'Kiểm tra độ phủ', 'AI tạo nội dung', 'Xem lại & xuất bản',
     ]);
-    expect(aiGeneratorStepFor({ sourceCount: 0 })).toBe(0);
-    expect(aiGeneratorStepFor({ sourceCount: 2, inventoryStatus: 'running' })).toBe(1);
-    expect(aiGeneratorStepFor({ sourceCount: 2, inventoryStatus: 'completed' })).toBe(2);
+    const base = { hasTemplateJob: false, outlineApproved: false, jobCompleted: false, hasReview: false };
+    expect(aiGeneratorStepFor(base)).toBe(0);
+    expect(aiGeneratorStepFor({ ...base, hasTemplateJob: true })).toBe(1);
+    expect(aiGeneratorStepFor({ ...base, hasTemplateJob: true, outlineApproved: true })).toBe(2);
+    expect(aiGeneratorStepFor({ ...base, hasTemplateJob: true, jobCompleted: true })).toBe(2);
     expect(aiGeneratorStepFor({
-      sourceCount: 2, inventoryStatus: 'completed', templateStatus: 'running',
-    })).toBe(2);
-    expect(aiGeneratorStepFor({
-      sourceCount: 2, inventoryStatus: 'completed', templateStatus: 'running', outlineApproved: true,
+      hasTemplateJob: true, outlineApproved: true, jobCompleted: true, hasReview: true,
     })).toBe(3);
-    expect(aiGeneratorStepFor({
-      sourceCount: 2, inventoryStatus: 'completed', templateStatus: 'completed',
-    })).toBe(3);
-    expect(aiGeneratorStepFor({
-      sourceCount: 2, inventoryStatus: 'completed', templateStatus: 'completed',
-      reviewReady: true,
-    })).toBe(4);
   });
 
   it('recovers the newest running AI job when iframe session storage is lost', () => {
@@ -1104,43 +1096,54 @@ describe('AI job milestones', () => {
 describe('AI template request workspace', () => {
   const commonProps = {
     templateTitle: '',
+    onTemplateTitle: () => undefined,
+    systemName: '',
+    onSystemName: () => undefined,
+    softwareVersion: '',
+    effectiveDate: '',
+    onMeta: () => undefined,
     responsibilities: '',
-    responsibilityCount: 0,
-    onSelect: () => undefined,
-    onTemplateTitleChange: () => undefined,
-    onResponsibilitiesChange: () => undefined,
+    onKind: () => undefined,
+    onResponsibilities: () => undefined,
+    sourcePanel: null,
   };
 
-  it('renders both mandatory choices and explains a missing selection', () => {
-    const html = renderToStaticMarkup(createElement(AiTemplateSelection, {
+  it('renders the two kinds as an unselected radio group with version and date folded away', () => {
+    const html = renderToStaticMarkup(createElement(AiStepSources, {
       ...commonProps,
-      selection: null,
+      kind: null,
       errors: { selection: 'Chọn loại template.' },
     }));
 
-    expect(html).toContain('Template 1');
-    expect(html).toContain('Template 2');
-    expect(html).not.toContain('Cả hai');
-    expect(html).toContain('Chọn loại template.');
     expect(html).toContain('role="radiogroup"');
+    expect(html.match(/role="radio"/g)).toHaveLength(2);
+    expect(html).not.toContain('aria-checked="true"');
+    expect(html).toContain('Thông thường');
+    expect(html).toContain('Kiến thức chung cho mọi nhân sự mới');
+    expect(html).toContain('Nâng cao');
+    expect(html).toContain('Theo vai trò và nhiệm vụ cụ thể');
+    expect(html).not.toContain('Cả hai');
+    expect(html).not.toContain('<textarea');
+    expect(html).toMatch(/<details[^>]*><summary>Thông tin thêm<\/summary>.*Phiên bản.*Ngày hiệu lực.*<\/details>/s);
   });
 
   it('connects advanced role errors to invalid fields and displays the responsibility count', () => {
-    const html = renderToStaticMarkup(createElement(AiTemplateSelection, {
+    const html = renderToStaticMarkup(createElement(AiStepSources, {
       ...commonProps,
-      selection: 'advanced',
+      kind: 'advanced',
       errors: {
         responsibilities: 'Nhập từ 2 đến 8 nhiệm vụ chính, mỗi nhiệm vụ một dòng.',
       },
     }));
 
+    expect(html).toContain('aria-checked="true"');
     expect(html).toContain('aria-invalid="true"');
     expect(html).not.toContain('Phòng ban');
     expect(html).not.toContain('Tên phòng ban');
     expect(html).not.toContain('Chức danh');
     expect(html).toContain('<textarea');
     expect(html).toContain('aria-describedby="ai-responsibilities-error"');
-    expect(html).toContain('0/8 nhiệm vụ hợp lệ');
+    expect(html).toContain('0/8 nhiệm vụ');
   });
 });
 describe('AI compact review panes', () => {
@@ -1227,5 +1230,11 @@ describe('AI destructive confirmation', () => {
     expect(normal).toContain('class="button button-primary"');
     expect(normal).not.toContain('button-danger');
     expect(danger).toContain('class="button button-danger"');
+  });
+
+  it('keeps Hủy as the default cancel label and accepts a custom one', () => {
+    const props = { open: true, title: 'Đóng cửa sổ?', description: 'AI đang chạy.', onCancel: () => undefined, onConfirm: () => undefined };
+    expect(renderToStaticMarkup(createElement(ConfirmDialog, props))).toContain('>Hủy</button>');
+    expect(renderToStaticMarkup(createElement(ConfirmDialog, { ...props, cancelLabel: 'Tiếp tục ở lại' }))).toContain('>Tiếp tục ở lại</button>');
   });
 });

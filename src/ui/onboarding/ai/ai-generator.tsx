@@ -1,12 +1,9 @@
 import {
   CheckOutlined,
   CloseOutlined,
-  DeleteOutlined,
   LoadingOutlined,
-  PlayCircleOutlined,
   RedoOutlined,
   RobotOutlined,
-  RocketOutlined,
 } from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePrivosApp, usePrivosContext, type McpApp } from '@privos_ai/app-react';
@@ -47,6 +44,7 @@ import {
   shouldUseNativeForPump,
 } from './question-recovery';
 import { AiReview } from './ai-review';
+import { AiStepSources } from './ai-step-sources';
 import {
   collectAiGeneratorResetTemplateRefs,
   loadAiGeneratorResetReviews,
@@ -68,14 +66,12 @@ import {
   aiReviewReadiness,
   generateValidatedTemplateRuns,
   mergeTemplateRunJobs,
-  reviewAdvanceState,
   selectResumableTemplateRuns,
   templateJobRequest,
   templateKindsForSelection,
   validateTemplateRequest,
   type AiTemplateRun,
   type AiTemplateSettings,
-  type TemplateRequestErrors,
   type TemplateSelection,
 } from './ai-template-batch';
 import {
@@ -90,28 +86,34 @@ class ModuleReviewPending extends Error {}
 
 const QUESTION_RECOVERY_NATIVE_TIMEOUT_MS = 90_000;
 
-export const AI_GENERATOR_STEPS = [
-  'Tài liệu nguồn',
-  'Phân tích',
-  'Tạo lộ trình',
-  'Rà soát',
-  'Xuất bản',
-] as const;
+export const AI_GENERATOR_STEPS = ['Nguồn & loại', 'Kiểm tra độ phủ', 'AI tạo nội dung', 'Xem lại & xuất bản'] as const;
 
+export type AiGeneratorStep = 0 | 1 | 2 | 3;
+
+/** The step a restored session opens on. */
 export function aiGeneratorStepFor(state: {
-  readonly sourceCount: number;
-  readonly inventoryStatus?: AiJobRecord['status'];
-  readonly templateStatus?: AiJobRecord['status'];
-  readonly outlineApproved?: boolean;
-  readonly reviewReady?: boolean;
-}): number {
-  if (state.reviewReady) return 4;
-  if (state.outlineApproved) return 3;
-  if (state.templateStatus === 'completed') return 3;
-  if (state.inventoryStatus === 'completed') return 2;
-  if (state.sourceCount > 0) return 1;
+  readonly hasTemplateJob: boolean;
+  readonly outlineApproved: boolean;
+  readonly jobCompleted: boolean;
+  readonly hasReview: boolean;
+}): AiGeneratorStep {
+  if (state.hasReview) return 3;
+  if (state.outlineApproved || state.jobCompleted) return 2;
+  if (state.hasTemplateJob) return 1;
   return 0;
 }
+
+function outlineApprovedFor(job: AiJobRecord | null | undefined): boolean {
+  return job?.pipelineVersion === 'module_v2'
+    && Boolean(job.outline)
+    && job.outlineApprovedRevision === job.outline?.revision;
+}
+
+function sameSourceIds(left: readonly string[] | undefined, right: ReadonlySet<string>): boolean {
+  return Boolean(left) && left!.length === right.size && left!.every((sourceId) => right.has(sourceId));
+}
+
+const PUBLISHING_PHASES: ReadonlySet<AiPublishTarget['phase']> = new Set(['preparing_files', 'prepared', 'publishing', 'exporting']);
 
 /** The planned step a call belongs to: retries (`-retryN`) and repairs (`-rN`) share it. */
 function plannedStep(callId: string): string {
@@ -733,94 +735,6 @@ export function aiPublishProgressText(progress: AiPublishFileProgress): string {
   };
   return `${progress.templateTitle} · ${modulePrefix}${action[progress.stage]}`;
 }
-export function AiTemplateSelection({
-  selection,
-  templateTitle,
-  responsibilities,
-  responsibilityCount,
-  errors,
-  onSelect,
-  onTemplateTitleChange,
-  onResponsibilitiesChange,
-}: {
-  readonly selection: TemplateSelection;
-  readonly templateTitle: string;
-  readonly responsibilities: string;
-  readonly responsibilityCount: number;
-  readonly errors: TemplateRequestErrors;
-  readonly onSelect: (selection: Exclude<TemplateSelection, null>) => void;
-  readonly onTemplateTitleChange: (value: string) => void;
-  readonly onResponsibilitiesChange: (value: string) => void;
-}) {
-  const advanced = selection === 'advanced';
-  return (
-    <section className="ai-request-fields" aria-labelledby="ai-template-selection-title">
-      <span className="section-kicker">LOẠI LỘ TRÌNH</span>
-      <h3 id="ai-template-selection-title">Chọn đối tượng onboarding *</h3>
-      <div
-        className="ai-template-kind"
-        role="radiogroup"
-        aria-describedby={errors.selection ? 'ai-template-selection-error' : undefined}
-      >
-        <button
-          className={selection === 'normal' ? 'active' : ''}
-          type="button"
-          role="radio"
-          aria-checked={selection === 'normal'}
-          onClick={() => onSelect('normal')}
-        >
-          <strong>Template 1</strong>
-          <span>Kiến thức chung cho nhân sự thông thường</span>
-        </button>
-        <button
-          className={selection === 'advanced' ? 'active' : ''}
-          type="button"
-          role="radio"
-          aria-checked={selection === 'advanced'}
-          onClick={() => onSelect('advanced')}
-        >
-          <strong>Template 2</strong>
-          <span>Chuyên sâu theo vai trò và nhiệm vụ</span>
-        </button>
-      </div>
-      {errors.selection && (
-        <p className="ai-field-error" id="ai-template-selection-error" role="alert">
-          {errors.selection}
-        </p>
-      )}
-      <label className="form-field">
-        <span>Tên template (không bắt buộc)</span>
-        <input
-          value={templateTitle}
-          onChange={(event) => onTemplateTitleChange(event.target.value)}
-          placeholder="AI sẽ tự đặt nếu để trống"
-        />
-      </label>
-      {advanced && (
-        <div className="ai-role-form">
-          <label className="form-field form-wide">
-            <span>Nhiệm vụ chính * (2–8 dòng)</span>
-            <textarea
-              rows={6}
-              value={responsibilities}
-              aria-invalid={Boolean(errors.responsibilities)}
-              aria-describedby={errors.responsibilities ? 'ai-responsibilities-error' : 'ai-responsibilities-count'}
-              onChange={(event) => onResponsibilitiesChange(event.target.value)}
-              placeholder={'Mỗi nhiệm vụ một dòng\nVí dụ: Tạo và gửi báo giá'}
-            />
-            <small id="ai-responsibilities-count">{responsibilityCount}/8 nhiệm vụ hợp lệ</small>
-            {errors.responsibilities && (
-              <small className="ai-field-error" id="ai-responsibilities-error">
-                {errors.responsibilities}
-              </small>
-            )}
-          </label>
-        </div>
-      )}
-    </section>
-  );
-}
-
 export function AiGeneratorPage({
   api,
   canGenerateWithAi,
@@ -843,7 +757,7 @@ export function AiGeneratorPage({
     && aiChatReadCapability.granted
     && aiChatWriteCapability.resolved
     && aiChatWriteCapability.granted;
-  const [step, setStep] = useState(initialTemplate ? 3 : 0);
+  const [step, setStep] = useState<AiGeneratorStep>(initialTemplate ? 3 : 0);
   const [sources, setSources] = useState<readonly SourceSummary[]>([]);
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const [systemName, setSystemName] = useState('');
@@ -868,6 +782,7 @@ export function AiGeneratorPage({
   const [checkingCleanup, setCheckingCleanup] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+  const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [restoring, setRestoring] = useState(true);
   const [sourcePanelEpoch, setSourcePanelEpoch] = useState(0);
@@ -936,20 +851,6 @@ export function AiGeneratorPage({
         }
       : run));
   }, [activeReviewIndex]);
-  const activateTemplateRun = useCallback((run: AiTemplateRun, index: number) => {
-    setSelectedTemplateKind(run.kind);
-    setOutlineFocusModuleId(null);
-    setEditingOutline(false);
-    if (run.review) {
-      setActiveReviewIndex(index);
-      setStep(3);
-      return;
-    }
-    const outlineApproved = run.job?.pipelineVersion === 'module_v2'
-      && Boolean(run.job.outline)
-      && run.job.outlineApprovedRevision === run.job.outline?.revision;
-    setStep(outlineApproved || run.job?.status === 'completed' ? 3 : 2);
-  }, []);
   const nativeCleanupBlock = useMemo(
     () => selectBlockingNativeCleanup(roomJobs, userId),
     [roomJobs, userId],
@@ -998,6 +899,8 @@ export function AiGeneratorPage({
   const loadSources = useCallback(async () => {
     const result = await api.adminAi<{ sources: readonly SourceSummary[] }>('list_sources');
     setSources(result.sources);
+    // Sources already carry the system name they were uploaded with; reuse it as the default.
+    setSystemName((current) => current || result.sources.find((source) => source.systemName.trim())?.systemName || '');
     setSelectedIds((current) => current.size > 0
       ? new Set([...current].filter((sourceId) => result.sources.some((source) => source.sourceId === sourceId)))
       : new Set(result.sources.map((source) => source.sourceId)));
@@ -1031,7 +934,7 @@ export function AiGeneratorPage({
     setRestoring(true);
     void (async () => {
       try {
-        await loadSources();
+        const loadedSources = await loadSources();
         if (initialTemplate) {
           const loaded = await loadReview(initialTemplate.id, initialTemplate.version);
           setTemplateSelection(loaded.employeeType);
@@ -1089,23 +992,24 @@ export function AiGeneratorPage({
             }
           }
           setTemplateRuns(restoredRuns);
-          const firstReview = restoredRuns.findIndex((run) => run.review);
-          if (firstReview >= 0) { setActiveReviewIndex(firstReview); setStep(3); }
-          else {
-            const draftReviewIndex = restoredRuns.findIndex((run) => run.job?.pipelineVersion === 'module_v2'
-              && Boolean(run.job.outline)
-              && run.job.outlineApprovedRevision === run.job.outline?.revision);
-            if (draftReviewIndex >= 0) {
-              setSelectedTemplateKind(restoredRuns[draftReviewIndex].kind);
-              setStep(3);
-            } else setStep(2);
+          const run = restoredRuns[0];
+          if (run.review) setActiveReviewIndex(0);
+          else setSelectedTemplateKind(run.kind);
+          setStep(aiGeneratorStepFor({
+            hasTemplateJob: Boolean(run.job),
+            outlineApproved: outlineApprovedFor(run.job),
+            jobCompleted: run.job?.status === 'completed',
+            hasReview: Boolean(run.review),
+          }));
+          if (restoredRuns.every((entry) => entry.review) && restoredRuns.some((entry) => entry.publicationBatchId || entry.review?.content?.publication || entry.review?.status === 'published')) {
+            const targets = restoredRuns.map((entry) => restoreAiPublishTarget(entry.review!, entry.publicationBatchId));
+            checkpointTargets(targets);
           }
-          if (restoredRuns.every((run) => run.review) && restoredRuns.some((run) => run.publicationBatchId || run.review?.content?.publication || run.review?.status === 'published')) {
-            const targets = restoredRuns.map((run) => restoreAiPublishTarget(run.review!, run.publicationBatchId));
-            checkpointTargets(targets); setStep(4);
-          }
-        } else if (inventory?.status === 'completed') setStep(2);
-        else if (inventory) setStep(1);
+        }
+        // Keep the analysed selection so "Phân tích tài liệu" can reuse the restored inventory.
+        const restoredSelection = (inventory ?? restoredInventory)?.sourceIds
+          ?.filter((sourceId) => loadedSources.some((source) => source.sourceId === sourceId));
+        if (restoredSelection?.length) setSelectedIds(new Set(restoredSelection));
         // Provider cleanup runs after the job is on screen; it must never delay opening the modal.
         if (active) void reconcileCleanups(result.jobs);
       } catch (caught) {
@@ -1153,7 +1057,7 @@ export function AiGeneratorPage({
     setStep(0);
     setSources(nextSources);
     setSelectedIds(new Set(nextSources.map((source) => source.sourceId)));
-    setSystemName('');
+    setSystemName(nextSources.find((source) => source.systemName.trim())?.systemName ?? '');
     setSoftwareVersion('');
     setEffectiveDate('');
     setInventoryJob(null);
@@ -1361,23 +1265,31 @@ export function AiGeneratorPage({
     }
   }
 
-  async function analyze() {
+  /** Runs (or reuses) the inventory for the current selection; resolves with the completed job. */
+  async function runInventory(): Promise<AiJobRecord> {
+    const completed = [inventoryJob, ...[...roomJobs].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))]
+      .find((job) => job?.kind === 'inventory' && job.status === 'completed' && job.createdBy === userId
+        && sameSourceIds(job.sourceIds, selectedIds));
+    if (completed) {
+      setInventoryJob(completed);
+      if (roomId) writeAiResumeKey('onboarding:ai:inventory:' + roomId, completed.jobId);
+      return completed;
+    }
     inventoryRecoveryAbortRef.current?.abort();
     const recoveryController = new AbortController();
     inventoryRecoveryAbortRef.current = recoveryController;
-    setBusy(true);
-    setNotice(null);
     try {
-      const preferNative = aiJobPrefersNative(inventoryJob);
-      let job = inventoryJob?.status === 'running'
-        ? inventoryJob
-        : inventoryJob?.status === 'failed'
-          ? (await api.adminAi<{ job: AiJobRecord }>('retry_job', { jobId: inventoryJob.jobId })).job
-        : (await api.adminAi<{ job: AiJobRecord }>('start_job', {
-          kind: 'inventory',
-          sourceIds: [...selectedIds],
-          operationId: crypto.randomUUID(),
-        })).job;
+      const reusable = inventoryJob && sameSourceIds(inventoryJob.sourceIds, selectedIds) ? inventoryJob : null;
+      const preferNative = aiJobPrefersNative(reusable);
+      let job = reusable?.status === 'running'
+        ? reusable
+        : reusable?.status === 'failed'
+          ? (await api.adminAi<{ job: AiJobRecord }>('retry_job', { jobId: reusable.jobId })).job
+          : (await api.adminAi<{ job: AiJobRecord }>('start_job', {
+            kind: 'inventory',
+            sourceIds: [...selectedIds],
+            operationId: crypto.randomUUID(),
+          })).job;
       setInventoryJob(job);
       if (roomId) writeAiResumeKey('onboarding:ai:inventory:' + roomId, job.jobId);
       job = await pumpWithInventoryRecovery({
@@ -1390,18 +1302,29 @@ export function AiGeneratorPage({
         retryJob: async (jobId) => (await api.adminAi<{ job: AiJobRecord }>('retry_job', { jobId })).job,
       });
       setInventoryJob(job);
-      setStep(2);
-      setNotice({ message: 'Đã phân tích xong tài liệu nguồn.', tone: 'success' });
-    } catch (caught) {
-      if (!isAbortError(caught)) {
-        setNotice({ message: generationErrorMessage(caught), tone: 'error' });
-      }
-      // A timed-out or late-cancelled attempt may still run; reconcile it in the background.
-      void refreshCleanups().catch(() => undefined);
+      return job;
     } finally {
       if (inventoryRecoveryAbortRef.current === recoveryController) {
         inventoryRecoveryAbortRef.current = null;
       }
+    }
+  }
+
+  /** Step 1 primary: analyse the selected sources, then let the AI plan the chosen template kind. */
+  async function analyzeAndPlan() {
+    if (!templateSelection) return;
+    setStep(1);
+    setBusy(true);
+    setNotice(null);
+    try {
+      const inventory = await runInventory();
+      if (inventory.status !== 'completed') throw new Error('Chưa phân tích xong tài liệu nguồn.');
+      await generateTemplate(inventory, templateSelection);
+    } catch (caught) {
+      if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
+      // A timed-out or late-cancelled attempt may still run; reconcile it in the background.
+      void refreshCleanups().catch(() => undefined);
+    } finally {
       setBusy(false);
     }
   }
@@ -1440,7 +1363,7 @@ export function AiGeneratorPage({
         : run));
       setSelectedTemplateKind(activeReviewRun.kind);
       setOutlineFocusModuleId(null);
-      setStep(3);
+      setStep(2);
     } catch (caught) { setNotice({ message: generationErrorMessage(caught), tone: 'error' }); }
     finally { setBusy(false); }
   }
@@ -1467,29 +1390,32 @@ export function AiGeneratorPage({
     if (!templateJob?.outline) return;
     setEditingOutline(false);
     setOutlineFocusModuleId(null);
-    setStep(3);
+    setStep(2);
     const approved = await moduleAction('approve_outline', { expectedRevision: templateJob.outline.revision }, true);
-    if (!approved) setStep(2);
+    if (!approved) setStep(1);
   }
 
-  async function generateTemplate() {
-    if (!inventoryJob || inventoryJob.status !== 'completed') return;
-    setBusy(true);
-    setNotice(null);
+  async function generateTemplate(inventory: AiJobRecord, kind: EmployeeType) {
+    const existing = templateRuns.find((run) => run.kind === kind);
+    // A job planned from another inventory belongs to an older selection; start a fresh one.
+    const runs: readonly AiTemplateRun[] = [existing?.job && existing.job.inventoryJobId !== inventory.jobId
+      ? { kind, job: null, review: null }
+      : existing ?? { kind, job: null, review: null }];
+    setTemplateRuns(runs);
     try {
       const result = await generateValidatedTemplateRuns({
-        selection: templateSelection,
+        selection: kind,
         responsibilities,
-        runs: templateRuns,
+        runs,
         generateOne: async (current) => {
           let job = current.job?.status === 'running'
             ? current.job
             : current.job?.status === 'failed'
               ? (await api.adminAi<{ job: AiJobRecord }>('retry_job', { jobId: current.job.jobId })).job
               : (await api.adminAi<{ job: AiJobRecord }>('start_job', templateJobRequest({
-                  selection: templateSelection,
+                  selection: kind,
                   kind: current.kind,
-                  inventoryJobId: inventoryJob.jobId,
+                  inventoryJobId: inventory.jobId,
                   baseTitle: templateTitle,
                   responsibilities,
                   operationId: crypto.randomUUID(),
@@ -1522,27 +1448,22 @@ export function AiGeneratorPage({
       if (Object.keys(result.errors).length > 0) {
         const message = result.errors.selection ?? result.errors.responsibilities;
         setNotice({ message: message ?? 'Kiểm tra lại thông tin tạo lộ trình.', tone: 'error' });
+        setStep(0);
         return;
       }
       setTemplateRuns(result.runs);
-      setActiveReviewIndex(Math.max(0, result.runs.findIndex((run) => run.review && !templateRuns.find((prior) => prior.kind === run.kind)?.review)));
+      setActiveReviewIndex(0);
       setStep(3);
-      setNotice({
-        message: 'AI đã tạo bản nháp để Admin rà soát.',
-        tone: 'success',
-      });
     } catch (caught) {
-      if (caught instanceof AiTemplateGenerationError && caught.originalError instanceof ModuleReviewPending) { setTemplateRuns((current) => mergeTemplateRunJobs(caught.runs, current)); return; }
       if (caught instanceof AiTemplateGenerationError) {
         setTemplateRuns((current) => mergeTemplateRunJobs(caught.runs, current));
+        if (caught.originalError instanceof ModuleReviewPending) {
+          if (outlineApprovedFor(caught.runs[0]?.job)) setStep(2);
+          return;
+        }
+        throw caught.originalError;
       }
-      if (!isAbortError(caught)) {
-        setNotice({ message: generationErrorMessage(caught), tone: 'error' });
-      }
-      // A timed-out or late-cancelled attempt may still run; reconcile it in the background.
-      void refreshCleanups().catch(() => undefined);
-    } finally {
-      setBusy(false);
+      throw caught;
     }
   }
 
@@ -1704,10 +1625,6 @@ export function AiGeneratorPage({
       setBusy(false);
     }
   }
-  const reviewNavigation = useMemo(
-    () => reviewAdvanceState(templateRuns),
-    [templateRuns],
-  );
   const publishReadiness = useMemo(() => {
     const blockingCount = templateRuns.reduce(
       (sum, run) => sum + aiReviewReadiness(run.review).blockingCount,
@@ -1720,15 +1637,51 @@ export function AiGeneratorPage({
       blockingCount,
     };
   }, [templateRuns]);
-  const roleResponsibilities = responsibilities.split(/\r?\n/u).map((item) => item.trim()).filter(Boolean);
   const requestErrors = useMemo(() => validateTemplateRequest({
     selection: templateSelection,
     responsibilities,
   }), [responsibilities, templateSelection]);
   const requestHasErrors = Object.keys(requestErrors).length > 0;
-  const activeTemplateIndex = activeTemplateRun
-    ? templateRuns.findIndex((run) => run.kind === activeTemplateRun.kind)
-    : -1;
+  const outlineApproved = outlineApprovedFor(templateJob);
+  const outlineReady = templateJob?.pipelineVersion === 'module_v2' && Boolean(templateJob.outline) && !templateJob.planPending;
+  const publishing = publishTargets.some((target) => PUBLISHING_PHASES.has(target.phase));
+  /** True while closing the modal would interrupt AI work; closing then asks first. */
+  const aiWorking = busy
+    || (inventoryJob?.status === 'running' && inventoryRecoveryAbortRef.current !== null)
+    || Boolean(templateJob?.planPending)
+    || (templateJob?.autoApprove === true && templateJob.status === 'running' && outlineApproved)
+    || publishing;
+
+  function requestClose() {
+    if (aiWorking) setCloseConfirmOpen(true);
+    else onClose();
+  }
+
+  const escapeRef = useRef<() => void>(() => undefined);
+  escapeRef.current = () => {
+    if (closeConfirmOpen) setCloseConfirmOpen(false);
+    else if (resetConfirmOpen) { if (!resetting) setResetConfirmOpen(false); }
+    else requestClose();
+  };
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') escapeRef.current(); };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  const sourcesHint = !templateSelection
+    ? 'Chọn loại template'
+    : selectedIds.size === 0
+      ? 'Chọn ít nhất 1 tài liệu'
+      : !systemName.trim()
+        ? 'Nhập tên hệ thống'
+        : requestErrors.responsibilities
+          ? 'Nhập 2–8 nhiệm vụ chính'
+          : null;
+  const canAnalyze = !busy && !restoring && !resetting && !sourcesHint && !requestHasErrors;
+  const progressJob = templateJob ?? inventoryJob;
+  const progressFailed = progressJob?.status === 'failed';
   const cleanupStatus = cancelling
     ? <p className="ai-cleanup-status" role="status"><LoadingOutlined spin /> Đang chờ PrivOS xác nhận hủy tiến trình AI nền</p>
     : nativeFallbackAvailable && nativeCleanupBlock
@@ -1742,191 +1695,139 @@ export function AiGeneratorPage({
       )
       : null;
 
+  function backToOutline() {
+    setOutlineFocusModuleId(null);
+    setEditingOutline(true);
+    setStep(1);
+  }
+
+  let hint: string | null = null;
+  let primary: { readonly label: string; readonly disabled: boolean; readonly onClick: () => void } | null = null;
+  if (step === 0) {
+    hint = sourcesHint;
+    primary = { label: busy ? 'Đang phân tích…' : 'Phân tích tài liệu', disabled: !canAnalyze, onClick: () => void analyzeAndPlan() };
+  } else if (step === 1) {
+    if (outlineReady) hint = 'Duyệt lộ trình để AI viết nội dung';
+    else {
+      primary = {
+        label: busy ? 'AI đang xử lý…' : progressFailed ? 'Thử lại' : 'Tiếp tục',
+        disabled: busy || restoring || resetting || !templateSelection || requestHasErrors,
+        onClick: () => void analyzeAndPlan(),
+      };
+    }
+  } else if (step === 2) {
+    primary = templateJob?.status === 'running' && !busy
+      ? { label: 'Tiếp tục xử lý', disabled: false, onClick: () => void resumeModuleJob() }
+      : { label: busy ? 'AI đang tạo nội dung…' : 'Xem lại template', disabled: busy || templateJob?.status !== 'completed', onClick: () => void resumeModuleJob() };
+  } else if (templateRuns.length > 0) {
+    if (publishReadiness.blockingCount > 0) hint = `Còn ${publishReadiness.blockingCount} cờ bắt buộc`;
+    primary = {
+      label: busy
+        ? 'Đang xuất bản…'
+        : publishTargets.some((target) => target.phase === 'failed') ? 'Thử lại xuất bản' : 'Xuất bản template',
+      disabled: busy || !publishReadiness.allowed,
+      onClick: () => void publish(),
+    };
+  }
+  const progressCancellable = step === 1 && !outlineReady && progressJob?.status === 'running';
+
   return (
-    <section className="ai-generator-panel" role="dialog" aria-modal="true" aria-labelledby="ai-generator-title">
-      <header className="ai-generator-header">
-        <div><span className="section-kicker"><RobotOutlined /> AI ONBOARDING</span><h2 id="ai-generator-title">{initialTemplate ? 'Rà soát template AI' : 'Tạo template từ tài liệu'}</h2><p>AI dựng lộ trình có dẫn chứng; Admin rà soát và quyết định xuất bản.</p></div>
-        <button className="icon-button" type="button" aria-label="Đóng" onClick={onClose}><CloseOutlined /></button>
-      </header>
-      <ol className="ai-generator-steps">{AI_GENERATOR_STEPS.map((label, index) => (
-        <li className={index === step ? 'active' : index < step ? 'done' : ''} key={label}>
-          <span>{index < step ? <CheckOutlined /> : index + 1}</span><small>{label}</small>
-        </li>
-      ))}</ol>
-      <InlineNotice notice={notice} className="ai-generator-notice" onDismiss={() => setNotice(null)} />
-      <div className="ai-generator-body">
-        {!canGenerateWithAi && (
-          <div className="ai-permission-blocked"><RobotOutlined /><h3>Chưa có quyền tạo nội dung AI</h3><p>Admin cần cấp quyền “Run sandbox agent” cho app trong Customize access. Các template hiện có vẫn dùng được.</p></div>
-        )}
-        {canGenerateWithAi && step === 0 && (
-          <>
-            <div className="ai-source-metadata">
-              <label className="form-field"><span>Tên hệ thống *</span><input value={systemName} onChange={(event) => setSystemName(event.target.value)} placeholder="Ví dụ: PrivOS" /></label>
-              <label className="form-field"><span>Phiên bản</span><input value={softwareVersion} onChange={(event) => setSoftwareVersion(event.target.value)} placeholder="Ví dụ: 2.3" /></label>
-              <label className="form-field"><span>Ngày hiệu lực</span><input type="date" value={effectiveDate} onChange={(event) => setEffectiveDate(event.target.value)} /></label>
-            </div>
-            <SourcePanel
-              key={sourcePanelEpoch}
-              sources={sources}
-              selectedIds={selectedIds}
-              busy={busy}
-              onToggle={(sourceId) => setSelectedIds((current) => {
-                const next = new Set(current);
-                if (next.has(sourceId)) next.delete(sourceId);
-                else next.add(sourceId);
-                return next;
-              })}
-              onUpload={(file) => void uploadSource(file)}
-              onDelete={(sourceId) => void deleteSource(sourceId)}
-              onAddNote={(title, text) => void addNote(title, text)}
-            />
-          </>
-        )}
-        {canGenerateWithAi && step === 1 && (
-          <div className="ai-workspace">
-            <section className="ai-workspace-card ai-workspace-input-card">
-              <span className="section-kicker">NGUỒN ĐẦU VÀO</span>
-              <h3>Phân tích {selectedIds.size} nguồn tài liệu</h3>
-              <p>AI lập kho tính năng, thuật ngữ và đánh dấu các điểm cần Admin xác minh.</p>
-              <ul className="ai-workspace-source-list">
-                {sources.filter((source) => selectedIds.has(source.sourceId)).map((source) => (
-                  <li key={source.sourceId}><CheckOutlined /><span>{source.fileName}</span></li>
-                ))}
-              </ul>
-              <div className="ai-output-summary">
-                <strong>Kết quả dự kiến</strong>
-                <span>Kho kiến thức hợp nhất</span>
-                <span>Các mâu thuẫn cần rà soát</span>
-              </div>
-            </section>
-            <section className="ai-workspace-card ai-workspace-progress-card">
-              <span className="section-kicker">TIẾN TRÌNH AI</span>
-              <AiMilestoneProgress
-                label="Phân tích tài liệu"
-                job={inventoryJob}
-                milestones={inventoryMilestones(inventoryJob, selectedIds.size)}
-              />
-            </section>
-            <div className="ai-workspace-actions">
-              <p className="ai-keep-open">Có thể đóng modal; lần mở sau app tiếp tục từ job đã lưu.</p>
-              <div className="ai-workspace-buttons">
-                <button className="button button-primary" type="button" disabled={busy || selectedIds.size === 0} onClick={() => void analyze()}>
-                  {busy ? <><LoadingOutlined spin /> Đang phân tích…</> : inventoryJob?.status === 'failed' ? <><RedoOutlined /> Thử lại</> : inventoryJob?.status === 'running' ? <><PlayCircleOutlined /> Tiếp tục phân tích</> : <><PlayCircleOutlined /> Phân tích tài liệu</>}
-                </button>
-                {inventoryJob?.status === 'running' && <button className="button button-secondary" type="button" disabled={cancelling} onClick={() => void cancelJob(inventoryJob.jobId, setInventoryJob)}>Hủy job</button>}
-              </div>
-              {cleanupStatus}
-            </div>
-          </div>
-        )}
-        {canGenerateWithAi && step === 2 && (
-          <div className="ai-workspace">
-            {templateJob?.pipelineVersion === 'module_v2' && templateJob.outline ? (
-              <section className="ai-workspace-card ai-module-stage">
-                {templateRuns.length > 1 && <nav className="ai-module-actions" aria-label="Chọn template">{templateRuns.map((run, index) => <button type="button" key={run.kind} aria-pressed={run.kind === activeTemplateRun?.kind} onClick={() => activateTemplateRun(run, index)}>{run.job?.status === 'completed' ? 'Xem' : 'Tiếp tục'} Template {index + 1}</button>)}</nav>}
-                <AiOutlineReview key={templateJob.jobId} outline={templateJob.outline} templateKind={templateJob.templateKind ?? 'normal'} responsibilities={templateJob.roleProfile?.responsibilities ?? []} busy={busy} initialModuleId={outlineFocusModuleId ?? selectedModuleId} initialPanel={outlineFocusModuleId ? 'source' : 'closed'} sourceCatalog={moduleSourceCatalog} onSupplement={(moduleLocalId, sourceIds, sectionIds) => void moduleAction('supplement_module_sources', { expectedRevision: templateJob.outline!.revision, moduleLocalId, sourceIds, sectionIds })} onEdit={(edits) => void moduleAction('update_outline', { expectedRevision: templateJob.outline!.revision, edits })} onApprove={() => void approveOutlineAndStartDrafting()} />
-              </section>
-            ) : <section className="ai-workspace-card ai-workspace-input-card">
-              {templateRuns.length > 1 && <nav className="ai-module-actions" aria-label="Chọn template">{templateRuns.map((run, index) => <button type="button" key={run.kind} aria-pressed={run.kind === activeTemplateRun?.kind} onClick={() => activateTemplateRun(run, index)}>{run.job?.status === 'completed' ? 'Xem' : 'Tiếp tục'} Template {index + 1}</button>)}</nav>}
-              <AiTemplateSelection
-                selection={templateSelection}
-                templateTitle={templateTitle}
-                responsibilities={responsibilities}
-                responsibilityCount={roleResponsibilities.length}
-                errors={requestErrors}
-                onSelect={chooseTemplateSelection}
-                onTemplateTitleChange={setTemplateTitle}
-                onResponsibilitiesChange={(value) => { setResponsibilities(value); if (roomId) writeAiResumeKey('onboarding:ai:responsibilities:' + roomId, value); }}
-              />
-              <div className="ai-output-summary">
-                <strong>Kết quả dự kiến</strong>
-                <span>1 template</span>
-                <span>Tài liệu học và câu hỏi theo từng module</span>
-              </div>
-            </section>}
-            <section className="ai-workspace-card ai-workspace-progress-card">
-              <span className="section-kicker">TIẾN TRÌNH AI</span>
-              {templateRuns.length > 1 && (
-                <div className="ai-run-sequence" aria-label="Thứ tự tạo template">
-                  {templateRuns.map((run, index) => (
-                    <span className={run.review ? 'done' : index === activeTemplateIndex ? 'active' : ''} key={run.kind}>
-                      Template {index + 1} · {run.kind === 'advanced' ? 'Chuyên sâu' : 'Thông thường'}
-                    </span>
-                  ))}
-                </div>
+    <div
+      className="dialog-backdrop ai-generator-backdrop"
+      role="presentation"
+      onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose(); }}
+    >
+      <section className="ai-generator-panel" role="dialog" aria-modal="true" aria-labelledby="ai-generator-title">
+        <header className="ai-generator-header">
+          <h2 id="ai-generator-title">Tạo template bằng AI</h2>
+          <ol className="ai-stepper" aria-label="Các bước">
+            {AI_GENERATOR_STEPS.map((label, index) => (
+              <li
+                key={label}
+                className={'ai-stepper-step' + (index === step ? ' active' : index < step ? ' done' : '')}
+                aria-current={index === step ? 'step' : undefined}
+              >
+                <span className="ai-stepper-dot" aria-hidden="true">{index < step ? <CheckOutlined /> : index + 1}</span>
+                <span className="ai-stepper-label">{label}</span>
+              </li>
+            ))}
+          </ol>
+          <button className="icon-button ai-generator-close" type="button" aria-label="Đóng" onClick={requestClose}><CloseOutlined /></button>
+        </header>
+        <InlineNotice notice={notice} className="ai-generator-notice" onDismiss={() => setNotice(null)} />
+        <div className="ai-generator-body">
+          {!canGenerateWithAi && (
+            <div className="ai-permission-blocked"><RobotOutlined /><h3>Chưa có quyền tạo nội dung AI</h3><p>Admin cần cấp quyền “Run sandbox agent” cho app trong Customize access. Các template hiện có vẫn dùng được.</p></div>
+          )}
+          {canGenerateWithAi && step === 0 && (
+            <AiStepSources
+              kind={templateSelection}
+              onKind={chooseTemplateSelection}
+              templateTitle={templateTitle}
+              onTemplateTitle={setTemplateTitle}
+              systemName={systemName}
+              onSystemName={setSystemName}
+              softwareVersion={softwareVersion}
+              effectiveDate={effectiveDate}
+              onMeta={(patch) => {
+                if (patch.softwareVersion !== undefined) setSoftwareVersion(patch.softwareVersion);
+                if (patch.effectiveDate !== undefined) setEffectiveDate(patch.effectiveDate);
+              }}
+              responsibilities={responsibilities}
+              onResponsibilities={(value) => { setResponsibilities(value); if (roomId) writeAiResumeKey('onboarding:ai:responsibilities:' + roomId, value); }}
+              errors={requestErrors}
+              sourcePanel={(
+                <SourcePanel
+                  key={sourcePanelEpoch}
+                  sources={sources}
+                  selectedIds={selectedIds}
+                  busy={busy}
+                  onToggle={(sourceId) => setSelectedIds((current) => {
+                    const next = new Set(current);
+                    if (next.has(sourceId)) next.delete(sourceId);
+                    else next.add(sourceId);
+                    return next;
+                  })}
+                  onUpload={(file) => void uploadSource(file)}
+                  onDelete={(sourceId) => void deleteSource(sourceId)}
+                  onAddNote={(title, text) => void addNote(title, text)}
+                />
               )}
-              <AiMilestoneProgress
-                label={activeTemplateRun
-                  ? `Template ${activeTemplateIndex + 1}/${templateRuns.length} · ${activeTemplateRun.kind === 'advanced' ? 'Chuyên sâu' : 'Thông thường'}`
-                  : 'Chọn loại lộ trình để bắt đầu'}
-                job={templateJob}
-                milestones={templateMilestones(templateJob)}
-              />
-            </section>
-            <div className="ai-workspace-actions">
-              <p className="ai-keep-open">{templateJob?.pipelineVersion === 'module_v2' ? 'Tiến trình được lưu theo từng module.' : 'Job được lưu riêng theo từng loại; retry chỉ tiếp tục template chưa hoàn tất.'}</p>
-              <div className="ai-workspace-buttons">
-                <button className="button button-primary" type="button" disabled={busy || requestHasErrors || (templateJob?.pipelineVersion === 'module_v2' && (templateJob.status === 'running' || templateJob.status === 'completed'))} onClick={() => void generateTemplate()}>
-                  {busy
-                    ? <><LoadingOutlined spin /> AI đang tạo nội dung…</>
-                    : <>{templateJob?.status === 'failed' ? <RedoOutlined /> : templateJob?.status === 'running' ? <PlayCircleOutlined /> : <RobotOutlined />} {templateJobActionText(templateJob?.status)}</>}
-                </button>
-                {templateJob?.status === 'running' && <button className="button button-secondary" type="button" disabled={cancelling} onClick={() => void cancelJob(templateJob.jobId, setTemplateJob)}>Hủy job</button>}
-              </div>
+            />
+          )}
+          {canGenerateWithAi && step === 1 && (
+            <div className="ai-step-coverage">
+              {outlineReady && templateJob?.outline ? (
+                <section className="ai-workspace-card ai-module-stage">
+                  <AiOutlineReview key={templateJob.jobId} outline={templateJob.outline} templateKind={templateJob.templateKind ?? 'normal'} responsibilities={templateJob.roleProfile?.responsibilities ?? []} busy={busy} initialModuleId={outlineFocusModuleId ?? selectedModuleId} initialPanel={outlineFocusModuleId ? 'source' : 'closed'} sourceCatalog={moduleSourceCatalog} onSupplement={(moduleLocalId, sourceIds, sectionIds) => void moduleAction('supplement_module_sources', { expectedRevision: templateJob.outline!.revision, moduleLocalId, sourceIds, sectionIds })} onEdit={(edits) => void moduleAction('update_outline', { expectedRevision: templateJob.outline!.revision, edits })} onApprove={() => void approveOutlineAndStartDrafting()} />
+                </section>
+              ) : (
+                <section className="ai-workspace-card ai-workspace-progress-card">
+                  <h3>{templateJob
+                    ? progressFailed ? 'AI chưa lập xong lộ trình' : 'AI đang lập lộ trình…'
+                    : progressFailed ? 'AI chưa đọc xong tài liệu' : 'AI đang đọc tài liệu…'}</h3>
+                  <AiMilestoneProgress
+                    label={templateJob ? 'Lập lộ trình' : 'Phân tích tài liệu'}
+                    job={progressJob}
+                    milestones={templateJob ? templateMilestones(templateJob) : inventoryMilestones(inventoryJob, selectedIds.size)}
+                  />
+                </section>
+              )}
               {cleanupStatus}
             </div>
-          </div>
-        )}
-        {canGenerateWithAi && step === 3 && (
-          review && activeReviewRun ? (
-            <div className="ai-review-stage">
-              {review.content?.moduleApproval && <button className="button button-secondary" type="button" disabled={busy} onClick={() => void editApprovedModules()}>Chỉnh sửa module</button>}
-              <AiReview
-                api={api}
-                review={review}
-                busy={busy}
-                sequence={{
-                  index: activeReviewIndex,
-                  total: templateRuns.length,
-                  kind: activeReviewRun.kind,
-                }}
-                onUpdated={(ops) => void updateReview(ops)}
-                onResolve={(flag, action, note, index) => void resolveFlag(flag, action, note, index)}
-              />
-              <section className="ai-review-settings-bar" aria-label="Thiết lập template đang rà soát">
-                <label className="form-field"><span>Ngưỡng đạt</span><input type="number" min={50} max={100} value={passingScore} onChange={(event) => updateActiveSettings({ passingScore: Number(event.target.value) })} /></label>
-                <label className="form-field"><span>Số lượt mỗi module</span><input type="number" min={1} max={10} value={maxAttemptsPerModule ?? ''} placeholder="Không giới hạn" onChange={(event) => updateActiveSettings({ maxAttemptsPerModule: event.target.value ? Number(event.target.value) : null })} /></label>
-                <label className="form-field"><span>Chế độ học</span><select value={learningMode} onChange={(event) => updateActiveSettings({ learningMode: event.target.value as 'sequential' | 'free' })}><option value="sequential">Tuần tự</option><option value="free">Tự do</option></select></label>
-              </section>
-            </div>
-          ) : templateJob?.pipelineVersion === 'module_v2' && templateJob.outlineApprovedRevision === templateJob.outline?.revision ? (
+          )}
+          {canGenerateWithAi && step === 2 && templateJob?.pipelineVersion === 'module_v2' && (
             <div className="ai-workspace ai-module-review-stage">
               <section className="ai-workspace-card ai-workspace-progress-card">
-                <span className="section-kicker">TIẾN TRÌNH AI</span>
-                {templateRuns.length > 1 && (
-                  <nav className="ai-run-sequence" aria-label="Chọn template">
-                    {templateRuns.map((run, index) => (
-                      <button
-                        type="button"
-                        className={run.review ? 'done' : index === activeTemplateIndex ? 'active' : ''}
-                        aria-pressed={run.kind === activeTemplateRun?.kind}
-                        key={run.kind}
-                        onClick={() => activateTemplateRun(run, index)}
-                      >{run.job ? 'Xem' : 'Tiếp tục'} Template {index + 1}</button>
-                    ))}
-                  </nav>
-                )}
                 <AiMilestoneProgress
-                  label={`Template ${activeTemplateIndex + 1}/${templateRuns.length} · ${activeTemplateRun?.kind === 'advanced' ? 'Chuyên sâu' : 'Thông thường'}`}
+                  label="AI tạo nội dung"
                   job={templateJob}
                   milestones={templateMilestones(templateJob)}
                 />
               </section>
               <section className="ai-workspace-card ai-module-stage">
                 <div className="ai-module-stage-heading">
-                  <button type="button" onClick={() => { setOutlineFocusModuleId(null); setEditingOutline(true); setStep(2); }}>Chỉnh sửa lộ trình</button>
-                  {templateJob.status === 'running' && <button className="button button-secondary" type="button" disabled={busy} onClick={() => void resumeModuleJob()}>Tiếp tục xử lý</button>}
-                  {templateJob.status === 'completed' && <button type="button" disabled={busy} onClick={() => void resumeModuleJob()}>Rà soát bản nháp</button>}
+                  <button type="button" onClick={backToOutline}>Chỉnh sửa lộ trình</button>
                 </div>
                 <AiModuleWorkspace
                   runs={templateJob.moduleRuns ?? []}
@@ -1936,161 +1837,155 @@ export function AiGeneratorPage({
                   busy={busy}
                   onSelect={(id) => { setSelectedModuleId(id); if (roomId) writeAiResumeKey('onboarding:ai:module:' + roomId, id); }}
                   onAction={(action, args) => moduleAction(action, args, action === 'approve_module_lesson' || action === 'approve_module_questions' || action === 'retry_module')}
-                  onSources={() => { setOutlineFocusModuleId(selectedModuleId || templateJob.moduleRuns?.[0]?.outline.moduleLocalId || null); setEditingOutline(true); setStep(2); }}
+                  onSources={() => { setOutlineFocusModuleId(selectedModuleId || templateJob.moduleRuns?.[0]?.outline.moduleLocalId || null); setEditingOutline(true); setStep(1); }}
                 />
               </section>
             </div>
-          ) : null
-        )}
-        {canGenerateWithAi && step === 4 && templateRuns.length > 0 && (
-          <div className="ai-publish-summary ai-publish-batch-summary">
-            <div className={publishReadiness.allowed ? 'ai-publish-status ready' : 'ai-publish-status blocked'}>
-              {publishReadiness.allowed ? <CheckOutlined /> : <RobotOutlined />}
-              <div>
-                <h3>{publishReadiness.allowed ? 'Các template sẵn sàng xuất bản' : 'Chưa thể xuất bản'}</h3>
-                <p>{publishReadiness.allowed
-                  ? `Đã rà soát đủ ${templateRuns.length} template và không còn cờ bắt buộc.`
-                  : `Còn ${publishReadiness.blockingCount} cờ bắt buộc cần xử lý.`}</p>
-              </div>
-            </div>
-            {publishProgress && (
-              <div className={'ai-publish-live-progress' + (publishProgress.error ? ' failed' : '')} role={publishProgress.error ? 'alert' : 'status'}>
-                {busy && !publishProgress.error ? <LoadingOutlined spin /> : publishProgress.error ? <CloseOutlined /> : <CheckOutlined />}
-                <div>
-                  <strong>{publishProgress.error ? 'Bước hiện tại chưa hoàn tất' : 'Đang chuẩn bị và xuất bản'}</strong>
-                  <span>{aiPublishProgressText(publishProgress)}</span>
-                  {publishProgress.error && <small>{publishProgress.error}</small>}
+          )}
+          {canGenerateWithAi && step === 3 && (
+            <div className="ai-step-review">
+              {review && activeReviewRun && (
+                <div className="ai-review-stage">
+                  {review.content?.moduleApproval && <button className="button button-secondary" type="button" disabled={busy} onClick={() => void editApprovedModules()}>Chỉnh sửa module</button>}
+                  <AiReview
+                    api={api}
+                    review={review}
+                    busy={busy}
+                    sequence={{
+                      index: activeReviewIndex,
+                      total: templateRuns.length,
+                      kind: activeReviewRun.kind,
+                    }}
+                    onUpdated={(ops) => void updateReview(ops)}
+                    onResolve={(flag, action, note, index) => void resolveFlag(flag, action, note, index)}
+                  />
+                  <section className="ai-review-settings-bar" aria-label="Thiết lập template đang rà soát">
+                    <label className="form-field"><span>Ngưỡng đạt</span><input type="number" min={50} max={100} value={passingScore} onChange={(event) => updateActiveSettings({ passingScore: Number(event.target.value) })} /></label>
+                    <label className="form-field"><span>Số lượt mỗi module</span><input type="number" min={1} max={10} value={maxAttemptsPerModule ?? ''} placeholder="Không giới hạn" onChange={(event) => updateActiveSettings({ maxAttemptsPerModule: event.target.value ? Number(event.target.value) : null })} /></label>
+                    <label className="form-field"><span>Chế độ học</span><select value={learningMode} onChange={(event) => updateActiveSettings({ learningMode: event.target.value as 'sequential' | 'free' })}><option value="sequential">Tuần tự</option><option value="free">Tự do</option></select></label>
+                  </section>
                 </div>
-              </div>
-            )}
-            <div className="ai-publish-targets">
-              {templateRuns.map((run, index) => {
-                if (!run.review) return null;
-                const runReadiness = aiReviewReadiness(run.review);
-                const publishTarget = publishTargets.find((target) => target.kind === run.kind);
-                const settings = run.settings ?? {
-                  passingScore: run.review.passingScore ?? 70,
-                  maxAttemptsPerModule: run.review.content?.maxAttemptsPerModule === undefined ? 2 : run.review.content.maxAttemptsPerModule,
-                  learningMode: run.review.content?.learningMode ?? 'sequential',
-                };
-                const questionCount = run.review.modules.reduce(
-                  (sum, module) => sum + module.questions.length,
-                  0,
-                );
-                const lessonBlockCount = run.review.content?.modules.reduce(
-                  (sum, module) => sum + module.blocks.length,
-                  0,
-                ) ?? 0;
-                return (
-                  <article className="ai-publish-target" key={run.kind}>
-                    <header>
-                      <span className="ai-sequence-badge">Template {index + 1}/{templateRuns.length}</span>
-                      <strong>{run.review.title}</strong>
-                      <small>{run.kind === 'advanced' ? 'Nhân sự chuyên sâu' : 'Nhân sự thông thường'}</small>
-                    </header>
-                    <dl>
-                      <div><dt>Module</dt><dd>{run.review.modules.length}</dd></div>
-                      <div><dt>Tài liệu học</dt><dd>{lessonBlockCount} khối</dd></div>
-                      <div><dt>Câu hỏi</dt><dd>{questionCount}</dd></div>
-                      <div><dt>Ngưỡng đạt</dt><dd>{settings.passingScore}%</dd></div>
-                      <div><dt>Số lượt</dt><dd>{settings.maxAttemptsPerModule ?? 'Không giới hạn'}</dd></div>
-                      <div><dt>Chế độ</dt><dd>{settings.learningMode === 'free' ? 'Tự do' : 'Tuần tự'}</dd></div>
-                    </dl>
-                    <span className={publishTarget?.phase === 'failed' || !runReadiness.allowed
-                      ? 'ai-target-blocked'
-                      : 'ai-target-ready'}>
-                      {publishTarget
-                        ? AI_PUBLISH_PHASE_LABELS[publishTarget.phase]
-                        : runReadiness.allowed ? 'Sẵn sàng' : `${runReadiness.blockingCount} cờ bắt buộc`}
-                    </span>
-                    {publishTarget?.error && <small className="ai-publish-target-error" role="alert">{publishTarget.error}</small>}
-                  </article>
-                );
-              })}
+              )}
+              {templateRuns.length > 0 && templateRuns.every((run) => run.review) && (
+                <div className="ai-publish-summary ai-publish-batch-summary">
+                  {publishProgress && (
+                    <div className={'ai-publish-live-progress' + (publishProgress.error ? ' failed' : '')} role={publishProgress.error ? 'alert' : 'status'}>
+                      {busy && !publishProgress.error ? <LoadingOutlined spin /> : publishProgress.error ? <CloseOutlined /> : <CheckOutlined />}
+                      <div>
+                        <strong>{publishProgress.error ? 'Bước hiện tại chưa hoàn tất' : 'Đang chuẩn bị và xuất bản'}</strong>
+                        <span>{aiPublishProgressText(publishProgress)}</span>
+                        {publishProgress.error && <small>{publishProgress.error}</small>}
+                      </div>
+                    </div>
+                  )}
+                  <div className="ai-publish-targets">
+                    {templateRuns.map((run, index) => {
+                      if (!run.review) return null;
+                      const runReadiness = aiReviewReadiness(run.review);
+                      const publishTarget = publishTargets.find((target) => target.kind === run.kind);
+                      const settings = run.settings ?? {
+                        passingScore: run.review.passingScore ?? 70,
+                        maxAttemptsPerModule: run.review.content?.maxAttemptsPerModule === undefined ? 2 : run.review.content.maxAttemptsPerModule,
+                        learningMode: run.review.content?.learningMode ?? 'sequential',
+                      };
+                      const questionCount = run.review.modules.reduce(
+                        (sum, module) => sum + module.questions.length,
+                        0,
+                      );
+                      const lessonBlockCount = run.review.content?.modules.reduce(
+                        (sum, module) => sum + module.blocks.length,
+                        0,
+                      ) ?? 0;
+                      return (
+                        <article className="ai-publish-target" key={run.kind}>
+                          <header>
+                            <span className="ai-sequence-badge">Template {index + 1}/{templateRuns.length}</span>
+                            <strong>{run.review.title}</strong>
+                            <small>{run.kind === 'advanced' ? 'Nâng cao' : 'Thông thường'}</small>
+                          </header>
+                          <dl>
+                            <div><dt>Module</dt><dd>{run.review.modules.length}</dd></div>
+                            <div><dt>Tài liệu học</dt><dd>{lessonBlockCount} khối</dd></div>
+                            <div><dt>Câu hỏi</dt><dd>{questionCount}</dd></div>
+                            <div><dt>Ngưỡng đạt</dt><dd>{settings.passingScore}%</dd></div>
+                            <div><dt>Số lượt</dt><dd>{settings.maxAttemptsPerModule ?? 'Không giới hạn'}</dd></div>
+                            <div><dt>Chế độ</dt><dd>{settings.learningMode === 'free' ? 'Tự do' : 'Tuần tự'}</dd></div>
+                          </dl>
+                          <span className={publishTarget?.phase === 'failed' || !runReadiness.allowed
+                            ? 'ai-target-blocked'
+                            : 'ai-target-ready'}>
+                            {publishTarget
+                              ? AI_PUBLISH_PHASE_LABELS[publishTarget.phase]
+                              : runReadiness.allowed ? 'Sẵn sàng' : `${runReadiness.blockingCount} cờ bắt buộc`}
+                          </span>
+                          {publishTarget?.error && <small className="ai-publish-target-error" role="alert">{publishTarget.error}</small>}
+                        </article>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
-            <button
-              className="button button-primary"
-              type="button"
-              disabled={busy || !publishReadiness.allowed}
-              onClick={() => void publish()}
-            >
-              <RocketOutlined /> {busy
-                ? 'Đang chuẩn bị và xuất bản…'
-                : publishTargets.some((target) => target.phase === 'failed')
-                  ? 'Thử lại xuất bản'
-                  : 'Xuất bản template'}
-            </button>
-          </div>
-        )}
-      </div>
-      {canGenerateWithAi && (
-        <footer className="ai-generator-footer">
-          <div>
-            {!initialTemplate && (
-              <button className="button button-danger" type="button" disabled={busy || resetting || restoring} onClick={() => setResetConfirmOpen(true)}>
-                <DeleteOutlined /> Xóa dữ liệu
-              </button>
-            )}
-            <button
-              className="button button-secondary"
-              type="button"
-              disabled={busy || resetting || step === 0 || publishTargets.some((target) => Boolean(target.publishedTemplate))
-                || (Boolean(initialTemplate) && step !== 3) || (step === 3 && Boolean(review))}
-              onClick={() => {
-                if (step === 3 && !review) {
-                  setOutlineFocusModuleId(null);
-                  setEditingOutline(true);
-                  setStep(2);
-                } else if (step === 4) {
-                  setActiveReviewIndex(Math.max(0, templateRuns.length - 1));
-                  setStep(3);
-                } else {
-                  setStep((value) => Math.max(0, value - 1));
-                }
-              }}
-            >Quay lại</button>
-          </div>
-          <div>
-            {step === 0 && <button className="button button-primary" type="button" disabled={selectedIds.size === 0} onClick={() => setStep(1)}>Tiếp tục</button>}
-            {step === 1 && inventoryJob?.status === 'completed' && <button className="button button-primary" type="button" onClick={() => setStep(2)}>Chọn loại lộ trình</button>}
-            {step === 3 && review && (
-              <>
-                {!reviewNavigation.canNext && reviewNavigation.blockingCount > 0 && (
-                  <span className="ai-review-blocking-note">Còn {reviewNavigation.blockingCount} cờ bắt buộc</span>
-                )}
+          )}
+        </div>
+        {canGenerateWithAi && (
+          <footer className="ai-generator-footer">
+            <div className="ai-generator-footer-start">
+              {!initialTemplate && (
+                <button className="button button-ghost" type="button" disabled={busy || resetting || restoring} onClick={() => setResetConfirmOpen(true)}>
+                  Xóa phiên
+                </button>
+              )}
+              {!initialTemplate && (step === 1 || step === 2) && (
                 <button
-                  className="button button-primary"
+                  className="button button-ghost"
                   type="button"
-                  disabled={busy || !reviewNavigation.canNext}
-                  onClick={() => {
-                    setStep(4);
-                  }}
-                >Kiểm tra xuất bản</button>
-              </>
-            )}
-            {step === 4 && !publishReadiness.allowed && (
-              <button className="button button-secondary" type="button" onClick={() => {
-                const blockedIndex = templateRuns.findIndex((run) => !aiReviewReadiness(run.review).allowed);
-                setActiveReviewIndex(blockedIndex >= 0 ? blockedIndex : 0);
-                setStep(3);
-              }}>Xử lý cờ bắt buộc</button>
-            )}
-          </div>
-        </footer>
-      )}
-      {!initialTemplate && (
+                  disabled={busy || resetting}
+                  onClick={() => { if (step === 2) backToOutline(); else setStep(0); }}
+                >Quay lại</button>
+              )}
+              {progressCancellable && progressJob && (
+                <button
+                  className="button button-ghost"
+                  type="button"
+                  disabled={cancelling}
+                  onClick={() => void cancelJob(progressJob.jobId, templateJob ? setTemplateJob : setInventoryJob)}
+                >Hủy job</button>
+              )}
+            </div>
+            <div className="ai-generator-footer-end">
+              {hint && <span className="ai-generator-hint">{hint}</span>}
+              {primary && (
+                <button className="button button-primary" type="button" disabled={primary.disabled} onClick={primary.onClick}>
+                  {busy && <LoadingOutlined spin />}{primary.label}
+                </button>
+              )}
+            </div>
+          </footer>
+        )}
+        {!initialTemplate && (
+          <ConfirmDialog
+            open={resetConfirmOpen}
+            danger
+            title="Xóa dữ liệu tạo template?"
+            description="Tiến trình AI, lộ trình, bài học, câu hỏi và các bản nháp chưa xuất bản của phiên này sẽ bị xóa. Nguồn đã thêm vẫn được giữ nguyên."
+            confirmLabel="Xóa dữ liệu"
+            busy={resetting}
+            busyLabel="Đang xóa…"
+            onCancel={() => { if (!resetting) setResetConfirmOpen(false); }}
+            onConfirm={() => void resetGeneratorSession()}
+          />
+        )}
         <ConfirmDialog
-          open={resetConfirmOpen}
-          danger
-          title="Xóa dữ liệu tạo template?"
-          description="Tiến trình AI, lộ trình, bài học, câu hỏi và các bản nháp chưa xuất bản của phiên này sẽ bị xóa. Nguồn đã thêm vẫn được giữ nguyên."
-          confirmLabel="Xóa dữ liệu"
-          busy={resetting}
-          busyLabel="Đang xóa…"
-          onCancel={() => { if (!resetting) setResetConfirmOpen(false); }}
-          onConfirm={() => void resetGeneratorSession()}
+          open={closeConfirmOpen}
+          title="Đóng cửa sổ?"
+          description="AI đang tạo nội dung. Nếu đóng, AI sẽ tạm dừng và tiếp tục khi bạn mở lại."
+          confirmLabel="Đóng và tạm dừng"
+          cancelLabel="Tiếp tục ở lại"
+          onCancel={() => setCloseConfirmOpen(false)}
+          onConfirm={() => { setCloseConfirmOpen(false); onClose(); }}
         />
-      )}
-    </section>
+      </section>
+    </div>
   );
 }

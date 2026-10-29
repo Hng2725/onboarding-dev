@@ -55,7 +55,8 @@ function deferred<T>() {
 }
 
 function activeStepLabel(view: TestRenderer.ReactTestRenderer): string {
-  return view.root.findAllByType('li').find((item) => item.props.className === 'active')!.findByType('small').children.join('');
+  return view.root.findByProps({ 'aria-label': 'Các bước' }).findAll((item) => item.type === 'li' && item.props['aria-current'] === 'step')[0]
+    .findByProps({ className: 'ai-stepper-label' }).children.join('');
 }
 
 const inventoryJob: AiJobRecord = {
@@ -187,7 +188,7 @@ describe('AI generator lifecycle', () => {
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, {
       api: api as never, canGenerateWithAi: true, onClose: closed, onComplete: completed,
     })); });
-    expect(activeStepLabel(view)).toBe('Tài liệu nguồn');
+    expect(activeStepLabel(view)).toBe('Nguồn & loại');
     const sourceList = view.root.findByProps({ 'aria-label': 'Danh sách tài liệu nguồn' });
     expect(sourceList.findByType('input').props.checked).toBe(true);
     expect(sourceList.findAllByType('strong').some((item) => item.children.join('') === 'orders.md')).toBe(true);
@@ -227,7 +228,7 @@ describe('AI generator lifecycle', () => {
     expect(JSON.stringify(view.toJSON())).toContain('Đã hoàn tất');
     view.unmount(); vi.unstubAllGlobals();
   });
-  it('keeps final materialized review in Rà soát and goes to the publish summary on explicit next', async () => {
+  it('opens a final materialized review with its publish action in the same step', async () => {
     const storage = new Map([['onboarding:ai:template:room-1:normal', 'template-1'], ['onboarding:ai:selection:room-1', 'both']]);
     vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
     const review = materializedModuleReview();
@@ -240,9 +241,10 @@ describe('AI generator lifecycle', () => {
     }) };
     let view!: TestRenderer.ReactTestRenderer;
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-    expect(activeStepLabel(view)).toBe('Rà soát');
-    const next = view.root.findAllByType('button').find((button) => button.children.join('') === 'Kiểm tra xuất bản');
-    expect(next).toBeDefined();
+    expect(activeStepLabel(view)).toBe('Xem lại & xuất bản');
+    const publish = view.root.findByType('footer').findAllByProps({ className: 'button button-primary' });
+    expect(publish).toHaveLength(1);
+    expect(publish[0].children.join('')).toBe('Xuất bản template');
     expect(view.root.findAllByType('button').some((button) => button.children.join('').includes('Template 2'))).toBe(false);
     expect(view.root.findByProps({ 'aria-label': 'Sửa khối nội dung' }).props.disabled).toBe(true);
     expect(view.root.findAllByType('button').some((button) => button.children.join('') === 'Chỉnh sửa module')).toBe(true);
@@ -282,7 +284,7 @@ describe('AI generator lifecycle', () => {
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, initialTemplate: { id: review.id, version: review.version }, onClose: () => undefined, onComplete: () => undefined })); });
 
     await act(async () => { view.root.findAllByType('button').find((button) => button.children.join('') === 'Chỉnh sửa module')!.props.onClick(); });
-    expect(activeStepLabel(view)).toBe('Rà soát');
+    expect(activeStepLabel(view)).toBe('AI tạo nội dung');
     expect(view.root.findByProps({ 'aria-label': 'Danh sách module' })).toBeDefined();
     expect(JSON.stringify(view.toJSON())).not.toContain('Kiểm tra lộ trình đề xuất');
     view.unmount();
@@ -374,13 +376,15 @@ describe('AI generator lifecycle', () => {
       await Promise.resolve();
     });
 
+    // The failed plan opens on the coverage step with a retry; the restored role profile lives on step 1.
+    const [retryButton] = renderer.root.findByType('footer').findAllByProps({ className: 'button button-primary' });
+    expect(retryButton.children.join('')).toBe('Thử lại');
+    expect(retryButton.props.disabled).toBe(false);
+    act(() => renderer.root.findAllByType('button').find((button) => button.children.join('') === 'Quay lại')!.props.onClick());
     const textarea = renderer.root.findByType('textarea');
     expect(textarea.props.value).toBe(failedTemplateJob.roleProfile?.responsibilities.join('\n'));
     expect(renderer.root.findAllByType('select')).toHaveLength(0);
     expect(JSON.stringify(renderer.toJSON())).not.toContain('Chức danh');
-    const [retryButton] = renderer.root.findAllByProps({ className: 'button button-primary' });
-    expect(retryButton).toBeDefined();
-    expect(retryButton.props.disabled).toBe(false);
     renderer.unmount();
   });
 
@@ -432,7 +436,11 @@ describe('AI generator lifecycle', () => {
         onComplete: () => undefined,
       }));
     });
-    const analyze = renderer.root.findAllByProps({ className: 'button button-primary' })[0];
+    // The restored running inventory is resumed by step 1's "Phân tích tài liệu" once a kind is chosen.
+    const normal = renderer.root.findAll((node) => node.type === 'button' && node.props.role === 'radio')[0];
+    act(() => normal.props.onClick());
+    const analyze = renderer.root.findByType('footer').findAllByProps({ className: 'button button-primary' })[0];
+    expect(analyze.props.disabled).toBe(false);
     act(() => analyze.props.onClick());
     await reloadStarted.promise;
 
@@ -455,12 +463,12 @@ it('reopens a completed module job without routing to legacy review', async () =
   const api = { adminAi: vi.fn(async (action: string) => { if (action === 'list_sources') return { sources: [] }; if (action === 'list_jobs') return { jobs: [inventoryJob, job] }; throw new Error('Unexpected action: ' + action); }) };
   let view!: TestRenderer.ReactTestRenderer;
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-  expect(view.root.findAllByType('button').some((button) => button.children.join('') === 'Rà soát bản nháp')).toBe(true);
+  expect(view.root.findAllByType('button').some((button) => button.children.join('') === 'Xem lại template')).toBe(true);
   expect(api.adminAi).not.toHaveBeenCalledWith('get_review', expect.anything());
   view.unmount(); vi.unstubAllGlobals();
 });
 
-it('restores an approved running module job directly in Rà soát', async () => {
+it('restores an approved running module job directly in AI tạo nội dung', async () => {
   const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
   vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
   const modules = ['First', 'Second'].map((title, order) => ({ moduleLocalId: `m${order}`, frameKey: order ? 't1-core' : 't1-overview', order, title, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [] }));
@@ -469,7 +477,7 @@ it('restores an approved running module job directly in Rà soát', async () => 
   const page = () => createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined });
   let view!: TestRenderer.ReactTestRenderer;
   await act(async () => { view = TestRenderer.create(page()); });
-  expect(activeStepLabel(view)).toBe('Rà soát');
+  expect(activeStepLabel(view)).toBe('AI tạo nội dung');
   const second = view.root.findByProps({ 'aria-label': 'Danh sách module' }).findAllByType('button')[1];
   act(() => second.props.onClick());
   expect(storage.get('onboarding:ai:module:room-1')).toBe('m1');
@@ -480,7 +488,7 @@ it('restores an approved running module job directly in Rà soát', async () => 
   view.unmount(); vi.unstubAllGlobals();
 });
 
-it('moves to Rà soát immediately after outline approval and starts the module pump', async () => {
+it('moves to AI tạo nội dung immediately after outline approval and starts the module pump', async () => {
   const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
   vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
   const modules = ['t1-overview', 't1-access', 't1-navigation', 't1-core'].map((frameKey, order) => ({ moduleLocalId: `m${order}`, frameKey, order, title: frameKey, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] }));
@@ -489,17 +497,17 @@ it('moves to Rà soát immediately after outline approval and starts the module 
   const api = { adminAi: vi.fn(async (action: string) => { if (action === 'list_sources') return { sources: [] }; if (action === 'list_jobs') return { jobs: [inventoryJob, job] }; if (action === 'approve_outline') return { job: approved }; if (action === 'next_step') return { kind: 'awaiting_admin', job: approved }; throw new Error('Unexpected action: ' + action); }) };
   let view!: TestRenderer.ReactTestRenderer;
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-  expect(activeStepLabel(view)).toBe('Tạo lộ trình');
+  expect(activeStepLabel(view)).toBe('Kiểm tra độ phủ');
   expect(api.adminAi.mock.calls.some(([action]) => action === 'next_step')).toBe(false);
   const button = view.root.findAllByType('button').find((item) => item.children.join('') === 'Duyệt lộ trình và tiếp tục')!;
   await act(async () => { button.props.onClick(); });
   expect(api.adminAi).toHaveBeenCalledWith('approve_outline', { jobId: 'template-1', expectedRevision: 4 });
   expect(api.adminAi).toHaveBeenCalledWith('next_step', expect.objectContaining({ jobId: 'template-1' }));
-  expect(activeStepLabel(view)).toBe('Rà soát');
+  expect(activeStepLabel(view)).toBe('AI tạo nội dung');
   view.unmount(); vi.unstubAllGlobals();
 });
 
-it('returns to Tạo lộ trình when outline approval fails', async () => {
+it('returns to Kiểm tra độ phủ when outline approval fails', async () => {
   const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
   vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
   const modules = ['t1-overview', 't1-access', 't1-navigation', 't1-core'].map((frameKey, order) => ({ moduleLocalId: `m${order}`, frameKey, order, title: frameKey, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] }));
@@ -515,9 +523,9 @@ it('returns to Tạo lộ trình when outline approval fails', async () => {
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
 
   act(() => { view.root.findAllByType('button').find((item) => item.children.join('') === 'Duyệt lộ trình và tiếp tục')!.props.onClick(); });
-  expect(activeStepLabel(view)).toBe('Rà soát');
+  expect(activeStepLabel(view)).toBe('AI tạo nội dung');
   await act(async () => { approval.reject(new Error('Approval failed')); await Promise.resolve(); await Promise.resolve(); });
-  expect(activeStepLabel(view)).toBe('Tạo lộ trình');
+  expect(activeStepLabel(view)).toBe('Kiểm tra độ phủ');
   view.unmount(); vi.unstubAllGlobals();
 });
 
@@ -536,7 +544,7 @@ it('opens the selected outline source panel from a source-less review module', a
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
 
   await act(async () => { view.root.findAllByType('button').find((item) => item.children.join('') === 'Bổ sung tài liệu')!.props.onClick(); await Promise.resolve(); });
-  expect(activeStepLabel(view)).toBe('Tạo lộ trình');
+  expect(activeStepLabel(view)).toBe('Kiểm tra độ phủ');
   expect(view.root.findByProps({ 'aria-label': 'Chọn tài liệu bổ sung' })).toBeDefined();
   view.unmount(); vi.unstubAllGlobals();
 });
@@ -658,7 +666,7 @@ describe('AI generator reset UI', () => {
     updatedAt: '2026-10-29T00:00:00.000Z',
   };
 
-  it('shows Xóa dữ liệu only for a new generator and cancelling confirmation changes nothing', async () => {
+  it('shows Xóa phiên only for a new generator and cancelling confirmation changes nothing', async () => {
     const api = { adminAi: vi.fn(async (action: string) => {
       if (action === 'list_sources') return { sources: [source] };
       if (action === 'list_jobs') return { jobs: [] };
@@ -667,12 +675,12 @@ describe('AI generator reset UI', () => {
     let view!: TestRenderer.ReactTestRenderer;
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
 
-    const reset = view.root.findAllByType('button').find((button) => button.children.join('').includes('Xóa dữ liệu'))!;
+    const reset = view.root.findAllByType('button').find((button) => button.children.join('') === 'Xóa phiên')!;
     expect(reset).toBeDefined();
     act(() => reset.props.onClick());
     expect(view.root.findByProps({ 'aria-labelledby': 'confirm-title' })).toBeDefined();
     act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Hủy')!.props.onClick());
-    expect(activeStepLabel(view)).toBe('Tài liệu nguồn');
+    expect(activeStepLabel(view)).toBe('Nguồn & loại');
     expect(api.adminAi.mock.calls.map(([action]) => action)).toEqual(['list_sources', 'list_jobs']);
     view.unmount();
 
@@ -683,7 +691,7 @@ describe('AI generator reset UI', () => {
       throw new Error('Unexpected action: ' + action);
     }) };
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: reviewApi as never, initialTemplate: { id: existing.id, version: existing.version }, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-    expect(view.root.findAllByType('button').some((button) => button.children.join('').includes('Xóa dữ liệu'))).toBe(false);
+    expect(view.root.findAllByType('button').some((button) => button.children.join('') === 'Xóa phiên')).toBe(false);
     view.unmount();
   });
 
@@ -726,8 +734,8 @@ describe('AI generator reset UI', () => {
     };
     let view!: TestRenderer.ReactTestRenderer;
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-    expect(activeStepLabel(view)).toBe('Xuất bản');
-    act(() => view.root.findAllByType('button').find((button) => button.children.join('').includes('Xóa dữ liệu'))!.props.onClick());
+    expect(activeStepLabel(view)).toBe('Xem lại & xuất bản');
+    act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Xóa phiên')!.props.onClick());
     act(() => view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => button.children.join('') === 'Xóa dữ liệu')!.props.onClick());
     const deleting = view.root.findAllByType('button').find((button) => button.children.join('').includes('Đang xóa…'))!;
     expect(deleting.props.disabled).toBe(true);
@@ -738,7 +746,7 @@ describe('AI generator reset UI', () => {
     expect(api.adminTemplates).toHaveBeenCalledWith('delete', { templateId: draft.id, version: draft.version });
     expect(sourceLoads).toBe(2);
     expect(storage.size).toBe(0);
-    expect(activeStepLabel(view)).toBe('Tài liệu nguồn');
+    expect(activeStepLabel(view)).toBe('Nguồn & loại');
     expect(view.root.findByProps({ 'aria-label': 'Danh sách tài liệu nguồn' }).findByType('input').props.checked).toBe(true);
     expect(api.adminAi.mock.calls.some(([action]) => action === 'delete_source')).toBe(false);
     view.unmount(); vi.unstubAllGlobals();
@@ -752,17 +760,17 @@ describe('AI generator reset UI', () => {
         if (sourceLoads === 2) throw new Error('Cannot reload sources');
         return { sources: [source] };
       }
-      if (action === 'list_jobs') return { jobs: [] };
+      if (action === 'list_jobs') return { jobs: [inventoryJob, failedTemplateJob] };
+      if (action === 'cancel_job') return { job: { ...failedTemplateJob, status: 'cancelled' as const } };
       throw new Error('Unexpected action: ' + action);
     }), adminTemplates: vi.fn() };
     let view!: TestRenderer.ReactTestRenderer;
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-    act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Tiếp tục')!.props.onClick());
-    expect(activeStepLabel(view)).toBe('Phân tích');
-    act(() => view.root.findAllByType('button').find((button) => button.children.join('').includes('Xóa dữ liệu'))!.props.onClick());
+    expect(activeStepLabel(view)).toBe('Kiểm tra độ phủ');
+    act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Xóa phiên')!.props.onClick());
     await act(async () => { view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => button.children.join('') === 'Xóa dữ liệu')!.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
 
-    expect(activeStepLabel(view)).toBe('Phân tích');
+    expect(activeStepLabel(view)).toBe('Kiểm tra độ phủ');
     expect(JSON.stringify(view.toJSON())).toContain('Không thể hoàn tất yêu cầu AI.');
     view.unmount();
   });
@@ -775,9 +783,9 @@ describe('AI generator reset UI', () => {
     }), adminTemplates: vi.fn() };
     let view!: TestRenderer.ReactTestRenderer;
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-    act(() => view.root.findAllByType('button').find((button) => button.children.join('').includes('Thêm ghi chú Admin'))!.props.onClick());
+    act(() => view.root.findAllByType('button').find((button) => button.children.join('').includes('Thêm ghi chú văn bản'))!.props.onClick());
     expect(view.root.findAllByType('textarea')).toHaveLength(1);
-    act(() => view.root.findAllByType('button').find((button) => button.children.join('').includes('Xóa dữ liệu'))!.props.onClick());
+    act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Xóa phiên')!.props.onClick());
     await act(async () => { view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => button.children.join('') === 'Xóa dữ liệu')!.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
 
     expect(view.root.findAllByType('textarea')).toHaveLength(0);
@@ -807,14 +815,14 @@ describe('AI generator reset UI', () => {
     };
     let view!: TestRenderer.ReactTestRenderer;
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-    expect(activeStepLabel(view)).toBe('Xuất bản');
+    expect(activeStepLabel(view)).toBe('Xem lại & xuất bản');
 
-    act(() => view.root.findAllByType('button').find((button) => button.children.join('').includes('Xóa dữ liệu'))!.props.onClick());
+    act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Xóa phiên')!.props.onClick());
     await act(async () => { view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => button.children.join('') === 'Xóa dữ liệu')!.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
 
     expect(reviewLoads).toBe(2);
     expect(api.adminTemplates).not.toHaveBeenCalled();
-    expect(activeStepLabel(view)).toBe('Tài liệu nguồn');
+    expect(activeStepLabel(view)).toBe('Nguồn & loại');
     view.unmount();
   });
 
@@ -830,13 +838,13 @@ describe('AI generator reset UI', () => {
       view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined }));
       await Promise.resolve();
     });
-    const resetButton = () => view.root.findAllByType('button').find((button) => button.children.join('').includes('Xóa dữ liệu'))!;
+    const resetButton = () => view.root.findAllByType('button').find((button) => button.children.join('') === 'Xóa phiên')!;
     expect(resetButton().props.disabled).toBe(true);
 
     await act(async () => { jobs.resolve({ jobs: [] }); await Promise.resolve(); await Promise.resolve(); });
 
     expect(resetButton().props.disabled).toBe(false);
-    expect(activeStepLabel(view)).toBe('Tài liệu nguồn');
+    expect(activeStepLabel(view)).toBe('Nguồn & loại');
     view.unmount();
   });
 });

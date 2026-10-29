@@ -148,6 +148,7 @@ export function ConfirmDialog({
   title,
   description,
   confirmLabel = 'Xác nhận',
+  cancelLabel = 'Hủy',
   danger = false,
   busy = false,
   busyLabel = 'Đang xử lý…',
@@ -158,6 +159,7 @@ export function ConfirmDialog({
   title: string;
   description: string;
   confirmLabel?: string;
+  cancelLabel?: string;
   danger?: boolean;
   busy?: boolean;
   busyLabel?: string;
@@ -172,7 +174,7 @@ export function ConfirmDialog({
         <h2 id="confirm-title">{title}</h2>
         <p>{description}</p>
         <div className="dialog-actions">
-          <button className="button button-secondary" type="button" disabled={busy} onClick={onCancel}>Hủy</button>
+          <button className="button button-secondary" type="button" disabled={busy} onClick={onCancel}>{cancelLabel}</button>
           <button className={danger ? 'button button-danger' : 'button button-primary'} type="button" disabled={busy} onClick={onConfirm}>
             {busy ? <><LoadingOutlined spin aria-hidden="true" /> {busyLabel}</> : confirmLabel}
           </button>

@@ -1,0 +1,97 @@
+/*
+ * AI template generator: modal shell (header stepper, body, footer) and step 1 "Nguồn & loại".
+ * Colours come from the --on-* tokens so light and dark themes both work. Colour marks state only:
+ * success = done, warning = needs action, primary = running/selected, danger = error.
+ */
+
+/* Shell */
+.ai-generator-header { display: flex; align-items: center; gap: 24px; padding: 16px 24px; border-bottom: 1px solid var(--on-border); }
+.ai-generator-header h2 { margin: 0; font-size: 17px; white-space: nowrap; }
+.ai-generator-close { flex: 0 0 auto; width: 32px; height: 32px; min-height: 32px; border-radius: 8px; }
+
+.ai-stepper { display: flex; flex: 1; align-items: center; justify-content: center; gap: 10px; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.ai-stepper-step { display: flex; align-items: center; gap: 8px; color: var(--on-text-soft); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.ai-stepper-step + .ai-stepper-step::before { width: 36px; height: 1px; margin-right: 2px; background: var(--on-border); content: ""; }
+.ai-stepper-dot { display: grid; flex: none; place-items: center; width: 22px; height: 22px; border: 1px solid var(--on-border); border-radius: 50%; font-size: 11px; }
+.ai-stepper-step.done .ai-stepper-dot { border-color: transparent; color: var(--on-success); background: color-mix(in srgb, var(--on-success) 14%, transparent); }
+.ai-stepper-step.active { color: var(--on-text); }
+.ai-stepper-step.active .ai-stepper-dot { border-color: var(--on-primary); color: var(--on-primary-contrast); background: var(--on-primary); }
+
+.ai-generator-body { flex: 1 1 auto; min-height: 0; padding: 28px 32px; overflow: auto; overflow-x: hidden; }
+
+.ai-generator-footer { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 16px; min-height: 64px; padding: 12px 24px; padding-right: 88px; border-top: 1px solid var(--on-border); background: var(--on-surface-raised); }
+.ai-generator-footer-start, .ai-generator-footer-end { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.ai-generator-footer-end { gap: 14px; margin-left: auto; }
+.ai-generator-hint { color: var(--on-text-soft); font-size: 13px; }
+.ai-generator-footer .button-primary { min-height: 38px; padding: 0 16px; }
+
+.ai-generator-panel .button:disabled { cursor: not-allowed; opacity: .45; transform: none; box-shadow: none; }
+.ai-generator-panel .button-ghost { border-color: transparent; color: var(--on-text-soft); background: transparent; box-shadow: none; }
+.ai-generator-panel .button-ghost:hover:not(:disabled) { color: var(--on-text); background: color-mix(in srgb, var(--on-text) 7%, transparent); transform: none; }
+.ai-generator-panel .button-sm { min-height: 30px; padding: 0 10px; border-radius: 8px; font-size: 13px; }
+
+.ai-generator-panel .ai-workspace-card { border-radius: var(--on-radius-md); box-shadow: none; }
+.ai-workspace-progress-card > h3 { margin: 0; font-size: 15px; }
+.ai-step-coverage { display: grid; gap: 16px; }
+
+/* Step 1: Nguồn & loại */
+.ai-step-sources { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; }
+.ai-step-sources-form, .ai-sources { display: grid; align-content: start; gap: 20px; min-width: 0; }
+.ai-sources { gap: 10px; }
+.ai-label { display: block; margin-bottom: 8px; color: var(--on-text-soft); font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.ai-label small { font-weight: 400; letter-spacing: 0; text-transform: none; }
+/* Keep a section label 8px above its control inside the gapped grids. */
+.ai-step-sources-form > .ai-label { margin-bottom: -12px; }
+.ai-sources > .ai-label { margin-bottom: -2px; }
+
+.ai-kind-options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.ai-generator-panel .ai-kind-option { display: grid; align-content: start; gap: 4px; min-height: 30px; padding: 16px; border: 1px solid var(--on-border); border-radius: var(--on-radius-md); color: var(--on-text); background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.ai-kind-option strong { font-size: 14px; }
+.ai-kind-option span { color: var(--on-text-soft); font-size: 13px; }
+.ai-generator-panel .ai-kind-option.selected { border-color: var(--on-primary); background: var(--on-primary-soft); }
+
+.ai-field { display: grid; min-width: 0; margin: 0; }
+.ai-generator-panel .ai-field input, .ai-generator-panel .ai-field textarea { width: 100%; min-height: 40px; padding: 0 12px; border: 1px solid var(--on-border); border-radius: 10px; outline: 0; color: var(--on-text); background: var(--on-bg); font: inherit; font-size: 14px; }
+.ai-generator-panel .ai-field textarea { padding: 10px 12px; resize: vertical; }
+.ai-generator-panel .ai-field input:focus, .ai-generator-panel .ai-field textarea:focus { border-color: var(--on-primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--on-primary) 15%, transparent); }
+.ai-field > small { margin-top: 6px; color: var(--on-text-soft); }
+.ai-field > .ai-field-error { margin-top: 4px; }
+
+.ai-more > summary { display: flex; align-items: center; min-height: 30px; color: var(--on-text-soft); font-weight: 600; cursor: pointer; }
+.ai-more-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+
+.ai-drop { position: relative; display: flex; align-items: center; gap: 14px; min-height: 64px; padding: 18px; border: 1px dashed var(--on-border); border-radius: var(--on-radius-md); color: var(--on-text-soft); cursor: pointer; }
+.ai-drop:hover, .ai-drop.dragging { border-color: var(--on-primary); background: var(--on-primary-soft); }
+.ai-drop.busy { cursor: progress; }
+.ai-drop-icon { color: var(--on-primary); font-size: 20px; }
+.ai-drop strong { display: block; color: var(--on-primary); }
+.ai-drop small { color: var(--on-text-soft); }
+.ai-drop input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); opacity: 0; }
+.ai-kind-option:focus-visible, .ai-drop:focus-within { outline: 3px solid color-mix(in srgb, var(--on-primary) 35%, transparent); outline-offset: 2px; }
+
+.ai-source-files { display: grid; gap: 8px; margin-top: 4px; }
+.ai-source-file { display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 12px; border: 1px solid var(--on-border); border-radius: 10px; }
+.ai-source-file.selected { border-color: color-mix(in srgb, var(--on-primary) 45%, var(--on-border)); }
+.ai-source-file label { display: flex; flex: 1; align-items: center; gap: 12px; min-width: 0; min-height: 30px; cursor: pointer; }
+.ai-source-file input[type='checkbox'] { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--on-primary); }
+.ai-source-badge { display: grid; flex: none; place-items: center; width: 30px; height: 30px; border-radius: 8px; color: var(--on-primary); background: var(--on-primary-soft); font-size: 11px; font-weight: 700; }
+.ai-source-name { min-width: 0; }
+.ai-source-name strong, .ai-source-name small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-source-name small { color: var(--on-text-soft); }
+.ai-source-none { margin: 0; color: var(--on-text-soft); font-size: 13px; }
+.ai-note-toggle { justify-self: start; }
+
+@media (max-width: 900px) {
+  .ai-generator-header { flex-wrap: wrap; gap: 12px; padding: 14px 16px; }
+  .ai-generator-close { margin-left: auto; }
+  .ai-stepper { flex-basis: 100%; order: 3; justify-content: flex-start; gap: 6px; }
+  .ai-stepper-step + .ai-stepper-step::before { width: 14px; }
+  .ai-stepper-step:not(.active) .ai-stepper-label { display: none; }
+  .ai-generator-body { padding: 20px 16px; }
+  .ai-step-sources { grid-template-columns: 1fr; gap: 24px; }
+  .ai-generator-footer { flex-wrap: wrap; padding: 12px 16px; padding-right: 88px; }
+}
+
+@media (max-width: 480px) {
+  .ai-kind-options, .ai-more-fields { grid-template-columns: 1fr; }
+}
