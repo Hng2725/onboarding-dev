@@ -1,5 +1,5 @@
 ﻿import { describe, expect, it } from 'vitest';
-import { applyTemplateOutlineEdits, buildTemplateOutline, validateTemplateOutline } from '../src/onboarding/ai/outline';
+import { applyTemplateOutlineEdits, buildTemplateOutline, normalizeOutlineModuleCount, validateTemplateOutline } from '../src/onboarding/ai/outline';
 import type { FeatureInventory } from '../src/onboarding/ai/inventory';
 import { validateAdminOutline } from '../src/onboarding/ai/outline-validation';
 
@@ -115,5 +115,91 @@ describe('outline source and required-frame safeguards', () => {
       expect(module.sourceSectionIds).toEqual([]);
       expect(outline.flags.some((f) => f.type === 'missing' && f.severity === 'blocking' && f.location.moduleLocalId === module.moduleLocalId)).toBe(true);
     }
+  });
+});
+
+describe('Vietnamese deterministic outline', () => {
+  const handbookModules = ['Kế hoạch 30 ngày', 'Kênh giao tiếp nội bộ', 'Ngày làm việc đầu tiên — nhận thiết bị, tài khoản và gặp đội nhóm', 'Phân loại dữ liệu', 'Tiêu chí hoàn thành'];
+  const handbook = (modules: readonly string[]): FeatureInventory => ({
+    systemSummary: { purpose: 'Sổ tay hội nhập', modules, sourceRefs: [{ sectionId: 'sum', quote: 'Sổ tay hội nhập nhân viên' }] },
+    glossary: [],
+    features: modules.map((module, i) => ({ featureId: `f${i}`, name: `Nội dung ${i}`, module, purpose: `Hướng dẫn ${module}`, steps: [], audience: 'all', departments: [], roles: [], sourceRefs: [{ sectionId: `s${i}`, quote: `Đoạn ${module}` }] })),
+    flags: [],
+  });
+  const vn = (modules: readonly string[], extra: Partial<FeatureInventory> = {}) =>
+    buildTemplateOutline({ jobId: 'roxane', templateKind: 'normal', inventory: { ...handbook(modules), ...extra }, responsibilities: [] });
+
+  it('groups features by the summary modules with their Vietnamese titles', () => {
+    const outline = vn(handbookModules);
+    expect(outline.modules).toHaveLength(5);
+    expect(outline.modules.map((m) => m.title)).toEqual(handbookModules);
+    expect(outline.modules.some((m) => /^t[12]-/.test(m.title))).toBe(false);
+    expect(outline.modules.every((m) => m.coverage === 'sufficient')).toBe(true);
+    expect(outline.modules.map((m) => m.frameKey)).toEqual(['t1-overview', 't1-access', 't1-navigation', 't1-core', 't1-core-2']);
+    expect(outline.modules[0].sourceSectionIds).toEqual(['s0', 'sum']);
+    expect(outline.modules[1].sourceSectionIds).toEqual(['s1']);
+    expect(vn(handbookModules)).toEqual(outline);
+    expect(validateTemplateOutline(outline, { templateKind: 'normal', responsibilities: [] })).toEqual([]);
+  });
+  it('pads a two-module normal outline with insufficient Vietnamese modules', () => {
+    const outline = vn(handbookModules.slice(0, 2));
+    expect(outline.modules).toHaveLength(4);
+    const padded = outline.modules.slice(2);
+    expect(padded.map((m) => m.coverage)).toEqual(['insufficient', 'insufficient']);
+    expect(padded.map((m) => m.title)).toEqual(['Làm quen giao diện', 'Quy trình công việc chính']);
+    expect(padded.every((m) => m.gapNote === 'Chưa tìm thấy nội dung tài liệu cho module này.' && m.sourceSectionIds.length === 0)).toBe(true);
+    for (const module of padded) expect(outline.flags).toContainEqual(expect.objectContaining({ message: 'Module chưa có đoạn tài liệu nguồn.', questionForAdmin: 'Bổ sung tài liệu cho module này hoặc bỏ module.', location: { moduleLocalId: module.moduleLocalId } }));
+    expect(validateTemplateOutline(outline, { templateKind: 'normal', responsibilities: [] })).toEqual([]);
+  });
+  it('sends unmatched features to the group with the most word overlap, otherwise the first group', () => {
+    const data = handbook(handbookModules);
+    const extra = [
+      { ...data.features[0], featureId: 'x1', module: 'Khác', name: 'Phân loại', purpose: 'Dữ liệu mật', sourceRefs: [{ sectionId: 'x1', quote: 'Dữ liệu mật' }] },
+      { ...data.features[0], featureId: 'x2', module: 'Orchard', name: 'Banana', purpose: 'Harvest', sourceRefs: [{ sectionId: 'x2', quote: 'Harvest fruit' }] },
+    ];
+    const outline = vn(handbookModules, { features: [...data.features, ...extra] });
+    expect(outline.modules[3].featureIds).toContain('x1');
+    expect(outline.modules[0].featureIds).toContain('x2');
+  });
+  it('merges groups above the maximum into the last module', () => {
+    const many = Array.from({ length: 10 }, (_, i) => `Chủ đề ${i + 1}`);
+    const outline = vn(many);
+    expect(outline.modules).toHaveLength(8);
+    expect(outline.modules[7].title).toBe('Chủ đề 8');
+    expect(outline.modules[7].featureIds).toEqual(['f7', 'f8', 'f9']);
+    expect(outline.modules[7].sourceSectionIds).toEqual(['s7', 's8', 's9']);
+    expect(validateTemplateOutline(outline, { templateKind: 'normal', responsibilities: [] })).toEqual([]);
+  });
+  it('trims long summary module titles to 80 characters', () => {
+    const long = `Quy trình ${'rất dài '.repeat(20)}`;
+    expect(vn([long]).modules[0].title).toBe(long.trim().slice(0, 80).trim());
+  });
+  it('gives advanced modules Vietnamese titles and coverage while keeping task slots', () => {
+    const outline = build('advanced');
+    expect(outline.modules.some((m) => /^t[12]-/.test(m.title))).toBe(false);
+    expect(outline.modules.every((m) => m.coverage === (m.sourceSectionIds.length ? 'sufficient' : 'insufficient'))).toBe(true);
+    expect(validateTemplateOutline(outline, { templateKind: 'advanced', responsibilities })).toEqual([]);
+  });
+  it('accepts coverage edits and rejects malformed coverage metadata', () => {
+    const outline = build();
+    const id = outline.modules[1].moduleLocalId;
+    const edited = applyTemplateOutlineEdits(outline, [{ type: 'update', moduleLocalId: id, patch: { coverageOverride: true, gapNote: 'Đã bổ sung.', coverage: 'sufficient' } }], () => 'new');
+    expect(edited.modules.find((m) => m.moduleLocalId === id)).toMatchObject({ coverageOverride: true, gapNote: 'Đã bổ sung.', coverage: 'sufficient' });
+    for (const patch of [{ coverage: 'maybe' }, { coverageOverride: 'yes' }, { gapNote: 5 }]) {
+      const malformed = { ...outline, modules: [{ ...outline.modules[0], ...patch }, ...outline.modules.slice(1)] };
+      expect(validateAdminOutline(malformed as never, { templateKind: 'normal', responsibilities })).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'METADATA' })]));
+    }
+  });
+});
+
+describe('normalizeOutlineModuleCount', () => {
+  const base = buildTemplateOutline({ jobId: 'n', templateKind: 'normal', inventory, responsibilities: [] }).modules;
+  it('pads to the minimum and reassigns order and positional frames', () => {
+    const result = normalizeOutlineModuleCount([{ ...base[0], frameKey: 't1-support', order: 5 }], { jobId: 'n', templateKind: 'advanced' });
+    expect(result).toHaveLength(5);
+    expect(result.map((m) => m.frameKey)).toEqual(['t2-role', 't2-permissions', 't2-task-1', 't2-task-2', 't2-task-3']);
+    expect(result.map((m) => m.order)).toEqual([0, 1, 2, 3, 4]);
+    expect(result.slice(1).every((m) => m.coverage === 'insufficient' && !/^t[12]-/.test(m.title))).toBe(true);
+    expect(new Set(result.map((m) => m.moduleLocalId)).size).toBe(5);
   });
 });

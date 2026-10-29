@@ -3,9 +3,15 @@ import { normalizeForMatch } from './grounding';
 import { AI_GENERATION_LIMITS } from './limits';
 import { ADVANCED_FRAMES, NORMAL_FRAMES, type ValidationError } from './validate';
 
+/** Coverage fields are optional: outlines persisted before they existed omit them. */
+const optionalCoverage = (module: TemplateOutlineModule): boolean =>
+  (module.coverage === undefined || module.coverage === 'sufficient' || module.coverage === 'insufficient')
+  && (module.gapNote === undefined || (typeof module.gapNote === 'string' && module.gapNote.length <= 500))
+  && (module.coverageOverride === undefined || typeof module.coverageOverride === 'boolean');
+
 export function validateOutlineMetadata(modules: readonly TemplateOutlineModule[]): readonly ValidationError[] {
   const strings = (value: unknown): value is readonly string[] => Array.isArray(value) && value.every((item) => typeof item === 'string');
-  if (modules.some((module) => !module || typeof module.title !== 'string' || !module.title.trim() || module.title.length > 80 || typeof module.description !== 'string' || module.description.length > 500 || !Number.isFinite(module.estimatedMinutes) || module.estimatedMinutes <= 0 || !strings(module.objectives) || module.objectives.length > 4 || module.objectives.some((item) => !item.trim()) || !strings(module.featureIds) || module.featureIds.some((id) => !id.trim()) || !strings(module.sourceSectionIds) || !Array.isArray(module.responsibilityIndexes))) return [{ code: 'METADATA', path: 'modules', message: 'Outline metadata is invalid.' }];
+  if (modules.some((module) => !module || typeof module.title !== 'string' || !module.title.trim() || module.title.length > 80 || typeof module.description !== 'string' || module.description.length > 500 || !Number.isFinite(module.estimatedMinutes) || module.estimatedMinutes <= 0 || !strings(module.objectives) || module.objectives.length > 4 || module.objectives.some((item) => !item.trim()) || !strings(module.featureIds) || module.featureIds.some((id) => !id.trim()) || !strings(module.sourceSectionIds) || !Array.isArray(module.responsibilityIndexes) || !optionalCoverage(module))) return [{ code: 'METADATA', path: 'modules', message: 'Outline metadata is invalid.' }];
   return [];
 }
 

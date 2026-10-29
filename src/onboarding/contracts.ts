@@ -601,6 +601,10 @@ export interface TemplateOutlineModule {
   readonly sourceSectionIds: readonly string[];
   readonly responsibilityIndexes: readonly number[];
   readonly tombstoned?: boolean;
+  /** Missing on outlines persisted before coverage existed; treated as not insufficient. */
+  readonly coverage?: 'sufficient' | 'insufficient';
+  readonly gapNote?: string;
+  readonly coverageOverride?: boolean;
 }
 
 export interface TemplateOutline {
@@ -611,7 +615,7 @@ export interface TemplateOutline {
 }
 
 export type OutlineEdit =
-  | { readonly type: 'update'; readonly moduleLocalId: string; readonly patch: Partial<Pick<TemplateOutlineModule, 'title' | 'description' | 'estimatedMinutes' | 'objectives' | 'featureIds' | 'sourceSectionIds' | 'responsibilityIndexes'>> }
+  | { readonly type: 'update'; readonly moduleLocalId: string; readonly patch: Partial<Pick<TemplateOutlineModule, 'title' | 'description' | 'estimatedMinutes' | 'objectives' | 'featureIds' | 'sourceSectionIds' | 'responsibilityIndexes' | 'coverageOverride' | 'gapNote' | 'coverage'>> }
   | { readonly type: 'reorder'; readonly moduleLocalId: string; readonly order: number }
   | { readonly type: 'delete'; readonly moduleLocalId: string }
   | { readonly type: 'add'; readonly module: Omit<TemplateOutlineModule, 'moduleLocalId' | 'tombstoned'> };

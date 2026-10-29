@@ -29,6 +29,7 @@ import { AI_GENERATION_LIMITS } from './limits';
 import { sanitizeAiDiagnosticText } from './diagnostics';
 import { materializeAiTemplate, materializeModuleTemplate } from './materialize';
 import { buildTemplateOutline, applyTemplateOutlineEdits } from './outline';
+import { moduleHasUsableSources, usableSectionIds } from './outline-coverage';
 import { buildFallbackLesson } from './fallback-lessons';
 import { buildFallbackQuestions } from './fallback-questions';
 import { buildModuleLessonPrompt, buildModuleLessonRepairPrompt, buildModuleQuestionRepairPrompt, buildModuleQuestionPrompt, validateModuleLessonOutput, validateModuleQuestionOutput, validApprovedLesson, type ModuleLessonPromptInput } from './module-draft';
@@ -1405,7 +1406,7 @@ export function createAiJobService(
     const records = sources.filter((s): s is SourceRecord => !!s && s.status === 'ready' && !s.deletedAt);
     const ids = run.outline.sourceSectionIds;
     const matches = ids.map((id) => records.flatMap((source) => (source.sections ?? []).filter((s) => s.id === id).map((section) => ({ section, checksum: source.checksum, sourceId: source.sourceId }))));
-    const usable = ids.length > 0 && ids.every((id) => id.trim()) && new Set(ids).size === ids.length && matches.every((items) => items.length === 1 && items[0].section.text.trim().length >= AI_GENERATION_LIMITS.minQuoteChars && /[\p{L}\p{N}]/u.test(normalizeForMatch(items[0].section.text)));
+    const usable = moduleHasUsableSources(run.outline, usableSectionIds(records)) && new Set(ids).size === ids.length;
     const sections = usable ? matches.map((items) => items[0].section) : [];
     const inventory = row.stageOutputs.__inventory as FeatureInventory;
     const relatedModules = (row.moduleRuns ?? []).filter((item) => !item.outline.tombstoned && item.outline.moduleLocalId !== run.outline.moduleLocalId).map((item) => item.outline).sort((a, b) => a.order - b.order).map((outline) => ({ order: outline.order, title: outline.title }));
