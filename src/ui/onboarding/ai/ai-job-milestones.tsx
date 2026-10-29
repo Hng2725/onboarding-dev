@@ -245,13 +245,11 @@ export function AiMilestoneProgress({
         <details className="ai-failure-log" open>
           <summary>Chi tiết lỗi kỹ thuật</summary>
           <dl>
-            <div><dt>Job</dt><dd><code>{job.jobId}</code></dd></div>
             <div><dt>Bước</dt><dd>{aiCallDisplayLabel(failedCall, job.calls)}</dd></div>
-            <div><dt>Call</dt><dd><code>{failedCall.callId}</code></dd></div>
             <div><dt>Nhà cung cấp</dt><dd>{failureProvider}</dd></div>
-            <div><dt>Attempt</dt><dd><code>{failedCall.attemptRef ?? 'Chưa được tạo'}</code></dd></div>
+            <div><dt>Phiên chạy</dt><dd>{failedCall.attemptRef ? 'Đã tạo' : 'Chưa được tạo'}</dd></div>
             <div><dt>Mã lỗi</dt><dd><code>{failedCall.providerErrorCode ?? job.errorCode ?? 'AI_FAILED'}</code></dd></div>
-            {failedCall.providerPhase && <div><dt>Phase</dt><dd><code>{failedCall.providerPhase}</code></dd></div>}
+            {failedCall.providerPhase && <div><dt>Giai đoạn</dt><dd><code>{failedCall.providerPhase}</code></dd></div>}
             {failedCall.finishedAt && <div><dt>Thời điểm</dt><dd><time dateTime={failedCall.finishedAt}>{failedCall.finishedAt}</time></dd></div>}
             <div><dt>Thông báo</dt><dd>{failureMessage}</dd></div>
             {failedCall.diagnosticError && <div><dt>Thu thập log</dt><dd>{failedCall.diagnosticError}</dd></div>}

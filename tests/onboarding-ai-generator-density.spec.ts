@@ -96,27 +96,18 @@ describe('AI Generator compact modal density', () => {
   });
 
   it('keeps long review content usable without widening the modal', () => {
-    const generatorWorkspace = rule('.ai-workspace');
-    const workspace = rule('.ai-module-workspace');
     const review = rule('.ai-review-scroll');
 
-    expect(declarationValues(generatorWorkspace, 'width')).toEqual(['100%']);
-    expect(declarationValues(generatorWorkspace, 'max-width')).toEqual(['none']);
     expect(declarationValues(rule('.ai-workspace-progress-card'), 'grid-column')).toEqual(['1 / -1']);
-    expect(declarationValues(workspace, 'grid-template-columns')).toEqual(['200px minmax(0, 1fr)']);
-    expect(declarationValues(workspace, 'gap')).toEqual(['12px']);
-    expect(declarationValues(workspace, 'min-width')).toEqual(['0']);
     expect(declarationValues(rule('.ai-generator-body', shellStylesheet), 'overflow-x')).toEqual(['hidden']);
     expect(declarationValues(review, 'max-height')).toEqual(['54dvh']);
     expect(declarationValues(review, 'overflow')).toEqual(['auto']);
-    expect(declarationValues(rule('.ai-outline-review > .ai-review-scroll'), 'max-height')).toEqual(['56dvh']);
-    expect(declarationValues(rule('.ai-module-actions'), 'flex-wrap')).toEqual(['wrap']);
   });
 
-  it('stacks source columns before the compact body would clip controls', () => {
-    const tablet = mediaBlock('@media (max-width: 780px)', '.ai-source-layout');
-
-    expect(declarationValues(rule('.ai-source-layout', tablet), 'grid-template-columns')).toEqual(['1fr']);
+  it('no longer ships the multi-run roadmap and workspace styles', () => {
+    for (const removed of ['.ai-roadmap-', '.ai-module-workspace', '.ai-module-stage', '.ai-outline-review', '.ai-run-sequence', '.ai-publish-target', '.ai-source-layout']) {
+      expect(stylesheet).not.toContain(removed);
+    }
   });
 
   it('preserves the full-screen single-column mobile layout', () => {
@@ -129,20 +120,12 @@ describe('AI Generator compact modal density', () => {
     expect(declarationValues(panel, 'width')).toEqual(['100%']);
     expect(declarationValues(panel, 'height')).toEqual(['100vh', '100dvh']);
     expect(declarationValues(panel, 'font-size')).toEqual(['13px']);
-    expect(declarationValues(rule('.ai-module-workspace', mobile), 'grid-template-columns')).toEqual(['1fr']);
     expect(declarationValues(rule('.ai-milestone-list', mobileMilestones), 'grid-template-columns')).toEqual(['1fr']);
     expect(declarationValues(rule('.ai-generator-panel .button', mobile), 'min-height')).toEqual(['34px']);
   });
 
-  it('keeps review focus and sticky actions intact', () => {
-    const focusRule = rule('.ai-review-scroll:focus-visible, .ai-module-stage summary:focus-visible');
-    const toolbar = rule('.ai-review-toolbar');
-    const roadmapActions = rule('.ai-roadmap-actions');
-
-    expect(declarationValues(focusRule, 'outline')).toEqual(['2px solid var(--on-primary)']);
-    expect(declarationValues(toolbar, 'position')).toEqual(['sticky']);
-    expect(declarationValues(roadmapActions, 'position')).toEqual(['sticky']);
-    expect(declarationValues(roadmapActions, 'bottom')).toEqual(['0']);
+  it('keeps review focus intact', () => {
+    expect(declarationValues(rule('.ai-review-scroll:focus-visible'), 'outline')).toEqual(['2px solid var(--on-primary)']);
   });
 
   it('shows the four AI milestones horizontally on desktop', () => {

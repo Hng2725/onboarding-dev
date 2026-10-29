@@ -2,47 +2,41 @@
 
 ## 1. Mục đích của modal
 
-Modal **Tạo template từ tài liệu** giúp Admin biến các tài liệu nghiệp vụ có sẵn thành một hoặc hai template onboarding hoàn chỉnh. Mỗi template có:
+Modal **Tạo template bằng AI** giúp Admin biến các tài liệu nghiệp vụ có sẵn thành **một** template onboarding hoàn chỉnh trong mỗi lượt chạy. Template có:
 
 - Lộ trình gồm nhiều module học.
 - Tài liệu để nhân sự đọc ngay trong app.
-- Câu hỏi kiểm tra theo từng module.
+- 3–5 câu hỏi kiểm tra cho mỗi module.
 - Dẫn chứng liên kết nội dung AI tạo với tài liệu nguồn.
 - Thiết lập ngưỡng đạt, số lượt làm và chế độ học.
 - File PDF bài học và file JSON lưu trong Roomfiles.
 
-AI hỗ trợ phân tích, đề xuất và soạn nội dung. **Admin vẫn là người rà soát, chỉnh sửa, duyệt và quyết định xuất bản**. AI không tự xuất bản template khi Admin chưa xác nhận.
+AI phân tích, đề xuất và soạn nội dung theo chế độ **tự động (autopilot)**: Admin không phải duyệt từng module. **Admin vẫn là người kiểm tra độ phủ tài liệu, rà soát kết quả cuối và quyết định xuất bản.** AI không tự xuất bản khi Admin chưa xác nhận.
 
 ## 2. Tổng quan luồng
 
-```text
-1. Tài liệu nguồn
-   ↓ Admin tải lên/chọn nguồn
-2. Phân tích
-   ↓ AI lập kho kiến thức và ghi nhận điểm cần xác minh
-3. Tạo lộ trình
-   ↓ Admin chọn loại template; AI đề xuất các module
-4. Rà soát
-   ↓ Admin duyệt khung, tài liệu học, câu hỏi và thiết lập cuối
-5. Xuất bản
-   ↓ App tạo PDF + JSON, lưu Roomfiles và xuất bản template
-```
-
-Nếu chọn **Cả hai**, thứ tự xử lý là:
+Modal có 4 bước:
 
 ```text
-Template 1 (Thông thường) → Admin rà soát
-→ Template 2 (Chuyên sâu) → Admin rà soát
-→ Xuất bản cả hai trong cùng một lượt
+1. Nguồn & loại
+   ↓ Chọn loại template, chọn tài liệu, bấm "Phân tích tài liệu"
+2. Kiểm tra độ phủ
+   ↓ AI liệt kê module; Admin bổ sung tài liệu cho module còn thiếu; bấm "Tạo template"
+3. AI tạo nội dung
+   ↓ AI tự viết bài học và câu hỏi cho mọi module, không cần duyệt từng module
+4. Xem lại & xuất bản
+   ↓ Admin xem lại, chỉnh sửa, xử lý cờ; app tạo PDF + JSON và xuất bản
 ```
+
+Mỗi lượt chạy chỉ tạo **một** template, **Thông thường** hoặc **Nâng cao**. Không còn lựa chọn “Cả hai”; muốn có cả hai bản, hãy chạy hai lượt riêng.
 
 ## 3. Vai trò của Admin, AI và app
 
 | Thành phần | Trách nhiệm chính |
 |---|---|
-| **Admin** | Thêm và chọn nguồn; chọn loại template; nhập nhiệm vụ cho Template 2; rà soát/chỉnh sửa/duyệt lộ trình, bài học và câu hỏi; xử lý cờ kiểm chứng; thiết lập template; bấm xuất bản. |
-| **AI** | Phân tích nội dung nguồn; hợp nhất kho kiến thức; đề xuất module; viết bài học có dẫn chứng; tạo câu hỏi; phát hiện thiếu dữ liệu hoặc mâu thuẫn; thử sửa đầu ra chưa hợp lệ. |
-| **App** | Kiểm tra file; quản lý job và tiến trình; lưu trạng thái để tiếp tục; điều phối Sandbox/Native/fallback an toàn; tạo PDF và JSON; lưu Roomfiles; gọi API xuất bản. |
+| **Admin** | Thêm và chọn nguồn; chọn loại template; nhập nhiệm vụ (loại Nâng cao); xử lý module “Cần bổ sung”; xem lại, chỉnh sửa, xử lý cờ; thiết lập template; bấm xuất bản. |
+| **AI** | Phân tích nguồn; đề xuất module và đánh giá độ phủ; đọc tài liệu bổ sung; viết bài học có dẫn chứng; tạo câu hỏi; phát hiện thiếu dữ liệu hoặc mâu thuẫn; thử sửa đầu ra chưa hợp lệ. |
+| **App** | Kiểm tra file; quản lý job và tiến trình; lưu trạng thái để tiếp tục; điều phối Sandbox/Native/dự phòng an toàn; tạo PDF và JSON; lưu Roomfiles; gọi API xuất bản. |
 
 ## 4. Chuẩn bị trước khi sử dụng
 
@@ -73,20 +67,26 @@ Onboarding-app/
 
 ## 5. Chi tiết từng bước
 
-### Bước 1 — Tài liệu nguồn
+### Bước 1 — Nguồn & loại
+
+Màn hình chia hai cột: bên trái là loại template và thông tin đặt tên, bên phải là tài liệu nguồn.
 
 #### Admin cần làm gì?
 
-1. Mở modal **Tạo template từ tài liệu**.
-2. Nhập thông tin mô tả nguồn:
-   - **Tên hệ thống**: tên sản phẩm hoặc hệ thống được hướng dẫn, ví dụ `PrivOS`.
-   - **Phiên bản**: không bắt buộc.
-   - **Ngày hiệu lực**: không bắt buộc.
-3. Thêm nguồn bằng một trong hai cách:
+1. Mở modal **Tạo template bằng AI** (Template → Tạo bằng AI).
+2. Chọn **một** loại template:
+
+   | Lựa chọn | Dùng khi nào? | Thông tin Admin phải nhập |
+   |---|---|---|
+   | **Thông thường** | Onboarding kiến thức chung cho nhân sự mới. | Không cần nhập thêm. |
+   | **Nâng cao** | Onboarding theo vai trò và công việc cụ thể. | **2–8 nhiệm vụ chính**, mỗi dòng một nhiệm vụ. |
+
+3. Nhập (không bắt buộc) **Tên template** và **Tên hệ thống / tổ chức**; phần **Thông tin thêm** có phiên bản phần mềm và ngày hiệu lực. Nếu để trống tên template, AI tự đặt tên.
+4. Thêm nguồn bằng một trong hai cách:
    - Tải file lên.
    - Thêm **Ghi chú Admin** bằng tiêu đề và nội dung văn bản.
-4. Trong phần **Nguồn đã thêm**, đánh dấu từ **1 đến 10 nguồn** muốn dùng cho lần phân tích này.
-5. Bấm **Tiếp tục**.
+5. Trong danh sách **Nguồn đã thêm**, đánh dấu từ **1 đến 10 nguồn** dùng cho lần chạy này.
+6. Bấm **Phân tích tài liệu** ở chân modal.
 
 #### Quy tắc đối với file tải lên
 
@@ -101,200 +101,106 @@ Onboarding-app/
 #### App và AI làm gì?
 
 - App kiểm tra file, tạo thư mục Roomfiles nếu cần, tải file lên và yêu cầu hệ thống trích xuất nội dung.
-- Nguồn được đưa vào thư viện **Nguồn đã thêm** để có thể tái sử dụng ở các lần tạo template sau.
-- AI chưa tạo template ở bước này; app chỉ chuẩn bị nội dung nguồn cho bước phân tích.
+- Khi bấm **Phân tích tài liệu**, AI đọc các nguồn đã chọn, hợp nhất kho kiến thức rồi lập lộ trình module đề xuất. Tiến trình hiển thị theo các cột mốc (đọc tài liệu, hợp nhất, lập lộ trình). Khi xong, modal tự chuyển sang Bước 2.
 
 #### Điều cần hiểu về “Nguồn đã thêm”
 
 - Đây là thư viện nguồn dùng lại, không phải dữ liệu tạm của riêng một lần tạo template.
-- Bỏ chọn một nguồn chỉ loại nó khỏi lần phân tích hiện tại, không xóa file.
+- Bỏ chọn một nguồn chỉ loại nó khỏi lần chạy hiện tại, không xóa file.
 - Nút xóa ở từng nguồn mới thực hiện thao tác xóa nguồn đó.
-- Nút **Xóa dữ liệu** của modal không xóa danh sách này.
+- Nút **Xóa phiên** của modal không xóa danh sách này.
 
-### Bước 2 — Phân tích
+### Bước 2 — Kiểm tra độ phủ
 
-#### Admin cần làm gì?
+Đây là bước quan trọng nhất của Admin: bảo đảm mỗi module đều có tài liệu để AI dựa vào trước khi tạo nội dung.
 
-1. Kiểm tra lại danh sách nguồn đầu vào.
-2. Bấm **Phân tích tài liệu**.
-3. Theo dõi các cột mốc trên khung **Tiến trình AI**.
-4. Nếu job dừng do lỗi có thể thử lại, bấm **Thử lại**.
-5. Khi phân tích hoàn tất, bấm **Chọn loại lộ trình**.
+#### Màn hình hiển thị gì?
 
-#### AI làm gì?
+- Dải 4 số: **module đề xuất**, **đủ tài liệu**, **cần bổ sung**, **phút học** (ước tính).
+- Danh sách module (tên tiếng Việt, mô tả, thời lượng, các đoạn tài liệu đang dùng). Mỗi module có trạng thái:
+  - **Đủ tài liệu**: AI tìm thấy đoạn tài liệu phù hợp.
+  - **Cần bổ sung**: chưa đủ căn cứ; kèm ghi chú AI thiếu gì.
 
-AI xử lý theo các cột mốc:
+#### Xử lý module “Cần bổ sung”
 
-1. **Chuẩn bị nguồn tài liệu**: đọc nội dung đã được trích xuất từ các nguồn được chọn.
-2. **Phân tích từng lô nguồn**: nhận diện tính năng, thao tác, thuật ngữ, quy tắc và bằng chứng trong từng nhóm tài liệu.
-3. **Hợp nhất kho kiến thức**: ghép kết quả các lô, loại nội dung trùng và giữ quan hệ với nguồn.
-4. **Sẵn sàng tạo lộ trình**: tạo đầu vào đã chuẩn hóa cho bước đề xuất module.
+Với mỗi module chưa đủ, Admin chọn một trong các cách:
 
-AI cũng đánh dấu:
+| Thao tác | Tác dụng |
+|---|---|
+| **Tải tài liệu bổ sung** | Tải thêm một file cho module đó. AI chỉ đọc **file mới** (không đọc lại toàn bộ nguồn cũ) và có thể gắn file đó vào cả các module khác nếu phù hợp. Nếu vẫn chưa đủ, module hiển thị ghi chú thiếu bằng tiếng Việt. |
+| **Chọn đoạn từ tài liệu đã có** | Tự chọn các đoạn trong tài liệu đã phân tích để gắn cho module. |
+| **Vẫn dùng tài liệu hiện có** | Admin xác nhận module đủ dùng với tài liệu hiện có; module chuyển thành “Đủ tài liệu (Admin xác nhận)”. |
 
-- Nội dung chưa đủ bằng chứng.
-- Các nguồn có thông tin mâu thuẫn.
-- Thuật ngữ hoặc quy tắc cần Admin xác minh.
+#### Chỉnh lộ trình
+
+- **Sửa**: đổi tên, mô tả, thời lượng, mục tiêu của module.
+- **Bỏ module**: loại module khỏi lộ trình (các module bắt buộc của khung template không thể bỏ).
+- **+ Thêm module**: thêm một module mới vào cùng template (tên, mô tả), sau đó bổ sung tài liệu cho module đó.
+
+#### Khi nào bấm được “Tạo template”?
+
+Nút **Tạo template** ở chân modal chỉ mở khi **mọi module đã được phủ** (Đủ tài liệu hoặc Admin đã xác nhận). Nếu còn module thiếu, chân modal ghi rõ lý do, ví dụ “Còn module chưa đủ tài liệu.”
+
+### Bước 3 — AI tạo nội dung
+
+- Sau khi bấm **Tạo template**, AI **tự động** viết bài học rồi tạo câu hỏi cho từng module. **Không có bước duyệt từng module.**
+- Màn hình hiển thị phần trăm tiến độ và trạng thái của mỗi module (bài học, câu hỏi). Module gặp lỗi có nút **Thử lại**.
+- Câu hỏi của mỗi module được tạo sau bài học và dựa trên bài học đó (3–5 câu).
+- Khi hoàn tất, bấm **Xem lại template** (hoặc app tự chuyển sang Bước 4).
+
+#### Đóng modal khi AI đang làm việc
+
+- Bấm **×** khi AI đang chạy sẽ hiện hộp xác nhận **“Đóng cửa sổ?”**.
+  - **Tiếp tục ở lại**: giữ modal mở, AI tiếp tục.
+  - **Đóng và tạm dừng**: đóng modal, AI **tạm dừng**.
+- Khi mở lại modal, app khôi phục job đã lưu và **tự tiếp tục** từ chỗ đang dừng.
+- Giữ modal mở trong lúc AI làm việc nếu muốn hoàn tất nhanh nhất.
 
 #### Sandbox và Native AI Chat hoạt động thế nào?
 
-- **Sandbox** là nhà cung cấp chính cho lần phân tích đầu tiên.
+- **Sandbox** là nhà cung cấp chính.
 - Nếu Sandbox thật sự bị lỗi worker, ví dụ `worker_failed` hoặc `Worker exited with code 1`, app có thể tự thử lại **một lần** bằng **Native AI Chat** nếu đủ quyền.
-- Thanh tiến trình sẽ hiển thị việc chuyển từ Sandbox sang Native để Admin biết app vẫn đang xử lý.
 - App không tự chuyển Native cho mọi loại lỗi. Lỗi quyền, dữ liệu đầu vào, đầu ra không hợp lệ hoặc thao tác hủy cần được xử lý theo đúng nguyên nhân.
-- Sau một lần Native thất bại, app dừng để tránh lặp vô hạn và hiển thị chi tiết lỗi.
+- Sau một lần Native thất bại, app dừng để tránh lặp vô hạn và hiển thị **Chi tiết lỗi kỹ thuật** (bước, nhà cung cấp, mã lỗi, thông báo).
 - Nếu một tiến trình Native cũ chưa được xác nhận đã dừng, app chặn việc tạo thêm tiến trình Native mới. Admin có thể bấm **Kiểm tra lại trạng thái**.
+- Nếu tạo bài học hoặc câu hỏi vẫn thất bại, app dùng bản dự phòng dựng trực tiếp từ đoạn nguồn có dẫn chứng (module hiển thị là dự phòng). Admin kiểm tra kỹ ở Bước 4 hoặc dùng **AI viết lại**.
 
-#### Có thể đóng modal khi AI đang chạy không?
+### Bước 4 — Xem lại & xuất bản
 
-Có. Job và khóa khôi phục được lưu để lần mở modal sau app tiếp tục theo trạng thái đã có. Tuy nhiên, đóng modal sẽ ngăn app bắt đầu một lượt chuyển sang Native mới ở nền. Khi mở lại, app sẽ đối chiếu trạng thái job trước khi tiếp tục.
+Màn hình gồm danh sách module, nội dung module đang chọn (tab **Bài học** và **Câu hỏi**), bảng **Cờ cần rà soát** và thiết lập template.
 
-### Bước 3 — Tạo lộ trình
+#### Xem và chỉnh sửa nội dung
 
-Bước này gồm hai phần: **chọn loại template** và **duyệt khung lộ trình**.
+Mọi chỉnh sửa đi qua job của lượt chạy, nên nội dung luôn nhất quán:
 
-#### 5.3.1. Chọn loại template
+- **Chỉnh sửa bài học**, sau đó **Lưu bài học**. Vì câu hỏi phải khớp bài học, app hỏi xác nhận: *câu hỏi của module này sẽ được AI tạo lại cho khớp bài học mới*. Sau khi lưu, **câu hỏi của module đó được tạo lại**.
+- **Chỉnh sửa câu hỏi** (thêm, sửa, xóa; sửa đáp án và giải thích) rồi **Lưu câu hỏi**. Mỗi module cần từ 3 đến 5 câu.
+- **AI viết lại**: AI viết lại cả bài học và câu hỏi của module đó. App cảnh báo vì chỉnh sửa tay trước đó sẽ bị thay thế.
+- Trong lúc cập nhật, màn hình hiển thị “Đang cập nhật…” và giữ nguyên nội dung cũ.
 
-Admin bắt buộc chọn một trong ba phương án:
+#### Cờ kiểm chứng
 
-| Lựa chọn | Dùng khi nào? | Thông tin Admin phải nhập |
-|---|---|---|
-| **Template 1 — Thông thường** | Onboarding kiến thức chung cho nhân sự thông thường. | Không cần nhập phòng ban, chức danh hoặc nhiệm vụ. |
-| **Template 2 — Chuyên sâu** | Onboarding theo vai trò và các công việc thực tế. | Nhập **2–8 nhiệm vụ chính**, mỗi dòng một nhiệm vụ. |
-| **Cả hai** | Cần cả bản kiến thức chung và bản chuyên sâu. | Nhập **2–8 nhiệm vụ chính** để tạo Template 2. |
+Cờ là điểm AI không chắc (thiếu thông tin, mâu thuẫn, nguồn kém chất lượng…). Với mỗi cờ có thể:
 
-Admin có thể nhập **Tên template**. Nếu để trống, AI/app tự đặt tên phù hợp với nội dung và loại template.
+- **Thêm ghi chú**: ghi chú của Admin và đánh dấu đã xử lý.
+- **Chỉnh sửa**: mở đúng module để sửa nội dung liên quan.
+- **Loại bỏ nội dung** **không khả dụng** với bản nháp AI này: nội dung được sửa qua job nên không xóa trực tiếp trên bản nháp.
 
-Sau khi thông tin hợp lệ, Admin bấm **Tạo lộ trình**.
+Cờ bắt buộc (mức chặn) phải được xử lý trước khi xuất bản.
 
-#### 5.3.2. AI đề xuất khung lộ trình
+#### Thiết lập template
 
-AI dùng kho kiến thức đã hợp nhất để đề xuất:
+- **Ngưỡng đạt (%)** — mặc định 70%.
+- **Số lượt mỗi module** — mặc định 2; có thể không giới hạn.
+- **Chế độ học**: `Tuần tự` (học theo thứ tự) hoặc `Tự do` (nhân sự tự chọn module).
 
-- Danh sách module và thứ tự học.
-- Tiêu đề, mô tả, thời lượng và mục tiêu của mỗi module.
-- Nguồn hoặc phần nội dung làm bằng chứng cho từng module.
-- Mức độ bao phủ nội dung và các điểm còn thiếu.
-- Với Template 2, quan hệ giữa module và các nhiệm vụ Admin đã nhập.
+#### Xuất bản
 
-#### 5.3.3. Admin duyệt khung
+1. Kiểm tra tóm tắt: số module, số câu hỏi, các thiết lập.
+2. Đảm bảo không còn cờ bắt buộc (chân modal hiện “Còn N cờ bắt buộc” nếu còn).
+3. Bấm **Xuất bản template**. Giữ modal mở đến khi app báo hoàn tất. Nếu một bước lỗi, bấm **Thử lại xuất bản** để tiếp tục từ bước chưa xong.
 
-Admin cần kiểm tra toàn bộ module, có thể chỉnh sửa nội dung hoặc bổ sung nguồn trước khi duyệt khung.
-
-Các tên như `t1-overview`, `t1-access`, `t1-navigation`, `t1-core` là **các module khác nhau trong cùng Template 1**, không phải bốn lựa chọn để user chọn một. Ví dụ:
-
-- `t1-overview`: tổng quan.
-- `t1-access`: truy cập, quyền hoặc điều kiện bắt đầu.
-- `t1-navigation`: làm quen giao diện và điều hướng.
-- `t1-core`: quy trình công việc chính.
-
-Admin cần rà soát các module cần thiết trong lộ trình. Nếu giao diện có thao tác thêm module/khung, thao tác đó dùng để bổ sung **một module mới vào cùng template**, không tạo thêm một template độc lập.
-
-Sau khi khung hợp lý, Admin bấm duyệt để AI bắt đầu viết nội dung theo từng module.
-
-### Bước 4 — Rà soát
-
-Bước rà soát có ba tầng: bài học từng module, câu hỏi từng module và bản template tổng thể.
-
-#### 5.4.1. Rà soát bài học của từng module
-
-AI lần lượt viết tài liệu học dựa trên nguồn đã gắn với module. Mỗi bài học có thể gồm:
-
-- Tiêu đề và mô tả.
-- Thời lượng dự kiến.
-- Mục tiêu học tập.
-- Các khối nội dung hướng dẫn.
-- Các bước thao tác.
-- Dẫn chứng từ tài liệu nguồn.
-
-Admin đọc nội dung ngay trong app, không cần mở URL ở tab khác. Với mỗi module, Admin có thể:
-
-- Sửa tiêu đề, mô tả, thời lượng hoặc mục tiêu.
-- Thêm, sửa, sắp xếp hoặc xóa khối nội dung.
-- Sửa các bước thao tác và dẫn chứng.
-- Bấm **Lưu bài học** để lưu bản đang chỉnh sửa.
-- Bấm **Viết lại bài học** nếu muốn AI tạo một bản mới.
-- Bấm **Dùng bản từ nguồn** để dùng bản an toàn được dựng trực tiếp từ các đoạn nguồn đã chọn.
-- Bấm **Duyệt và sang module tiếp theo** khi bài học đã đạt yêu cầu.
-
-##### Cơ chế “AI + bản an toàn từ nguồn”
-
-Luồng ưu tiên là:
-
-1. AI viết bài học có cấu trúc và dẫn chứng.
-2. App kiểm tra đầu ra và yêu cầu sửa nếu cấu trúc chưa hợp lệ.
-3. Nếu AI không thể tạo bản đáng tin cậy, Admin có thể dùng **bản từ nguồn**.
-4. Bản từ nguồn chỉ tổng hợp nội dung đã có dẫn chứng, hạn chế việc AI tự suy diễn.
-5. Admin chỉnh sửa và duyệt bản cuối.
-
-Nếu module không có đủ nguồn, app/AI phải cảnh báo để Admin bổ sung nguồn hoặc tự soạn; không nên tự bịa nội dung.
-
-#### 5.4.2. Rà soát câu hỏi của từng module
-
-Sau khi bài học được duyệt, AI tự tạo câu hỏi dựa trên bài học và nguồn của module. Admin không phải tự tạo toàn bộ câu hỏi từ đầu.
-
-Mỗi câu hỏi có thể gồm:
-
-- Nội dung câu hỏi.
-- Các phương án trả lời.
-- Đáp án đúng.
-- Giải thích đáp án.
-- Mức độ: ghi nhớ, quy trình hoặc tình huống.
-- Nội dung liên quan và dẫn chứng nguồn.
-
-Admin có thể thêm, sửa hoặc xóa câu hỏi; sửa đáp án và giải thích; yêu cầu **Tạo lại câu hỏi**; sau đó bấm **Duyệt câu hỏi và tiếp tục**.
-
-Nếu quá trình tạo câu hỏi lỗi, app dùng chuỗi phục hồi có giới hạn:
-
-```text
-Sandbox thất bại
-→ thử Native AI Chat một lần nếu đủ quyền
-→ nếu vẫn thất bại, tạo câu hỏi dự phòng từ bài học đã được Admin duyệt
-```
-
-Câu hỏi dự phòng chỉ được tạo khi đã có bài học có căn cứ. App không lặp vô hạn các lần gọi AI.
-
-> Lưu ý: “nhiệm vụ” là công việc/trách nhiệm dùng cho Template 2, không phải số câu hỏi trắc nghiệm. Số câu hỏi được hiển thị riêng trong phần câu hỏi hoặc bản tóm tắt xuất bản.
-
-#### 5.4.3. Rà soát template tổng thể
-
-Khi tất cả module đã có bài học và câu hỏi được duyệt, app tạo bản nháp template để Admin kiểm tra lần cuối:
-
-- Tên và mô tả template.
-- Thứ tự, nội dung và tài liệu của các module.
-- Câu hỏi và đáp án.
-- Cờ kiểm chứng còn tồn tại.
-- **Ngưỡng đạt** — mặc định 70% nếu chưa thay đổi.
-- **Số lượt mỗi module** — mặc định 2; có thể để không giới hạn.
-- **Chế độ học**:
-  - `Tuần tự`: học theo thứ tự module.
-  - `Tự do`: nhân sự có thể tự chọn module.
-
-Các cờ bắt buộc phải được xử lý trước khi nút chuyển sang xuất bản được mở. Nếu cần sửa lại nội dung module, Admin có thể bấm **Chỉnh sửa module**.
-
-Nếu chọn **Cả hai**, Admin hoàn tất Template 1 rồi bấm **Tiếp: Template 2**, rà soát Template 2 và cuối cùng bấm **Kiểm tra xuất bản**.
-
-### Bước 5 — Xuất bản
-
-#### Admin cần làm gì?
-
-1. Kiểm tra thẻ tóm tắt của từng template: số module, số khối tài liệu, số câu hỏi và các thiết lập.
-2. Đảm bảo không còn cờ bắt buộc.
-3. Bấm **Xuất bản template** hoặc **Xuất bản cả hai**.
-4. Giữ modal mở cho đến khi app báo hoàn tất. Nếu một bước lỗi, bấm **Thử lại xuất bản** để tiếp tục từ bước chưa xong.
-
-#### App làm gì?
-
-App thực hiện tuần tự và hiển thị tiến trình:
-
-1. **Chuẩn bị thư mục Roomfiles**.
-2. **Tạo PDF bài học** cho từng module.
-3. **Tải PDF lên Roomfiles**.
-4. **Gắn tài liệu vào template** để nhân sự có thể đọc trong app.
-5. **Xuất bản template** qua API template.
-6. **Lưu file JSON** mô tả template đã xuất bản.
-
-Kết quả được lưu theo cấu trúc:
+App thực hiện tuần tự: chuẩn bị thư mục Roomfiles → tạo PDF bài học từng module → tải PDF lên → gắn tài liệu vào template → xuất bản template → lưu file JSON.
 
 ```text
 Onboarding-app/Created templates/<tên-template>/
@@ -304,60 +210,59 @@ Onboarding-app/Created templates/<tên-template>/
 └── <tên-template>-<id>-v<phiên-bản>.json
 ```
 
-Tiến trình xuất bản có checkpoint. Nếu bị gián đoạn, lần thử lại tiếp tục từ phần chưa hoàn tất và tái sử dụng kết quả đã lưu thay vì tạo lại tất cả từ đầu.
-
-Khi chọn **Cả hai**, app xuất bản Template 1 và Template 2 trong cùng một batch sau khi cả hai đã được rà soát đầy đủ.
+Tiến trình xuất bản có checkpoint. Nếu bị gián đoạn, lần thử lại tiếp tục từ phần chưa hoàn tất và tái sử dụng kết quả đã lưu.
 
 #### Sau khi xuất bản thành công
 
-Chỉ khi tất cả template mục tiêu đã được xuất bản và lưu JSON thành công, app mới:
+Chỉ khi template đã được xuất bản và lưu JSON thành công, app mới:
 
 - Tự đóng modal.
-- Xóa trạng thái tạm của phiên tạo vừa hoàn tất.
-- Đưa modal về **Bước 1 — Tài liệu nguồn** cho lần mở tiếp theo.
+- Xóa trạng thái tạm của phiên vừa hoàn tất và đưa modal về **Bước 1 — Nguồn & loại** cho lần mở sau.
 - Giữ nguyên thư viện **Nguồn đã thêm**.
-- Giữ nguyên các template, PDF và JSON đã xuất bản trong Roomfiles.
+- Giữ nguyên template, PDF và JSON đã xuất bản trong Roomfiles.
 
-## 6. Đóng modal, Hủy job và Xóa dữ liệu khác nhau thế nào?
+## 6. Đóng, Hủy và Xóa dữ liệu khác nhau thế nào?
 
 | Thao tác | Tác dụng | Có xóa “Nguồn đã thêm” không? |
 |---|---|---|
-| **Đóng (X)** | Đóng giao diện. Trạng thái job đã lưu có thể được khôi phục khi mở lại. | Không. |
+| **Đóng (×)** | Đóng giao diện. Nếu AI đang tạo nội dung, app hỏi xác nhận rồi **tạm dừng**; mở lại sẽ tự tiếp tục. | Không. |
 | **Hủy job** | Yêu cầu dừng job AI đang chạy và dọn tiến trình nhà cung cấp liên quan. | Không. |
-| **Xóa dữ liệu** | Sau khi xác nhận, xóa tiến trình, lộ trình, bài học, câu hỏi và bản nháp chưa xuất bản của phiên hiện tại; quay về Bước 1. | Không. |
+| **Xóa phiên → Xóa dữ liệu** | Sau khi xác nhận, xóa tiến trình, lộ trình, bài học, câu hỏi và bản nháp chưa xuất bản của phiên hiện tại; quay về Bước 1. | Không. |
 
-Nút **Xóa dữ liệu** không xóa template đã xuất bản. Hộp xác nhận được hiển thị trước khi app thực hiện thao tác này.
+**Xóa phiên** không xóa template đã xuất bản. Hộp xác nhận “Xóa dữ liệu tạo template?” được hiển thị trước khi app thực hiện.
 
 ## 7. Cách xử lý các tình huống thường gặp
 
-### Không bấm được “Tiếp tục” ở Bước 1
+### Không bấm được “Phân tích tài liệu” ở Bước 1
 
-- Kiểm tra đã chọn ít nhất một nguồn hay chưa.
-- Mỗi lần chỉ chọn tối đa 10 nguồn.
+- Kiểm tra đã chọn loại template và ít nhất một nguồn (tối đa 10 nguồn).
+- Với loại Nâng cao, phải nhập từ 2 đến 8 nhiệm vụ, mỗi dòng một nhiệm vụ.
 
-### Không bấm được “Tạo lộ trình”
+### Không bấm được “Tạo template” ở Bước 2
 
-- Phải chọn Template 1, Template 2 hoặc Cả hai.
-- Nếu chọn Template 2/Cả hai, phải nhập từ 2 đến 8 nhiệm vụ, mỗi dòng một nhiệm vụ.
-- Bước phân tích phải hoàn tất.
+- Còn module “Cần bổ sung”: tải tài liệu bổ sung, chọn đoạn từ tài liệu đã có, hoặc chọn **Vẫn dùng tài liệu hiện có**; cũng có thể **Bỏ module** không cần thiết.
+- Đợi AI đọc xong tài liệu bổ sung (“AI đang đọc tài liệu bổ sung…”).
 
-### AI báo module thiếu nguồn
+### Tải tài liệu bổ sung mà module vẫn “Cần bổ sung”
 
-- Quay lại khung lộ trình và bổ sung nguồn phù hợp cho module.
-- Hoặc Admin tự soạn nội dung nếu tài liệu hiện có chưa mô tả nghiệp vụ đó.
-- Không nên duyệt một bài học có thông tin không kiểm chứng được.
+- Đọc ghi chú thiếu của module để biết cần tài liệu gì.
+- Tải thêm tài liệu đúng nội dung, hoặc chọn đoạn từ tài liệu đã có.
+- Chỉ dùng **Vẫn dùng tài liệu hiện có** khi chắc chắn tài liệu hiện có đã đủ.
 
-### Sandbox báo `worker_failed`
+### Đóng nhầm modal khi AI đang chạy
 
-- Xem phần chi tiết lỗi và nhà cung cấp trên tiến trình.
-- Nếu đủ quyền Native và tiến trình cũ đã dừng, app tự thử Native một lần cho các luồng có hỗ trợ.
-- Nếu không có Native hoặc Native cũng thất bại, dùng **Thử lại** sau khi hệ thống ổn định; với bài học/câu hỏi có thể dùng phương án dự phòng từ nguồn khi giao diện cung cấp.
+- Chọn **Tiếp tục ở lại** ở hộp xác nhận nếu chưa muốn dừng.
+- Nếu đã đóng, mở lại modal: AI tiếp tục từ vị trí đã lưu.
+
+### Một module báo lỗi ở Bước 3
+
+- Bấm **Thử lại** ở module đó (hoặc ở thông báo chung).
+- Xem **Chi tiết lỗi kỹ thuật**; nếu Sandbox lỗi `worker_failed`, app có thể tự thử Native một lần.
 
 ### Không bấm được xuất bản
 
-- Mở từng template và xử lý toàn bộ cờ bắt buộc.
-- Đảm bảo bài học và câu hỏi của tất cả module đã được duyệt.
-- Với lựa chọn Cả hai, phải hoàn tất rà soát cả Template 1 và Template 2.
+- Xử lý toàn bộ cờ bắt buộc ở bảng **Cờ cần rà soát**.
+- Chờ app cập nhật xong (“Đang cập nhật…”); mỗi module cần 3–5 câu hỏi.
 
 ### Xuất bản lỗi giữa chừng
 
@@ -368,12 +273,11 @@ Nút **Xóa dữ liệu** không xóa template đã xuất bản. Hộp xác nh�
 
 - [ ] Tài liệu nguồn có nội dung text đọc được và không vượt quá 2 MB/file.
 - [ ] Đã chọn đúng 1–10 nguồn cần phân tích.
-- [ ] Đã xem các mâu thuẫn hoặc điểm AI yêu cầu xác minh.
-- [ ] Đã chọn đúng Template 1, Template 2 hoặc Cả hai.
-- [ ] Nếu có Template 2, đã nhập 2–8 nhiệm vụ chính rõ ràng.
-- [ ] Đã duyệt khung và nguồn của từng module.
-- [ ] Đã đọc, chỉnh sửa và duyệt bài học của mọi module.
-- [ ] Đã kiểm tra câu hỏi, đáp án và phần giải thích.
+- [ ] Đã chọn đúng loại template (Thông thường hoặc Nâng cao).
+- [ ] Nếu chọn Nâng cao, đã nhập 2–8 nhiệm vụ chính rõ ràng.
+- [ ] Ở Bước 2, mọi module đều “Đủ tài liệu” và lộ trình hợp lý.
+- [ ] Đã giữ modal mở (hoặc xác nhận tạm dừng) trong lúc AI tạo nội dung.
+- [ ] Ở Bước 4, đã đọc bài học và kiểm tra câu hỏi, đáp án, giải thích.
 - [ ] Đã xử lý mọi cờ bắt buộc.
 - [ ] Đã kiểm tra ngưỡng đạt, số lượt và chế độ học.
 - [ ] Đã xác nhận PDF/JSON được lưu trong `Onboarding-app/Created templates/<tên-template>` sau khi xuất bản.
@@ -381,8 +285,8 @@ Nút **Xóa dữ liệu** không xóa template đã xuất bản. Hộp xác nh�
 ## 9. Nguyên tắc an toàn nội dung
 
 - AI chỉ là công cụ soạn thảo; Admin chịu trách nhiệm với bản cuối được xuất bản.
-- Bài học và câu hỏi phải có căn cứ từ nguồn hoặc phần nội dung Admin đã xác nhận.
+- Bài học và câu hỏi phải có căn cứ từ nguồn hoặc phần nội dung Admin đã xác nhận; việc kiểm tra độ phủ ở Bước 2 là chốt chặn trước khi AI viết.
 - Khi nguồn thiếu hoặc mâu thuẫn, ưu tiên hiển thị cảnh báo và yêu cầu rà soát thay vì tự suy diễn.
 - Retry nhà cung cấp được giới hạn để tránh chạy lặp và tạo nhiều job nền.
 - Bản dự phòng từ nguồn ưu tiên tính kiểm chứng hơn cách diễn đạt sáng tạo.
-- Template chỉ được xuất bản sau khi Admin duyệt và không còn cờ bắt buộc.
+- Template chỉ được xuất bản sau khi Admin xem lại và không còn cờ bắt buộc.

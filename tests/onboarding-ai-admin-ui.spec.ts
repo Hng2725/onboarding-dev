@@ -1062,7 +1062,7 @@ describe('AI job milestones', () => {
     expect(html).toContain('class="ai-milestone-progress compact"');
   });
 
-  it('renders an open technical failure log with provider and attempt diagnostics', () => {
+  it('renders an open technical failure log with provider diagnostics and no raw ids', () => {
     const job = milestoneJob({
       kind: 'template',
       status: 'failed',
@@ -1083,11 +1083,10 @@ describe('AI job milestones', () => {
 
     expect(html).toContain('<details class="ai-failure-log" open="">');
     expect(html).toContain('Chi tiết lỗi kỹ thuật');
-    expect(html).toContain('job-1');
     expect(html).toContain('Tạo bài học');
-    expect(html).toContain('<code>B-lessons</code>');
     expect(html).toContain('Sandbox');
-    expect(html).toContain('agent-attempt-123');
+    expect(html).not.toContain('B-lessons');
+    expect(html).not.toContain('agent-attempt-123');
     expect(html).toContain('MODEL_PROVIDER_CREDENTIALS_REJECTED');
     expect(html).toContain('model-call');
     expect(html).toContain('The model provider rejected the configured credentials.');

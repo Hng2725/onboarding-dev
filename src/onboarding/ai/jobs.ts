@@ -18,7 +18,7 @@ import type {
 } from '../contracts';
 import type { OnboardingStore, StoreRecord } from '../store';
 import { createTemplateService } from '../templates';
-import { groundSourceRef, normalizeForMatch, type RawSourceRef } from './grounding';
+import { groundSourceRef, type RawSourceRef } from './grounding';
 import {
   mergeInventoryChunks,
   validateInventoryChunk,
