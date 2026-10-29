@@ -30,7 +30,7 @@ import { sanitizeAiDiagnosticText } from './diagnostics';
 import { materializeAiTemplate, materializeModuleTemplate } from './materialize';
 import { buildTemplateOutline, applyTemplateOutlineEdits } from './outline';
 import { buildFallbackLesson } from './fallback-lessons';
-import { buildModuleLessonPrompt, buildModuleQuestionPrompt, validateModuleLessonOutput, validateModuleQuestionOutput, validApprovedLesson, type ModuleLessonPromptInput } from './module-draft';
+import { buildModuleLessonPrompt, buildModuleLessonRepairPrompt, buildModuleQuestionRepairPrompt, buildModuleQuestionPrompt, validateModuleLessonOutput, validateModuleQuestionOutput, validApprovedLesson, type ModuleLessonPromptInput } from './module-draft';
 import { createModuleRuns, reconcileModuleRuns, invalidateModule, updateLesson, approveLesson, updateQuestions, approveQuestions, retryModuleRun, lessonApproved, modulesComplete } from './module-lifecycle';
 import { parseAiJsonObject } from './parse';
 import { acquireRoomAiLease, refreshRoomAiLease, releaseRoomAiLease, isAiLeaseConflict, aiCallMayBeLive } from './room-ai-lease';
@@ -347,8 +347,11 @@ export type AiJobNextStep =
 export interface AiJobService {
   updateOutline(actor: OnboardingActor, input: OutlineVersionInput & { readonly edits: readonly OutlineEdit[] }): Promise<AiJobRecord>;
   approveOutline(actor: OnboardingActor, input: OutlineVersionInput): Promise<AiJobRecord>;
+  listModuleSources(actor: OnboardingActor, jobId: string): Promise<readonly { sourceId: string; fileName: string; sections: readonly { id: string; headingPath: readonly string[] }[] }[]>;
+  supplementModuleSources(actor: OnboardingActor, input: OutlineVersionInput & ModuleInput & { readonly sourceIds: readonly string[]; readonly sectionIds: readonly string[] }): Promise<AiJobRecord>;
   updateModuleLesson(actor: OnboardingActor, input: ModuleVersionInput & { readonly module: GeneratedModule }): Promise<AiJobRecord>;
   approveModuleLesson(actor: OnboardingActor, input: ModuleVersionInput): Promise<AiJobRecord>;
+  useSourceFallback(actor: OnboardingActor, input: ModuleVersionInput): Promise<AiJobRecord>;
   updateModuleQuestions(actor: OnboardingActor, input: ModuleVersionInput & { readonly questions: readonly GeneratedQuestion[] }): Promise<AiJobRecord>;
   approveModuleQuestions(actor: OnboardingActor, input: ModuleVersionInput): Promise<AiJobRecord>;
   retryModule(actor: OnboardingActor, input: ModuleInput & { readonly target: 'lesson' | 'questions'; readonly expectedVersion: number }): Promise<AiJobRecord>;
@@ -824,12 +827,15 @@ export function createAiJobService(
     if (job.kind === 'template' && job.pipelineVersion === 'module_v2') {
       const run = moduleForCall(job, call);
       const input = (await moduleContext(actor, job, run)).input;
-      const base = call.moduleTarget === 'questions'
-        ? buildModuleQuestionPrompt({ ...input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance })
-        : buildModuleLessonPrompt(input);
-      if (!call.repairOf) return base;
+      const questionInput = { ...input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance };
+      if (!call.repairOf) return call.moduleTarget === 'questions' ? buildModuleQuestionPrompt(questionInput) : buildModuleLessonPrompt(input);
       const invalid = job.calls.find((item) => item.callId === call.repairOf);
-      return buildRepairPrompt(rawOutput(job.stageOutputs, call.repairOf) ?? '', invalid?.errors ?? ['Invalid module output'], base.systemContext, base.prompt);
+      let previous: unknown = {};
+      try { previous = parseAiJsonObject(rawOutput(job.stageOutputs, call.repairOf) ?? ''); } catch { /* Do not forward malformed untrusted text. */ }
+      const errors = invalid?.errors ?? ['Invalid module output'];
+      return call.moduleTarget === 'questions'
+        ? buildModuleQuestionRepairPrompt({ ...questionInput, previous, errors })
+        : buildModuleLessonRepairPrompt({ ...input, previous, errors });
     }
     if (job.kind === 'inventory') {
       const sources = await loadSources(actor.roomId, job.sourceIds ?? []);
@@ -1294,9 +1300,9 @@ export function createAiJobService(
       && Date.parse(row.pumpLeaseUntil as string) >= Date.parse(now());
   }
 
-  async function releaseCallLease(actor: OnboardingActor, row: AiJobDbRecord, call: AiCallRecord): Promise<void> {
+  async function releaseCallLease(actor: OnboardingActor, row: AiJobDbRecord, call: AiCallRecord): Promise<boolean> {
     const holderId = call.leaseHolderId ?? row.pumpedBy;
-    if (holderId) await releaseRoomAiLease(store, actor, { jobId: row.jobId, callId: call.callId, holderId, now: now() });
+    return holderId ? releaseRoomAiLease(store, actor, { jobId: row.jobId, callId: call.callId, holderId, now: now() }) : true;
   }
 
   async function assertRoomLease(actor: OnboardingActor, row: AiJobDbRecord, callId: string, holderId: string): Promise<void> {
@@ -1477,19 +1483,19 @@ export function createAiJobService(
     if (waiting) return waiting;
     if (row.pumpLeaseUntil && Date.parse(row.pumpLeaseUntil) >= Date.parse(now()) && row.pumpedBy !== workerId) return { kind: 'wait', job: jobFrom(row, actor.roomId) };
     let call = row.calls.find((item) => item.status === 'pending' || item.status === 'dispatched');
-    const reviewRequired = row.moduleRuns!.some((run) => !run.outline.tombstoned
-      && (['review_ready', 'fallback_review', 'manual_required', 'failed'].includes(run.lessonState)
-        || ['review_ready', 'failed'].includes(run.questionState)));
-    if (reviewRequired && !call?.attemptRef && !call?.dispatchClaimedAt) return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
     if (!call) {
-      for (const run of row.moduleRuns!.filter((item) => !item.outline.tombstoned).sort((a, b) => a.outline.order - b.outline.order)) {
-        const target = ['queued', 'stale'].includes(run.lessonState) ? 'lesson' : lessonApproved(run) && run.questionState === 'queued' ? 'questions' : undefined;
-        if (!target) continue;
+      const active = row.moduleRuns!.filter((item) => !item.outline.tombstoned).sort((a, b) => a.outline.order - b.outline.order);
+      const lessonWork = active.filter((run) => ['queued', 'stale'].includes(run.lessonState));
+      const allLessonsApproved = active.every(lessonApproved);
+      const questionReview = active.some((run) => ['review_ready', 'failed'].includes(run.questionState));
+      const candidates = lessonWork.length ? lessonWork : allLessonsApproved && !questionReview ? active.filter((run) => run.questionState === 'queued') : [];
+      for (const run of candidates) {
+        const target = lessonWork.length ? 'lesson' : 'questions';
         const context = await moduleContext(actor, row, run);
         if (!context.usable) {
           if (target === 'questions' && run.lessonProvenance === 'manual' && run.outline.sourceSectionIds.length === 0) return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
           row = await updateJob(actor, row, { moduleRuns: replaceRun(row, await fallbackRun(actor, row, run)) });
-          return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
+          continue;
         }
         const callId = 'module-' + String(row.calls.length + 1);
         call = { callId, stage: row.templateKind === 'advanced' ? 'C' : 'B', status: 'pending', operationId: row.jobId + ':' + callId, moduleLocalId: run.outline.moduleLocalId, moduleTarget: target, moduleVersion: target === 'lesson' ? run.lessonVersion : run.questionVersion, lessonVersion: run.lessonVersion, outlineRevision: row.outline!.revision };
@@ -1649,6 +1655,37 @@ export function createAiJobService(
       const runs = reconcileModuleRuns(row.moduleRuns!, outline).map((run): AiModuleDraftRun => ({ ...run, ...(run.lessonState === 'drafting' ? { lessonState: 'queued' } : {}), ...(run.questionState === 'drafting' ? { questionState: 'queued' } : {}) }));
       return jobFrom(await updateJob(actor, row, { outline, outlineApprovedRevision: 0, moduleRuns: runs, calls: obsoleteCalls(row, new Set(row.moduleRuns!.map((run) => run.outline.moduleLocalId))), status: 'running', result: null, ...RELEASED_LEASE, ...CLEARED_WAIT }), actor.roomId);
     },
+    async listModuleSources(actor, jobId) {
+      await requireModuleJob(actor, jobId);
+      const all: SourceRecord[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await store.query<SourceDbRecord>(actor.roomId, 'onboarding_sources', { limit: 100, ...(cursor ? { cursor } : {}) });
+        all.push(...page.records.map((record) => sourceFrom(record, actor.roomId)).filter((source) => source.status === 'ready' && !source.deletedAt));
+        cursor = page.nextCursor;
+      } while (cursor);
+      return all.map((source) => ({ sourceId: source.sourceId, fileName: source.fileName, sections: (source.sections ?? []).filter((section) => section.text.trim()).map(({ id, headingPath }) => ({ id, headingPath })) }));
+    },
+    async supplementModuleSources(actor, input) {
+      const row = await requireModuleJob(actor, input.jobId);
+      assertOutlineRevision(row, input.expectedRevision);
+      const run = row.moduleRuns!.find((item) => !item.outline.tombstoned && item.outline.moduleLocalId === input.moduleLocalId);
+      if (!run || row.calls.some(aiCallMayBeLive)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Module is unavailable or an AI call is still active.');
+      if (!Array.isArray(input.sourceIds) || !input.sourceIds.length || new Set(input.sourceIds).size !== input.sourceIds.length || !Array.isArray(input.sectionIds) || !input.sectionIds.length || new Set(input.sectionIds).size !== input.sectionIds.length) throw new AiJobServiceError('OPERATION_CONFLICT', 'Select unique sources and sections.');
+      const sources = await loadSources(actor.roomId, input.sourceIds);
+      const sections = sources.flatMap((source) => source.sections ?? []);
+      if (input.sectionIds.some((id) => typeof id !== 'string' || sections.filter((section) => section.id === id && section.text.trim()).length !== 1)) throw new AiJobServiceError('SOURCE_NOT_FOUND', 'Selected sections must belong to selected room sources.');
+      const sourceIds = [...new Set([...(row.sourceIds ?? []), ...input.sourceIds])];
+      if (sourceIds.length > AI_GENERATION_LIMITS.maxSourcesPerRoom) throw new AiJobServiceError('SOURCE_NOT_FOUND', 'Too many selected sources.');
+      const authorized = await Promise.all(sourceIds.map((id) => sourceById(actor.roomId, id)));
+      const usableSections = authorized.filter((source): source is SourceRecord => !!source && source.status === 'ready' && !source.deletedAt).flatMap((source) => source.sections ?? []);
+      const retained = run.outline.sourceSectionIds.filter((id) => usableSections.filter((section) => section.id === id && section.text.trim()).length === 1);
+      const outline = applyTemplateOutlineEdits(row.outline!, [{ type: 'update', moduleLocalId: input.moduleLocalId, patch: { sourceSectionIds: [...new Set([...retained, ...input.sectionIds])] } }], () => 'unused');
+      validateOutline(row, outline);
+      const runs = reconcileModuleRuns(row.moduleRuns!, outline).map((run): AiModuleDraftRun => ({ ...run, ...(run.lessonState === 'drafting' ? { lessonState: 'queued' } : {}), ...(run.questionState === 'drafting' ? { questionState: 'queued' } : {}) }));
+      const calls = obsoleteCalls(row, new Set(row.moduleRuns!.map((item) => item.outline.moduleLocalId)));
+      return jobFrom(await updateJob(actor, row, { sourceIds, outline, outlineApprovedRevision: 0, moduleRuns: runs, calls, status: 'running', result: null, ...leaseAfterChanges(calls) }), actor.roomId);
+    },
     async approveOutline(actor, input) {
       const row = await requireModuleJob(actor, input.jobId);
       assertOutlineRevision(row, input.expectedRevision);
@@ -1669,6 +1706,12 @@ export function createAiJobService(
       const next = approveLesson(run, input.expectedVersion);
       if (!validApprovedLesson(next.lessonDraft!, (await moduleContext(actor, row, run)).input, next.lessonProvenance!)) throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Lesson is invalid or ungrounded.');
       return saveRun(actor, row, next, { target: 'lesson', version: next.lessonVersion, module: next.lessonDraft, provenance: next.lessonProvenance, flags: next.lessonFlags ?? [] });
+    },
+    async useSourceFallback(actor, input) {
+      const row = await requireModuleJob(actor, input.jobId);
+      const run = requireRun(row, input.moduleLocalId);
+      if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion !== run.lessonVersion || !['review_ready', 'approved', 'fallback_review', 'failed', 'manual_required', 'queued', 'stale'].includes(run.lessonState) || run.questionState === 'drafting') throw new AiJobServiceError('OPERATION_CONFLICT', 'Lesson version conflict or an active call prevents fallback.');
+      return saveRun(actor, row, await fallbackRun(actor, row, run));
     },
     async updateModuleQuestions(actor, input) {
       const row = await requireModuleJob(actor, input.jobId);
@@ -1888,17 +1931,21 @@ export function createAiJobService(
       const row = await requireOwnedJob(actor, input.jobId);
       if (input.providerErrorCode === 'DISPATCH_NOT_STARTED') {
         const call = row.calls.find((item) => item.callId === input.callId);
-        if (!call || call.leaseHolderId !== input.workerId) throw new AiJobServiceError('JOB_LEASE_LOST', 'The dispatch claim belongs to another holder.');
+        if (!call || call.leaseHolderId !== input.workerId || !call.dispatchClaimedAt) throw new AiJobServiceError('JOB_LEASE_LOST', 'The dispatch claim belongs to another holder.');
         if (call.attemptRef || call.dispatchUnknown) throw new AiJobServiceError('JOB_CALL_MISMATCH', 'A started or uncertain attempt cannot be abandoned.');
-        await assertRoomLease(actor, row, call.callId, input.workerId);
-        const calls = row.calls.map((item) => {
+        const alreadyRecorded = call.providerErrorCode === 'DISPATCH_NOT_STARTED' && call.cleanupState === 'confirmed';
+        if (!alreadyRecorded) await assertRoomLease(actor, row, call.callId, input.workerId);
+        const evidenced = alreadyRecorded ? row : await updateJob(actor, row, {
+          calls: row.calls.map((item) => item.callId === call.callId ? { ...item, providerErrorCode: 'DISPATCH_NOT_STARTED', cleanupState: 'confirmed' as const, cleanupUpdatedAt: now() } : item),
+          ...RELEASED_LEASE,
+        });
+        if (!await releaseCallLease(actor, evidenced, call)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Room lease release conflicted; retry reconciliation.');
+        const calls = evidenced.calls.map((item) => {
           if (item.callId !== call.callId) return item;
-          const { dispatchClaimedAt: _claim, leaseHolderId: _holder, cleanupState: _cleanup, cleanupUpdatedAt: _cleanupAt, ...rest } = item;
+          const { dispatchClaimedAt: _claim, leaseHolderId: _holder, cleanupState: _cleanup, cleanupUpdatedAt: _cleanupAt, providerErrorCode: _code, ...rest } = item;
           return rest;
         });
-        const updated = await updateJob(actor, row, { calls, ...RELEASED_LEASE });
-        await releaseCallLease(actor, row, call);
-        return jobFrom(updated, actor.roomId);
+        return jobFrom(await updateJob(actor, evidenced, { calls }), actor.roomId);
       }
       if (row.status !== 'running') {
         throw new AiJobServiceError('JOB_NOT_RUNNING', 'The AI job is not running.');
@@ -2052,7 +2099,10 @@ export function createAiJobService(
           'A completed AI job cannot be cancelled.',
         );
       }
-      if (row.status === 'cancelled') return jobFrom(row, actor.roomId);
+      if (row.status === 'cancelled') {
+        for (const call of row.calls) if (!aiCallMayBeLive(call)) await releaseCallLease(actor, row, call);
+        return jobFrom(row, actor.roomId);
+      }
       const timestamp = now();
       // A cancelled server job says nothing about the provider; each live attempt awaits proof.
       const calls = row.calls.map((call) => aiCallMayBeLive(call)

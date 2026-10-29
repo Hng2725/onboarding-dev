@@ -109,11 +109,11 @@ export function templateMilestones(
     const approved = job.outline?.revision === job.outlineApprovedRevision;
     const documents = runs.filter((run) => Boolean(run.lessonDraft)).length;
     const lessonDone = runs.length > 0 && runs.every((run) => run.lessonState === 'approved');
-    const questionDone = runs.length > 0 && runs.every((run) => run.questionState === 'approved');
+    const questionDone = lessonDone && runs.every((run) => run.questionState === 'approved');
     return [
       { id: 'prepare', label: 'Duyệt khung lộ trình', status: approved ? 'completed' : 'active' },
       { id: 'lessons', label: 'Viết và duyệt tài liệu học', status: lessonDone ? 'completed' : approved ? 'active' : 'pending', detail: documents + '/' + runs.length + ' module có tài liệu' },
-      { id: 'questions', label: 'Tạo và duyệt câu hỏi', status: questionDone ? 'completed' : approved ? 'active' : 'pending' },
+      { id: 'questions', label: 'Tạo và duyệt câu hỏi', status: questionDone ? 'completed' : lessonDone ? 'active' : 'pending' },
       { id: 'draft', label: 'Tạo bản nháp để rà soát', status: job.status === 'completed' ? 'completed' : 'pending' },
     ];
   }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildModuleLessonPrompt, buildModuleQuestionPrompt, buildModuleLessonRepairPrompt, validateModuleLessonOutput, validateModuleQuestionOutput } from '../src/onboarding/ai/module-draft';
+import { buildModuleLessonPrompt, buildModuleQuestionPrompt, buildModuleLessonRepairPrompt, buildModuleQuestionRepairPrompt, validateModuleLessonOutput, validateModuleQuestionOutput } from '../src/onboarding/ai/module-draft';
 import { bounded } from '../src/onboarding/ai/prompts';
 
 const module = { moduleLocalId: 'm1', frameKey: 't1-core', order: 3, title: 'Outline', description: '', estimatedMinutes: 10, objectives: [], featureIds: ['f1'], sourceSectionIds: ['s1'], responsibilityIndexes: [0] };
@@ -10,6 +10,31 @@ const lesson = { title: 'Lesson', description: 'Description', estimatedMinutes: 
 const question = (id: string) => ({ localId: id, level: 'recall', prompt: 'Question?', options: [{ id: 'a', label: 'One' }, { id: 'b', label: 'Two' }, { id: 'c', label: 'Three' }, { id: 'd', label: 'Four' }], correctOptionId: 'a', explanation: 'This explanation is long enough.', blockIds: ['b1'], sourceRefs: [ref] });
 
 describe('module draft contracts', () => {
+  it('describes the nested objects and enum constraints needed by the validator', () => {
+    const lessonRequest = buildModuleLessonPrompt(input).prompt;
+    expect(lessonRequest).toContain('{sectionId,quote}');
+    expect(lessonRequest).toContain('{order,text}');
+    const parsed = validateModuleLessonOutput(lesson, input);
+    if (!parsed.ok) throw new Error('lesson invalid');
+    const questionRequest = buildModuleQuestionPrompt({ ...input, lesson: parsed.value.module, lessonVersion: 1 }).prompt;
+    expect(questionRequest).toContain('{id,label}');
+    expect(questionRequest).toContain('recall|procedure|scenario');
+  });
+  it('rejects foreign question references before including previous output in repair', () => {
+    const parsed = validateModuleLessonOutput(lesson, input);
+    if (!parsed.ok) throw new Error('lesson invalid');
+    const qinput = { ...input, lesson: parsed.value.module, lessonVersion: 1, errors: ['invalid'] };
+    const valid = { questions: [question('q1'), question('q2'), question('q3')], flags: [] };
+    expect(buildModuleQuestionRepairPrompt({ ...qinput, previous: valid }).systemContext).toContain('previous_output');
+    expect(() => buildModuleQuestionRepairPrompt({ ...qinput, previous: { ...valid, questions: [{ ...question('q1'), blockIds: ['foreign'] }] } })).toThrow();
+    expect(() => buildModuleQuestionRepairPrompt({ ...qinput, previous: { ...valid, flags: [{ type: 'missing', severity: 'warning', message: 'secret', questionForAdmin: 'why', location: { questionLocalId: 'foreign' }, evidence: [] }] } })).toThrow();
+  });
+  it('includes the approved objectives and duration in the actual lesson request', () => {
+    const request = buildModuleLessonPrompt({ ...input, module: { ...module, estimatedMinutes: 25, objectives: ['Edited objective', 'Practice safely'] } });
+    expect(request.systemContext).toContain('Edited objective');
+    expect(request.systemContext).toContain('Practice safely');
+    expect(request.systemContext).toContain('&quot;estimatedMinutes&quot;:25');
+  });
   it('enforces UTF-8 byte limits at the exact multibyte instruction boundary', () => {
     expect(Buffer.byteLength(bounded('é'.repeat(20_000), '').prompt, 'utf8')).toBe(40_000);
     expect(() => bounded('é'.repeat(20_000) + 'x', '')).toThrow();

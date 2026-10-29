@@ -32,6 +32,8 @@ export function validateTemplateOutline(outline: TemplateOutline, input: { templ
     if (!modules.some((m) => m.frameKey === frame) && !outline.flags.some((f) => f.type === 'missing' && f.severity === 'blocking' && f.location.frameKey === frame)) add('REQUIRED_FRAME', 'modules', `Missing required frame ${frame}.`);
   });
   if (input.templateKind === 'advanced') {
+    const assignments = modules.flatMap((module) => module.responsibilityIndexes);
+    if (new Set(assignments).size !== assignments.length) add('DUPLICATE_RESPONSIBILITY', 'modules', 'Each responsibility may be assigned to only one module, once.');
     const normalized = input.responsibilities.map(normalizeForMatch);
     if (normalized.length < 2 || normalized.length > 8 || normalized.some((x) => !x) || new Set(normalized).size !== normalized.length) add('RESPONSIBILITIES', 'responsibilities', 'Provide 2 to 8 unique responsibilities.');
     input.responsibilities.forEach((task, i) => {

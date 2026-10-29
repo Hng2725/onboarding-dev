@@ -39,7 +39,7 @@ import {
 } from './ai-gateway-native-chat';
 import { pumpAiJob } from './ai-pump';
 import { AiReview } from './ai-review';
-import { AiOutlineReview } from './ai-outline-review';
+import { AiOutlineReview, type ModuleSourceCatalog } from './ai-outline-review';
 import { AiModuleWorkspace } from './ai-module-workspace';
 import {
   AiPublishBatchError,
@@ -885,6 +885,7 @@ export function AiGeneratorPage({
   const [activeReviewIndex, setActiveReviewIndex] = useState(0);
   const [busy, setBusy] = useState(false);
   const [editingOutline, setEditingOutline] = useState(false);
+  const [moduleSourceCatalog, setModuleSourceCatalog] = useState<ModuleSourceCatalog>([]);
   const [selectedTemplateKind, setSelectedTemplateKind] = useState<EmployeeType | null>(null);
   const [selectedModuleId, setSelectedModuleId] = useState(() => roomId ? readAiResumeKey('onboarding:ai:module:' + roomId) ?? '' : '');
   const [notice, setNotice] = useState<InlineNoticeMessage | null>(null);
@@ -1022,6 +1023,14 @@ export function AiGeneratorPage({
     }
     return result.review;
   }, [api, setReview]);
+
+  useEffect(() => {
+    let active = true;
+    if (templateJob?.pipelineVersion === 'module_v2' && (editingOutline || templateJob.outlineApprovedRevision !== templateJob.outline?.revision)) {
+      void api.adminAi<{ sources: ModuleSourceCatalog }>('list_module_sources', { jobId: templateJob.jobId }).then((result) => { if (active) setModuleSourceCatalog(result.sources); }).catch(() => { if (active) setModuleSourceCatalog([]); });
+    }
+    return () => { active = false; };
+  }, [api, templateJob?.jobId, templateJob?.pipelineVersion, templateJob?.outlineApprovedRevision, templateJob?.outline?.revision, editingOutline, sources]);
 
   useEffect(() => {
     let active = true;
@@ -1676,7 +1685,7 @@ export function AiGeneratorPage({
                 {templateRuns.length > 1 && <nav className="ai-module-actions" aria-label="Chọn template">{templateRuns.map((run, index) => <button type="button" key={run.kind} aria-pressed={run.kind === activeTemplateRun?.kind} onClick={() => setSelectedTemplateKind(run.kind)}>{run.job?.status === 'completed' ? 'Xem' : 'Tiếp tục'} Template {index + 1}</button>)}</nav>}
                 {templateJob.status === 'running' && templateJob.outlineApprovedRevision === templateJob.outline.revision && <button className="button button-secondary" type="button" disabled={busy} onClick={() => void resumeModuleJob()}>Tiếp tục xử lý</button>}
                 {templateJob.status === 'completed' && <div role="status"><strong>Các module đã được duyệt</strong><button type="button" disabled={busy} onClick={() => void resumeModuleJob()}>Rà soát bản nháp</button></div>}
-                {editingOutline || templateJob.outlineApprovedRevision !== templateJob.outline.revision ? <AiOutlineReview key={templateJob.jobId} outline={templateJob.outline} templateKind={templateJob.templateKind ?? 'normal'} responsibilities={templateJob.roleProfile?.responsibilities ?? []} busy={busy} onEdit={(edits) => void moduleAction('update_outline', { expectedRevision: templateJob.outline!.revision, edits })} onApprove={() => { setEditingOutline(false); void moduleAction('approve_outline', { expectedRevision: templateJob.outline!.revision }, true); }} /> : <><button type="button" onClick={() => setEditingOutline(true)}>Chỉnh sửa khung và nguồn</button><AiModuleWorkspace runs={templateJob.moduleRuns ?? []} calls={templateJob.calls} history={templateJob.stageOutputs.__moduleAudit} selectedId={selectedModuleId} busy={busy} onSelect={(id) => { setSelectedModuleId(id); if (roomId) writeAiResumeKey('onboarding:ai:module:' + roomId, id); }} onAction={(action, args) => void moduleAction(action, args, action === 'approve_module_lesson' || action === 'approve_module_questions' || action === 'retry_module')} onSources={() => setStep(0)} /></>}
+                {editingOutline || templateJob.outlineApprovedRevision !== templateJob.outline.revision ? <AiOutlineReview key={templateJob.jobId} outline={templateJob.outline} templateKind={templateJob.templateKind ?? 'normal'} responsibilities={templateJob.roleProfile?.responsibilities ?? []} busy={busy} sourceCatalog={moduleSourceCatalog} onSupplement={(moduleLocalId, sourceIds, sectionIds) => void moduleAction('supplement_module_sources', { expectedRevision: templateJob.outline!.revision, moduleLocalId, sourceIds, sectionIds })} onEdit={(edits) => void moduleAction('update_outline', { expectedRevision: templateJob.outline!.revision, edits })} onApprove={() => { setEditingOutline(false); void moduleAction('approve_outline', { expectedRevision: templateJob.outline!.revision }, true); }} /> : <><button type="button" onClick={() => setEditingOutline(true)}>Chỉnh sửa khung và nguồn</button><AiModuleWorkspace runs={templateJob.moduleRuns ?? []} calls={templateJob.calls} history={templateJob.stageOutputs.__moduleAudit} selectedId={selectedModuleId} busy={busy} onSelect={(id) => { setSelectedModuleId(id); if (roomId) writeAiResumeKey('onboarding:ai:module:' + roomId, id); }} onAction={(action, args) => void moduleAction(action, args, action === 'approve_module_lesson' || action === 'approve_module_questions' || action === 'retry_module')} onSources={() => setStep(0)} /></>}
               </section>
             ) : <section className="ai-workspace-card ai-workspace-input-card">
               {templateRuns.length > 1 && <nav className="ai-module-actions" aria-label="Chọn template">{templateRuns.map((run, index) => <button type="button" key={run.kind} aria-pressed={run.kind === activeTemplateRun?.kind} onClick={() => setSelectedTemplateKind(run.kind)}>{run.job?.status === 'completed' ? 'Xem' : 'Tiếp tục'} Template {index + 1}</button>)}</nav>}

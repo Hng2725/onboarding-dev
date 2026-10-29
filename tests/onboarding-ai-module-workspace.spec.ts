@@ -79,3 +79,19 @@ it('keeps unsaved text on a server status refresh and sends the current retry ve
   act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Viết lại module')!.props.onClick());
   expect(onAction).toHaveBeenCalledWith('retry_module', { moduleLocalId: 'm', target: 'lesson', expectedVersion: 4 });
 });
+
+it('exposes versioned fallback and regeneration choices for approved content', () => {
+  const run = approvedModuleJob().moduleRuns![0];
+  const onAction = vi.fn();
+  const view = TestRenderer.create(createElement(AiModuleWorkspace, { runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false, onSelect: () => {}, onAction, onSources: () => {} }));
+  for (const [label, action, args] of [
+    ['Dùng bản từ nguồn', 'use_source_fallback', { moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion }],
+    ['Viết lại module', 'retry_module', { moduleLocalId: run.outline.moduleLocalId, target: 'lesson', expectedVersion: run.lessonVersion }],
+    ['Tạo lại câu hỏi', 'retry_module', { moduleLocalId: run.outline.moduleLocalId, target: 'questions', expectedVersion: run.questionVersion }],
+  ] as const) {
+    const button = view.root.findAllByType('button').find((item) => item.children.join('') === label)!;
+    expect(button.props.disabled).toBe(false);
+    act(() => button.props.onClick());
+    expect(onAction).toHaveBeenCalledWith(action, args);
+  }
+});

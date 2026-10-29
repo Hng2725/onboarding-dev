@@ -1,3 +1,4 @@
+import { approvedModuleJob } from './helpers/approved-module-fixture';
 import { createElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
@@ -837,6 +838,12 @@ function milestoneStatuses(milestones: ReturnType<typeof templateMilestones>): r
 }
 
 describe('AI job milestones', () => {
+  it('keeps question generation pending until every lesson is approved', () => {
+    const job = approvedModuleJob();
+    const runs = job.moduleRuns!.map((run, index) => index === 0 ? { ...run, lessonState: 'review_ready' as const, approvedLessonVersion: undefined } : run);
+    const milestones = templateMilestones({ ...job, status: 'running', moduleRuns: runs });
+    expect(milestones.find((item) => item.id === 'questions')?.status).toBe('pending');
+  });
   it('maps inventory preparation, batches, repair, failure, and completion to stable milestones', () => {
     expect(inventoryMilestones(null, 2).map(({ id, status }) => ({ id, status }))).toEqual([
       { id: 'prepare', status: 'completed' },

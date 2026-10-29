@@ -70,6 +70,9 @@ function services(): OnboardingServiceBundle {
     aiJobs: {
       updateOutline: vi.fn().mockResolvedValue({ jobId: 'job-1', outline: { revision: 2 } }),
       approveOutline: vi.fn().mockResolvedValue({ jobId: 'job-1', outlineApprovedRevision: 1 }),
+      listModuleSources: vi.fn().mockResolvedValue([]),
+      supplementModuleSources: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
+      useSourceFallback: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
       updateModuleLesson: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
       approveModuleLesson: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
       updateModuleQuestions: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
@@ -138,14 +141,16 @@ describe('onboarding tool dispatcher', () => {
     const bundle = services();
     const handle = createOnboardingToolHandler(() => bundle);
     const actor = verified({ room_roles: ['owner'] }, 'admin-1');
-    for (const action of ['update_outline', 'approve_outline', 'update_module_lesson', 'approve_module_lesson', 'update_module_questions', 'approve_module_questions', 'retry_module']) {
-      const args = { action, jobId: 'job-1', moduleLocalId: 'm1', expectedRevision: 1, expectedVersion: 1, edits: [], module: {}, questions: [], target: 'lesson', roomId: 'forged' };
+    for (const action of ['update_outline', 'approve_outline', 'supplement_module_sources', 'use_source_fallback', 'update_module_lesson', 'approve_module_lesson', 'update_module_questions', 'approve_module_questions', 'retry_module']) {
+      const args = { action, jobId: 'job-1', moduleLocalId: 'm1', expectedRevision: 1, expectedVersion: 1, edits: [], module: {}, questions: [], sourceIds: ['source'], sectionIds: ['source#s1'], target: 'lesson', roomId: 'forged' };
       await expect(handle('onboarding_admin_ai', args, actor)).resolves.toMatchObject({ job: { jobId: 'job-1' } });
       await expect(handle('onboarding_admin_ai', args, verified())).rejects.toThrow();
     }
     await expect(handle('onboarding_admin_ai', { action: 'approve_outline', jobId: 'job-1' }, actor)).rejects.toThrow();
     await expect(handle('onboarding_admin_ai', { action: 'retry_module', jobId: 'job-1', moduleLocalId: 'm1', target: 'other' }, actor)).rejects.toThrow();
     await expect(handle('onboarding_admin_ai', { action: 'retry_module', jobId: 'job-1', moduleLocalId: 'm1', target: 'lesson' }, actor)).rejects.toThrow();
+    await expect(handle('onboarding_admin_ai', { action: 'list_module_sources', jobId: 'job-1' }, actor)).resolves.toMatchObject({ sources: [] });
+    expect(bundle.aiJobs.supplementModuleSources).toHaveBeenCalledWith(expect.objectContaining({ roomId: 'room-a', userId: 'admin-1' }), expect.objectContaining({ sourceIds: ['source'], sectionIds: ['source#s1'] }));
     expect(bundle.aiJobs.retryModule).toHaveBeenCalledWith(expect.objectContaining({ roomId: 'room-a', userId: 'admin-1' }), { jobId: 'job-1', moduleLocalId: 'm1', target: 'lesson', expectedVersion: 1 });
     expect(bundle.aiJobs.updateOutline).toHaveBeenCalledWith(expect.objectContaining({ roomId: 'room-a', userId: 'admin-1' }), { jobId: 'job-1', expectedRevision: 1, edits: [] });
   });

@@ -43,7 +43,41 @@ async function setup(maxPageSize?: number) {
   return { store, service, other, now, advance: (ms: number) => { time += ms; }, inventoryJob, templateJob };
 }
 
+async function approveOtherLessons(service: ReturnType<typeof createAiJobService>, jobId: string) {
+  let current = await service.getJob(admin, jobId);
+  const others = current.moduleRuns!.slice(1);
+  current = await service.updateOutline(admin, { jobId, expectedRevision: current.outline!.revision, edits: others.map((run) => ({ type: 'update', moduleLocalId: run.outline.moduleLocalId, patch: { sourceSectionIds: ['source-1#s1'] } })) });
+  current = await service.approveOutline(admin, { jobId, expectedRevision: current.outline!.revision });
+  for (const run of current.moduleRuns!.slice(1)) {
+    const module = { ...generatedTemplate.modules[0], localId: run.outline.moduleLocalId, frameKey: run.outline.frameKey, featureIds: run.outline.featureIds, questions: [] };
+    current = await service.updateModuleLesson(admin, { jobId, moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion, module });
+    const updated = current.moduleRuns!.find((item) => item.outline.moduleLocalId === run.outline.moduleLocalId)!;
+    current = await service.approveModuleLesson(admin, { jobId, moduleLocalId: run.outline.moduleLocalId, expectedVersion: updated.lessonVersion });
+  }
+}
+
 describe('room AI serialization', () => {
+  it.each(['replay', 'cancel'] as const)('recovers non-dispatch evidence after failed release via %s', async (recovery) => {
+    const { service, other, inventoryJob, store, advance } = await setup();
+    const first = await inventoryJob('first');
+    const second = await inventoryJob('second');
+    await service.nextStep(admin, { jobId: first.jobId, workerId: 'tab-a' });
+    const input = { jobId: first.jobId, workerId: 'tab-a', callId: 'A1', kind: 'failed' as const, providerErrorCode: 'DISPATCH_NOT_STARTED' };
+    const update = store.update.bind(store);
+    let fail = true;
+    let conflict = true;
+    vi.spyOn(store, 'update').mockImplementation(async (room, collection, id, data, options) => {
+      if (fail && collection === 'onboarding_ai_room_leases' && data.expiresAt === '1970-01-01T00:00:00.000Z') { fail = false; throw new Error('release failed'); }
+      if (conflict && collection === 'onboarding_ai_room_leases' && data.jobId === second.jobId) { conflict = false; throw Object.assign(new Error('Atomic update conflict'), { code: 'OPERATION_CONFLICT' }); }
+      return update(room, collection, id, data, options);
+    });
+    await expect(service.reportAiFailure(admin, input)).rejects.toThrow('release failed');
+    advance(AI_GENERATION_LIMITS.pumpLeaseMs + 1);
+    await expect(other.nextStep(admin, { jobId: second.jobId, workerId: 'tab-b' })).resolves.toMatchObject({ kind: 'wait' });
+    if (recovery === 'replay') await service.reportAiFailure(admin, input);
+    else await service.cancelJob(admin, first.jobId);
+    await expect(other.nextStep(admin, { jobId: second.jobId, workerId: 'tab-b' })).resolves.toMatchObject({ kind: 'ai_call' });
+  });
   it.each(['create', 'takeover'] as const)('keeps an atomic dispatch reservation fenced when %s suspends beyond expiry', async (operation) => {
     const { service, other, inventoryJob, store, advance, now } = await setup();
     const first = await inventoryJob('first');
@@ -82,6 +116,36 @@ describe('room AI serialization', () => {
     expect(competing.kind).toBe('wait');
     expect(original.kind).toBe('ai_call');
     await expect(other.nextStep(admin, { jobId: first.jobId, workerId: 'tab-c' })).resolves.toMatchObject({ kind: 'wait' });
+  });
+
+  it('keeps non-dispatch proof when release CAS conflicts and replays safely', async () => {
+    const { service, other, inventoryJob, store, advance } = await setup();
+    const first = await inventoryJob('first');
+    const second = await inventoryJob('second');
+    await service.nextStep(admin, { jobId: first.jobId, workerId: 'tab-a' });
+    const input = { jobId: first.jobId, workerId: 'tab-a', callId: 'A1', kind: 'failed' as const, providerErrorCode: 'DISPATCH_NOT_STARTED' };
+    const update = store.update.bind(store);
+    let conflict = true;
+    vi.spyOn(store, 'update').mockImplementation(async (room, collection, id, data, options) => {
+      if (conflict && collection === 'onboarding_ai_room_leases' && data.expiresAt === '1970-01-01T00:00:00.000Z') { conflict = false; throw Object.assign(new Error('Atomic update conflict'), { code: 'OPERATION_CONFLICT' }); }
+      return update(room, collection, id, data, options);
+    });
+    await expect(service.reportAiFailure(admin, input)).rejects.toMatchObject({ code: 'OPERATION_CONFLICT' });
+    expect((await service.getJob(admin, first.jobId)).calls[0]).toMatchObject({ leaseHolderId: 'tab-a', providerErrorCode: 'DISPATCH_NOT_STARTED', cleanupState: 'confirmed' });
+    await service.reportAiFailure(admin, input);
+    advance(AI_GENERATION_LIMITS.pumpLeaseMs + 1);
+    await expect(other.nextStep(admin, { jobId: second.jobId, workerId: 'tab-b' })).resolves.toMatchObject({ kind: 'ai_call' });
+  });
+
+  it('never forwards foreign module data from invalid output into the actual repair request', async () => {
+    const { service, templateJob } = await setup();
+    const job = await templateJob();
+    const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    if (step.kind !== 'ai_call') throw new Error('Expected lesson');
+    await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: step.callId, text: JSON.stringify({ localId: 'foreign', title: 'FOREIGN SECRET' }) });
+    const repair = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    if (repair.kind === 'ai_call') expect(repair.prompt + repair.systemContext).not.toContain('FOREIGN SECRET');
+    expect((await service.getJob(admin, job.jobId)).moduleRuns![0].lessonState).toBe('fallback_review');
   });
 
   it('releases terminal evidence after a release transport failure, including repeated cleanup confirmation', async () => {
@@ -420,7 +484,7 @@ describe('bounded provider waiting and module recovery', () => {
     await expect(service.nextStep(admin, { jobId: other.jobId, workerId: 'tab-other' })).resolves.toMatchObject({ kind: 'wait' });
   });
 
-  it('does not dispatch a queued room waiter after another module enters review', async () => {
+  it('dispatches a queued room waiter after another module enters review', async () => {
     const { service, inventoryJob, templateJob } = await setup();
     const blocker = await inventoryJob('blocker');
     await service.nextStep(admin, { jobId: blocker.jobId, workerId: 'blocker' });
@@ -431,7 +495,7 @@ describe('bounded provider waiting and module recovery', () => {
     const run = edited.moduleRuns![1];
     await service.updateModuleLesson(admin, { jobId: job.jobId, moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion, module: { ...generatedTemplate.modules[1], localId: run.outline.moduleLocalId, frameKey: run.outline.frameKey, featureIds: run.outline.featureIds, questions: [] } });
     await service.submitAiOutput(admin, { jobId: blocker.jobId, workerId: 'blocker', callId: 'A1', text: JSON.stringify(inventory) });
-    await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'awaiting_admin' });
+    await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'ai_call' });
   });
 
   it('gives a manual retry a fresh provider wait budget after the busy module is edited', async () => {
@@ -443,6 +507,7 @@ describe('bounded provider waiting and module recovery', () => {
     const run = job.moduleRuns![0];
     const edited = await service.updateModuleLesson(admin, { jobId: job.jobId, moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion, module: { ...generatedTemplate.modules[0], localId: run.outline.moduleLocalId, frameKey: run.outline.frameKey, featureIds: run.outline.featureIds, questions: [] } });
     await service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId: run.outline.moduleLocalId, expectedVersion: edited.moduleRuns![0].lessonVersion });
+    await approveOtherLessons(service, job.jobId);
     advance(120_001);
     const question = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
     if (question.kind !== 'ai_call') throw new Error('Expected question call');
@@ -466,6 +531,7 @@ describe('bounded provider waiting and module recovery', () => {
     const { localId: _id, frameKey: _frame, featureIds: _features, questions: _questions, ...lesson } = generatedTemplate.modules[0];
     const current = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: step.callId, text: JSON.stringify({ ...lesson, flags: [] }) });
     await service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId: current.moduleRuns![0].outline.moduleLocalId, expectedVersion: current.moduleRuns![0].lessonVersion });
+    await approveOtherLessons(service, job.jobId);
     step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
     if (step.kind !== 'ai_call') throw new Error('Expected questions');
     const failed = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: step.callId, text: '{invalid-questions' });
@@ -475,15 +541,15 @@ describe('bounded provider waiting and module recovery', () => {
     expect(failed.calls).toHaveLength(4);
   });
 
-  it('honors review of a later module before dispatching any earlier queued module', async () => {
+  it('continues queued lessons while a later module awaits review', async () => {
     const { service, templateJob } = await setup();
     const job = await templateJob();
     const edited = await service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: job.outline!.modules.map((module) => ({ type: 'update', moduleLocalId: module.moduleLocalId, patch: { sourceSectionIds: ['source-1#s1'] } })) });
     await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 2 });
     const run = edited.moduleRuns![1];
     await service.updateModuleLesson(admin, { jobId: job.jobId, moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion, module: { ...generatedTemplate.modules[1], localId: run.outline.moduleLocalId, frameKey: run.outline.frameKey, featureIds: run.outline.featureIds, questions: [] } });
-    await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'awaiting_admin' });
-    expect((await service.getJob(admin, job.jobId)).calls).toHaveLength(0);
+    await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'ai_call' });
+    expect((await service.getJob(admin, job.jobId)).calls).toHaveLength(1);
   });
 
   it('retries PROJECT_BUSY with increasing bounded delays and an unchanged original deadline', async () => {
@@ -552,13 +618,14 @@ describe('bounded provider waiting and module recovery', () => {
     expect(current.moduleRuns![0]).toMatchObject({ lessonState: 'drafting', schemaRepairs: 1 });
     const repair = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
     if (repair.kind !== 'ai_call') throw new Error('Expected schema repair');
-    expect(repair.prompt + repair.systemContext).toContain('{invalid');
+    expect(repair.prompt + repair.systemContext).not.toContain('{invalid');
+    expect(repair.systemContext).toContain('<previous_output>');
     current = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: repair.callId, text: '{still-invalid' });
     expect(current.moduleRuns![0]).toMatchObject({ lessonState: 'fallback_review', schemaRepairs: 1, lessonAttempts: 2 });
     await expect(other.nextStep(admin, { jobId: otherJob.jobId, workerId: 'tab-b' })).resolves.toMatchObject({ kind: 'ai_call' });
   });
 
-  it('stops at lesson review even when later modules have usable sources', async () => {
+  it('continues to later lessons when they have usable sources', async () => {
     const { service, templateJob } = await setup();
     const job = await templateJob();
     await service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: job.outline!.modules.map((module) => ({ type: 'update', moduleLocalId: module.moduleLocalId, patch: { sourceSectionIds: ['source-1#s1'] } })) });
@@ -567,8 +634,8 @@ describe('bounded provider waiting and module recovery', () => {
     if (step.kind !== 'ai_call') throw new Error('Expected lesson call');
     const { localId: _id, frameKey: _frame, featureIds: _features, questions: _questions, ...lesson } = generatedTemplate.modules[0];
     await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: step.callId, text: JSON.stringify({ ...lesson, flags: [] }) });
-    await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'awaiting_admin' });
-    expect((await service.getJob(admin, job.jobId)).calls).toHaveLength(1);
+    await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'ai_call' });
+    expect((await service.getJob(admin, job.jobId)).calls).toHaveLength(2);
   });
 });
 

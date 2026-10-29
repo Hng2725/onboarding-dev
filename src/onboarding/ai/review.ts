@@ -1034,20 +1034,30 @@ export function createAiReviewService(
       if (input.ops.some((op) => op.kind === 'checkpoint_publication')) {
         if (input.ops.length !== 1 || input.ops[0].kind !== 'checkpoint_publication') throw new AiReviewServiceError('REVIEW_INVALID', 'Checkpoint one publication artifact at a time.');
         const op = input.ops[0];
-        const publication = detail.content.publication ?? { pdfs: {} };
-        let next = publication;
+        let next: NonNullable<TemplateContentSnapshot['publication']>;
         if ('jsonFileId' in op) {
           if (detail.status !== 'published' || !op.jsonFileId?.trim()) throw new AiReviewServiceError('REVIEW_INVALID', 'A published template and JSON file ID are required.');
-          next = { ...publication, jsonFileId: op.jsonFileId.trim() };
+          next = { pdfs: {}, jsonFileId: op.jsonFileId.trim() };
         } else {
           if (!detail.modules.some((m) => m.id === op.moduleId) || op.resource?.id !== 'ai-lesson-pdf-' + op.moduleId
             || op.resource.kind !== 'file' || !op.resource.required || !op.resource.fileId?.trim() || !op.resource.title?.trim()) throw new AiReviewServiceError('REVIEW_INVALID', 'A valid lesson PDF resource is required.');
-          next = { ...publication, pdfs: { ...publication.pdfs, [op.moduleId]: op.resource } };
+          next = { pdfs: { [op.moduleId]: op.resource } };
         }
         const rows = await store.query<TemplateContentDbRecord>(actor.roomId, 'onboarding_template_content', { filter: { templateId: detail.id, templateVersion: detail.version }, limit: 1 });
         const row = rows.records[0];
         if (!row) throw new AiReviewServiceError('REVIEW_NOT_FOUND', 'Template content not found.');
-        await store.update(actor.roomId, 'onboarding_template_content', row.id, { content: { ...detail.content, publication: next }, updatedAt: now() }, { expectedUpdatedAt: row.updatedAt });
+        // Settings and independent artifact checkpoints may have changed after
+        // detail was read. Only merge into the same instructional snapshot.
+        const identity = (content: TemplateContentSnapshot) => {
+          const { publication: _publication, ...snapshot } = content;
+          return JSON.stringify(snapshot);
+        };
+        if (identity(row.content) !== identity(detail.content)) throw new AiReviewServiceError('REVIEW_CONFLICT', 'Publication content changed. Review the current draft first.');
+        const latest = await templates.getAdminDetail(actor, detail.id, detail.version);
+        if (latest.updatedAt !== detail.updatedAt || latest.passingScore !== detail.passingScore || latest.status !== detail.status) throw new AiReviewServiceError('REVIEW_CONFLICT', 'Publication settings changed. Review the current draft first.');
+        const publication = row.content.publication ?? { pdfs: {} };
+        const merged = { ...publication, ...next, pdfs: { ...publication.pdfs, ...next!.pdfs } };
+        await store.update(actor.roomId, 'onboarding_template_content', row.id, { content: { ...row.content, publication: merged }, updatedAt: now() }, { expectedUpdatedAt: row.updatedAt });
         return templates.getAdminDetail(actor, detail.id, detail.version);
       }
       if (detail.content.moduleApproval && input.ops.some((op) => op.kind !== 'set_settings' && op.kind !== 'upsert_generated_resource')) {

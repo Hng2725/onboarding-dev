@@ -68,36 +68,33 @@ describe('AI onboarding integration', () => {
     expect(job.calls).toEqual([]);
     job = await jobs.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: job.outline!.modules.map((module, index) => ({ type: 'update', moduleLocalId: module.moduleLocalId, patch: { sourceSectionIds: index === 2 ? [] : ['source-1#s1'] } })) });
     job = await jobs.approveOutline(admin, { jobId: job.jobId, expectedRevision: 2 });
+    const sample = generatedTemplate.modules[0];
+    for (const index of [0, 1, 3, 4]) {
+      const run = job.moduleRuns![index];
+      const step = await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'worker' });
+      if (step.kind !== 'ai_call') throw new Error('Expected one lesson call');
+      expect(await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'other-tab' })).toMatchObject({ kind: 'wait' });
+      const blocks = sample.blocks.map((block, blockIndex) => ({ ...block, localId: `safe-${index}-b${blockIndex}`, kind: block.kind === 'concept' ? 'scenario' as const : block.kind }));
+      job = index === 1
+        ? await jobs.reportAiFailure(admin, { jobId: job.jobId, workerId: 'worker', callId: step.callId, kind: 'failed' })
+        : await jobs.submitAiOutput(admin, { jobId: job.jobId, workerId: 'worker', callId: step.callId, text: JSON.stringify({ title: sample.title, description: sample.description, objectives: sample.objectives, estimatedMinutes: sample.estimatedMinutes, blocks, flags: [] }) });
+      expect(job.calls.at(-1)).toMatchObject({ moduleLocalId: run.outline.moduleLocalId, moduleTarget: 'lesson' });
+      expect(job.moduleRuns![index].lessonProvenance).toBe(index === 1 ? 'fallback' : 'ai');
+    }
+    expect(await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'worker' })).toMatchObject({ kind: 'awaiting_admin' });
+    expect(job.moduleRuns![2]).toMatchObject({ lessonState: 'manual_required', questionState: 'blocked' });
+    const manual = job.moduleRuns![2];
+    const manualBlocks = sample.blocks.map((block, blockIndex) => ({ ...block, localId: `safe-2-b${blockIndex}`, kind: block.kind === 'concept' ? 'scenario' as const : block.kind, sourceRefs: [] }));
+    job = await jobs.updateModuleLesson(admin, { jobId: job.jobId, moduleLocalId: manual.outline.moduleLocalId, expectedVersion: manual.lessonVersion, module: { ...sample, localId: manual.outline.moduleLocalId, frameKey: manual.outline.frameKey, featureIds: manual.outline.featureIds, blocks: manualBlocks, questions: [] } });
+    for (const run of job.moduleRuns!) job = await jobs.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion });
     for (let index = 0; index < job.moduleRuns!.length; index += 1) {
       const run = job.moduleRuns![index];
       const args = { jobId: job.jobId, moduleLocalId: run.outline.moduleLocalId };
-      const step = await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'worker' });
-      const sample = generatedTemplate.modules[0];
-      const blocks = sample.blocks.map((block, blockIndex) => ({ ...block, localId: `safe-${index}-b${blockIndex}`, kind: block.kind === 'concept' ? 'scenario' as const : block.kind, sourceRefs: index === 2 ? [] : block.sourceRefs }));
-      if (index === 2) {
-        expect(step.kind).toBe('awaiting_admin');
-        job = await jobs.getJob(admin, job.jobId);
-        expect(job.moduleRuns![index]).toMatchObject({ lessonState: 'manual_required', questionState: 'blocked' });
-        await expect(jobs.approveModuleLesson(admin, { ...args, expectedVersion: job.moduleRuns![index].lessonVersion })).rejects.toThrow();
-        job = await jobs.updateModuleLesson(admin, { ...args, expectedVersion: job.moduleRuns![index].lessonVersion, module: { ...sample, localId: args.moduleLocalId, frameKey: run.outline.frameKey, featureIds: run.outline.featureIds, blocks, questions: [] } });
-      } else {
-        if (step.kind !== 'ai_call') throw new Error('Expected one lesson call');
-        expect((await jobs.getJob(admin, job.jobId)).calls.filter((call) => call.status === 'pending' || call.status === 'running')).toHaveLength(1);
-        expect(await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'other-tab' })).toMatchObject({ kind: 'wait' });
-        job = index === 1
-          ? await jobs.reportAiFailure(admin, { jobId: job.jobId, workerId: 'worker', callId: step.callId, kind: 'failed' })
-          : await jobs.submitAiOutput(admin, { jobId: job.jobId, workerId: 'worker', callId: step.callId, text: JSON.stringify({ title: sample.title, description: sample.description, objectives: sample.objectives, estimatedMinutes: sample.estimatedMinutes, blocks, flags: [] }) });
-        expect(job.moduleRuns![index].lessonProvenance).toBe(index === 1 ? 'fallback' : 'ai');
-        if (index === 1) expect(job.moduleRuns![0]).toMatchObject({ lessonState: 'approved', questionState: 'approved' });
-      }
-      expect(await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'worker' })).toMatchObject({ kind: 'awaiting_admin' });
-      job = await jobs.approveModuleLesson(admin, { ...args, expectedVersion: job.moduleRuns![index].lessonVersion });
-      const questions = sample.questions.map((question, questionIndex) => ({ ...question, localId: `safe-${index}-q${questionIndex}`, blockIds: [job.moduleRuns![index].lessonDraft!.blocks[0].localId], sourceRefs: index === 2 ? [] : question.sourceRefs }));
-      if (index === 2) {
-        job = await jobs.updateModuleQuestions(admin, { ...args, expectedVersion: job.moduleRuns![index].questionVersion, questions });
-      } else {
+      const questions = sample.questions.map((question, questionIndex) => ({ ...question, localId: `safe-${index}-q${questionIndex}`, blockIds: [run.lessonDraft!.blocks[0].localId], sourceRefs: index === 2 ? [] : question.sourceRefs }));
+      if (index === 2) job = await jobs.updateModuleQuestions(admin, { ...args, expectedVersion: run.questionVersion, questions });
+      else {
         const qstep = await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'worker' });
-        if (qstep.kind !== 'ai_call') throw new Error('Expected questions after lesson approval');
+        if (qstep.kind !== 'ai_call') throw new Error('Expected questions after all lessons were approved');
         job = await jobs.submitAiOutput(admin, { jobId: job.jobId, workerId: 'worker', callId: qstep.callId, text: JSON.stringify({ questions, flags: [] }) });
       }
       job = await jobs.approveModuleQuestions(admin, { ...args, expectedVersion: job.moduleRuns![index].questionVersion });

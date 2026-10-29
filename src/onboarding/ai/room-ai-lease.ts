@@ -135,14 +135,16 @@ export async function refreshRoomAiLease(store: OnboardingStore, actor: Onboardi
   return store.update<LeaseRecord>(actor.roomId, 'onboarding_ai_room_leases', current.id, { expiresAt: expiresAt(input), updatedAt: timestamp(input, current) }, { expectedUpdatedAt: current.updatedAt });
 }
 
-export async function releaseRoomAiLease(store: OnboardingStore, actor: OnboardingActor, input: RoomAiLeaseInput): Promise<void> {
+export async function releaseRoomAiLease(store: OnboardingStore, actor: OnboardingActor, input: RoomAiLeaseInput): Promise<boolean> {
   assertInput(actor, input);
   const current = await readLease(store, actor.roomId);
-  if (!current || !matches(current, input)) return;
+  if (!current || !matches(current, input) || Date.parse(current.expiresAt) <= 0) return true;
   try {
     await store.update(actor.roomId, 'onboarding_ai_room_leases', current.id, { dispatchReserved: false, expiresAt: new Date(0).toISOString(), updatedAt: timestamp(input, current) }, { expectedUpdatedAt: current.updatedAt });
+    return true;
   } catch (error) {
-    // A concurrent refresh/takeover owns the record now. Never release its lease.
     if (!isAiLeaseConflict(error)) throw error;
+    const latest = await readLease(store, actor.roomId);
+    return !latest || !matches(latest, input) || Date.parse(latest.expiresAt) <= 0;
   }
 }

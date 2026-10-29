@@ -49,3 +49,30 @@ it('permits valid admin reorder and disables approval while a title edit is unsa
   act(() => view.update(createElement(AiOutlineReview, { outline: { revision: 3, modules: modules.map((item, i) => i === 0 ? { ...item, title: 'Updated' } : item), taskCoverage: [], flags: [] }, templateKind: 'normal', responsibilities: [], busy: false, onEdit: () => {}, onApprove: () => {} })));
   expect(approve().props.disabled).toBe(false);
 });
+
+it('offers constrained add and remove actions with server-owned IDs', () => {
+  const modules = ['t1-overview', 't1-access', 't1-navigation', 't1-core', 't1-workflow'].map((frameKey, order) => ({ moduleLocalId: 'm' + order, frameKey, order, title: frameKey, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] }));
+  const onEdit = vi.fn();
+  const view = TestRenderer.create(createElement(AiOutlineReview, { outline: { revision: 1, modules, taskCoverage: [], flags: [] }, templateKind: 'normal', responsibilities: [], busy: false, onEdit, onApprove: () => {} }));
+  const removable = view.root.findAllByType('article')[4].findAllByType('button').find((button) => button.props['aria-label'] === 'Remove t1-workflow')!;
+  expect(removable.props.disabled).toBe(false);
+  act(() => removable.props.onClick());
+  expect(onEdit).toHaveBeenCalledWith([{ type: 'delete', moduleLocalId: 'm4' }]);
+  const select = view.root.findAllByType('select').find((item) => item.props['aria-label'] === 'Add frame')!;
+  const frame = select.findAllByType('option').find((option) => option.props.value)!.props.value;
+  act(() => select.props.onChange({ target: { value: frame } }));
+  const add = view.root.findAllByType('button').find((button) => button.props['aria-label'] === 'Add frame')!;
+  act(() => add.props.onClick());
+  expect(onEdit).toHaveBeenCalledWith([expect.objectContaining({ type: 'add', module: expect.objectContaining({ frameKey: frame }) })]);
+});
+
+it('selects a room source section for an existing module', () => {
+  const modules = ['t1-overview', 't1-access', 't1-navigation', 't1-core'].map((frameKey, order) => ({ moduleLocalId: 'm' + order, frameKey, order, title: frameKey, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [] }));
+  const onSupplement = vi.fn();
+  const view = TestRenderer.create(createElement(AiOutlineReview, { outline: { revision: 1, modules, taskCoverage: [], flags: [] }, templateKind: 'normal', responsibilities: [], busy: false, onEdit: () => {}, onApprove: () => {}, sourceCatalog: [{ sourceId: 'new-source', fileName: 'Policy.pdf', sections: [{ id: 'new-source#1', headingPath: ['Policy'] }] }], onSupplement }));
+  const card = view.root.findAllByType('article')[0];
+  const checkbox = card.findAllByType('input').find((input) => input.props.type === 'checkbox')!;
+  act(() => checkbox.props.onChange({ target: { checked: true } }));
+  act(() => card.findAllByType('button').find((button) => button.props['aria-label'] === 'Add selected sources')!.props.onClick());
+  expect(onSupplement).toHaveBeenCalledWith('m0', ['new-source'], ['new-source#1']);
+});

@@ -12,6 +12,50 @@ import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template
 const admin: OnboardingActor = { userId: 'admin-1', roomId: 'room-a', access: 'admin' };
 
 describe('module publication gate', () => {
+  it('merges a concurrent JSON checkpoint with a PDF checkpoint for the same published snapshot', async () => {
+    const { store, review, templates, draft } = await setup();
+    const published = await templates.publish(admin, draft.id, 1);
+    const query = store.query.bind(store);
+    const update = store.update.bind(store);
+    let reads = 0;
+    vi.spyOn(store, 'query').mockImplementation(async (room, collection, options) => {
+      if (collection === 'onboarding_template_content' && ++reads === 2) {
+        const existing = (await query(room, collection, options)).records[0];
+        const content = existing.content as typeof published.content;
+        await update(room, collection, String(existing.id), { content: { ...content!, publication: { pdfs: {}, jsonFileId: 'concurrent-json' } }, updatedAt: '2026-12-01T00:00:00.000Z' });
+      }
+      return query(room, collection, options);
+    });
+    const id = published.modules[0].id;
+    const result = await review.updateReview(admin, { templateId: published.id, version: 1, expectedUpdatedAt: published.updatedAt, ops: [{ kind: 'checkpoint_publication', moduleId: id, resource: { id: 'ai-lesson-pdf-' + id, kind: 'file', required: true, title: 'First', fileId: 'first-pdf' } }] });
+    expect(result.content!.publication).toMatchObject({ jsonFileId: 'concurrent-json', pdfs: { [id]: { fileId: 'first-pdf' } } });
+  });
+  it.each([false, true])('preserves another PDF checkpoint and rejects concurrent settings changes (settings changed: %s)', async (settingsChanged) => {
+    const { store, review, draft } = await setup();
+    const query = store.query.bind(store);
+    const update = store.update.bind(store);
+    let reads = 0;
+    vi.spyOn(store, 'query').mockImplementation(async (room, collection, options) => {
+      if (collection === 'onboarding_template_content' && ++reads === 2) {
+        const existing = (await query(room, collection, options)).records[0];
+        const content = existing.content as typeof draft.content;
+        const other = draft.modules[1].id;
+        await update(room, collection, String(existing.id), { content: { ...content!, ...(settingsChanged ? { learningMode: 'free', maxAttemptsPerModule: 7 } : {}), publication: { pdfs: { [other]: { id: 'ai-lesson-pdf-' + other, kind: 'file', required: true, title: 'Other', fileId: 'other-pdf' } } } }, updatedAt: '2026-12-01T00:00:00.000Z' });
+      }
+      return query(room, collection, options);
+    });
+    const id = draft.modules[0].id;
+    const operation = review.updateReview(admin, { templateId: draft.id, version: 1, expectedUpdatedAt: draft.updatedAt, ops: [{ kind: 'checkpoint_publication', moduleId: id, resource: { id: 'ai-lesson-pdf-' + id, kind: 'file', required: true, title: 'First', fileId: 'first-pdf' } }] });
+    if (settingsChanged) await expect(operation).rejects.toMatchObject({ code: 'REVIEW_CONFLICT' });
+    else await operation;
+    const result = await review.getReview(admin, draft.id, 1);
+    expect(result.content!.publication!.pdfs[draft.modules[1].id].fileId).toBe('other-pdf');
+    if (settingsChanged) {
+      expect(result.content).toMatchObject({ learningMode: 'free', maxAttemptsPerModule: 7 });
+      expect(result.content!.publication!.pdfs[id]).toBeUndefined();
+    } else expect(result.content!.publication!.pdfs[id].fileId).toBe('first-pdf');
+
+  });
   it('replaces an edited pending target after an interrupted overlap without exposing its projected predecessor', async () => {
     const { store, templates, review, draft } = await setup();
     const job = approvedModuleJob('advanced');

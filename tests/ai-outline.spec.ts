@@ -14,6 +14,14 @@ const build = (templateKind: 'normal' | 'advanced' = 'normal', data = inventory)
   buildTemplateOutline({ jobId: 'job-1', templateKind, inventory: data, responsibilities });
 
 describe('template outlines', () => {
+  it('rejects responsibility assignments duplicated within or across modules', () => {
+    const outline = build('advanced');
+    const assigned = outline.modules.findIndex((m) => m.responsibilityIndexes.includes(0));
+    for (const duplicate of [assigned, assigned === 0 ? 1 : 0]) {
+      const modules = outline.modules.map((m, i) => i === duplicate ? { ...m, responsibilityIndexes: [...m.responsibilityIndexes, 0] } : m);
+      expect(validateAdminOutline({ ...outline, modules }, { templateKind: 'advanced', responsibilities })).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'DUPLICATE_RESPONSIBILITY' })]));
+    }
+  });
   it('covers all eight responsibilities within eight immutable authoritative frames', () => {
     const tasks = ['Create report', 'Review access', 'Manage users', 'Check orders', 'Audit changes', 'Resolve issues', 'Train users', 'Export records'];
     const outline = buildTemplateOutline({ jobId: 'eight', templateKind: 'advanced', inventory, responsibilities: tasks });

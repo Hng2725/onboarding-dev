@@ -99,6 +99,65 @@ describe('module lifecycle transitions', () => {
 });
 
 describe('persisted module jobs', () => {
+  it('sends edited approved objectives and duration in the provider request', async () => {
+    const { service, job } = await setup();
+    const edited = await service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: [{ type: 'update', moduleLocalId: active(job).outline.moduleLocalId, patch: { objectives: ['Revised objective', 'Practice'], estimatedMinutes: 35 } }] });
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: edited.outline!.revision });
+    const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' });
+    if (step.kind !== 'ai_call') throw new Error('Expected lesson call');
+    expect(step.systemContext).toContain('Revised objective');
+    expect(step.systemContext).toContain('&quot;estimatedMinutes&quot;:35');
+  });
+  it('authorizes room-bound supplemental sections for one existing module without changing other approvals', async () => {
+    const { service, store, job } = await setup();
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 });
+    const approved = await approveManualPair(service, job, active(job));
+    const source = (await store.query('room-a', 'onboarding_sources')).records[0];
+    await store.create('room-a', 'onboarding_sources', { ...source, id: undefined, sourceId: 'source-new', checksum: 'new', sections: [{ ...aiSource.sections![0], id: 'source-new#s1' }] });
+    const other = approved.moduleRuns![1];
+    const broken = await service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: [{ type: 'update', moduleLocalId: other.outline.moduleLocalId, patch: { sourceSectionIds: ['unresolved'] } }] });
+    const args = { jobId: job.jobId, expectedRevision: broken.outline!.revision, moduleLocalId: other.outline.moduleLocalId, sourceIds: ['source-new'], sectionIds: ['source-new#s1'] };
+    await expect(service.supplementModuleSources({ ...admin, roomId: 'foreign' }, args)).rejects.toThrow();
+    await expect(service.supplementModuleSources(admin, { ...args, sectionIds: ['arbitrary'] })).rejects.toThrow();
+    const updated = await service.supplementModuleSources(admin, args);
+    expect(updated.sourceIds).toContain('source-new');
+    expect(updated.moduleRuns![1].outline.sourceSectionIds).toEqual(['source-new#s1']);
+    expect(updated.moduleRuns![0]).toMatchObject({ lessonState: 'approved', questionState: 'approved' });
+    expect(updated.stageOutputs.__moduleAudit).toEqual(approved.stageOutputs.__moduleAudit);
+    await expect(service.supplementModuleSources(admin, args)).rejects.toThrow();
+  });
+  it('uses a versioned source fallback and invalidates an approved pair while retaining its audit', async () => {
+    const { service, job } = await setup();
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 });
+    const approved = await approveManualPair(service, job, active(job));
+    const run = active(approved);
+    const args = { jobId: job.jobId, moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion };
+    await expect(service.useSourceFallback(admin, { ...args, expectedVersion: run.lessonVersion - 1 })).rejects.toThrow();
+    const fallback = await service.useSourceFallback(admin, args);
+    expect(active(fallback)).toMatchObject({ lessonState: 'fallback_review', lessonProvenance: 'fallback', lessonVersion: run.lessonVersion + 1, questionState: 'stale' });
+    expect(active(fallback).approvedLessonVersion).toBeUndefined();
+    expect(active(fallback).approvedQuestionVersion).toBeUndefined();
+    expect(fallback.stageOutputs.__moduleAudit).toEqual(approved.stageOutputs.__moduleAudit);
+  });
+  it('drafts every lesson before requiring all lesson approvals and then gates each question set', async () => {
+    const { service, job } = await setup();
+    const edited = await service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: job.outline!.modules.map((module) => ({ type: 'update', moduleLocalId: module.moduleLocalId, patch: { sourceSectionIds: ['source-1#s1'] } })) });
+    let current = await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: edited.outline!.revision });
+    for (const run of current.moduleRuns!) {
+      const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' });
+      expect(step.kind).toBe('ai_call');
+      if (step.kind !== 'ai_call') throw new Error('Expected lesson call');
+      current = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab', callId: step.callId, text: JSON.stringify(lessonOutput()) });
+      expect(current.calls.at(-1)).toMatchObject({ moduleLocalId: run.outline.moduleLocalId, moduleTarget: 'lesson' });
+    }
+    expect((await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' })).kind).toBe('awaiting_admin');
+    for (const run of current.moduleRuns!) current = await service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion });
+    const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' });
+    if (step.kind !== 'ai_call') throw new Error('Expected question call');
+    current = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab', callId: step.callId, text: JSON.stringify({ questions: lesson.questions, flags: [] }) });
+    expect(current.calls.at(-1)?.moduleTarget).toBe('questions');
+    expect((await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' })).kind).toBe('awaiting_admin');
+  });
   it.each([{ responsibilityIndexes: null }, { sourceSectionIds: null }, { sourceSectionIds: [123] }])('returns a validation conflict for malformed outline arrays %j without persisting', async (patch) => {
     const { service, job } = await setup('advanced');
     await expect(service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: [{ type: 'update', moduleLocalId: active(job).outline.moduleLocalId, patch: patch as never }] })).rejects.toMatchObject({ code: 'OPERATION_CONFLICT' });
@@ -252,13 +311,6 @@ describe('persisted module jobs', () => {
     expect(active(draft)).toMatchObject({ lessonState: 'review_ready', lessonVersion: 1, questionState: 'blocked' });
     const moduleLocalId = active(draft).outline.moduleLocalId;
     await service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId, expectedVersion: 1 });
-    const qstep = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' });
-    if (qstep.kind !== 'ai_call') throw new Error('No question call');
-    draft = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab', callId: qstep.callId, text: JSON.stringify({ questions: lesson.questions, flags: [] }) });
-    expect(active(draft)).toMatchObject({ questionState: 'review_ready', questionVersion: 1, questionLessonVersion: 1 });
-    draft = await service.approveModuleQuestions(admin, { jobId: job.jobId, moduleLocalId, expectedVersion: 1 });
-    expect(active(draft).questionState).toBe('approved');
-    expect(draft.stageOutputs.__moduleAudit).toEqual(expect.arrayContaining([expect.objectContaining({ target: 'lesson', version: 1 }), expect.objectContaining({ target: 'questions', version: 1, lessonVersion: 1 })]));
     await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' })).resolves.toMatchObject({ kind: 'awaiting_admin' });
     expect((await service.getJob(admin, job.jobId)).status).toBe('running');
   });
@@ -283,14 +335,8 @@ describe('persisted module jobs', () => {
     expect(active(failed)).toMatchObject({ lessonState: 'fallback_review', lessonProvenance: 'fallback' });
     expect(active(failed).lessonDraft?.blocks.some((b) => b.kind === 'scenario')).toBe(false);
     await service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId: active(failed).outline.moduleLocalId, expectedVersion: 1 });
-    const qstep = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' });
-    expect(qstep).toMatchObject({ kind: 'ai_call', prompt: expect.stringContaining('questions') });
-    if (qstep.kind !== 'ai_call') throw new Error('No fallback question call');
-    const questions = lesson.questions.map((question) => ({ ...question, blockIds: [active(failed).lessonDraft!.blocks[0].localId] }));
-    const questionDraft = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab', callId: qstep.callId, text: JSON.stringify({ questions, flags: [] }) });
-    expect(active(questionDraft)).toMatchObject({ lessonProvenance: 'fallback', questionState: 'review_ready' });
-    const approved = await service.approveModuleQuestions(admin, { jobId: job.jobId, moduleLocalId: active(failed).outline.moduleLocalId, expectedVersion: active(questionDraft).questionVersion });
-    expect(active(approved).questionState).toBe('approved');
+    await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab' })).resolves.toMatchObject({ kind: 'awaiting_admin' });
+    expect(active(await service.getJob(admin, job.jobId))).toMatchObject({ lessonState: 'approved', lessonProvenance: 'fallback' });
   });
   it('missing exact sources become manual placeholders, block questions and completion, and never use unrelated context', async () => {
     const { service, job } = await setup();
