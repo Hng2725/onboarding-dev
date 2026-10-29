@@ -18,3 +18,6 @@ dist-source/
 
 # Standalone pairing identity (secret: relay creds + dispatch trust) — never commit
 privos-standalone-identity.json
+
+# Brainstorm mockups
+.superpowers/
