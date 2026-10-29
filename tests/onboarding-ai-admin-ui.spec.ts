@@ -45,6 +45,7 @@ import {
   validateSourceFile,
 } from '../src/ui/onboarding/ai/source-panel';
 import { TemplateCard, templateDetailActions } from '../src/ui/onboarding/template-editor-ui';
+import { ConfirmDialog } from '../src/ui/onboarding/components';
 import { createAiReviewService } from '../src/onboarding/ai/review';
 import { createTemplateService } from '../src/onboarding/templates';
 import { materializeModuleTemplate } from '../src/onboarding/ai/materialize';
@@ -1180,5 +1181,29 @@ describe('AI compact review panes', () => {
     expect(html).not.toContain('Câu hỏi chỉ xuất hiện trong tab câu hỏi?');
     expect(html).toContain('1 cờ bắt buộc');
     expect(html).toContain('aria-expanded="true"');
+  });
+});
+
+describe('AI destructive confirmation', () => {
+  it('uses danger styling only when the caller marks the confirmation as destructive', () => {
+    const normal = renderToStaticMarkup(createElement(ConfirmDialog, {
+      open: true,
+      title: 'Xác nhận',
+      description: 'Giữ nguyên dữ liệu.',
+      onCancel: () => undefined,
+      onConfirm: () => undefined,
+    }));
+    const danger = renderToStaticMarkup(createElement(ConfirmDialog, {
+      open: true,
+      danger: true,
+      title: 'Xóa dữ liệu?',
+      description: 'Không xóa nguồn đã thêm.',
+      onCancel: () => undefined,
+      onConfirm: () => undefined,
+    }));
+
+    expect(normal).toContain('class="button button-primary"');
+    expect(normal).not.toContain('button-danger');
+    expect(danger).toContain('class="button button-danger"');
   });
 });

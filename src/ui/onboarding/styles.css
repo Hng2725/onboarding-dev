@@ -373,6 +373,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .dialog-card h2 { margin: 15px 0 7px; font-size: 19px; }
 .dialog-card p { margin: 0; color: var(--on-text-soft); font-size: 15px; line-height: 1.6; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 24px; }
+.button-danger { border-color: var(--on-danger); color: #fff; background: var(--on-danger); }
+.button-danger:hover:not(:disabled),.button-danger:focus-visible { border-color: color-mix(in srgb,var(--on-danger) 78%,#000); background: color-mix(in srgb,var(--on-danger) 86%,#000); }
+.button-danger:disabled { cursor: not-allowed; opacity: .55; }
 
 .page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
 .page-heading h2 { margin: 5px 0 7px; font-size: clamp(23px, 3vw, 31px); letter-spacing: -0.035em; }

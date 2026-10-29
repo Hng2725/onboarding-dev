@@ -1,6 +1,7 @@
 import {
   CheckOutlined,
   CloseOutlined,
+  DeleteOutlined,
   LoadingOutlined,
   PlayCircleOutlined,
   RedoOutlined,
@@ -24,7 +25,7 @@ import type { AiReviewOperation } from '../../../onboarding/ai/review';
 import type { AdminTemplateDetail } from '../../../onboarding/templates';
 import { AI_GENERATION_LIMITS } from '../../../onboarding/ai/limits';
 import { resolveHostCapability, type OnboardingApi } from '../api';
-import { InlineNotice, type InlineNoticeMessage } from '../components';
+import { ConfirmDialog, InlineNotice, type InlineNoticeMessage } from '../components';
 import {
   ensureOnboardingRoomfiles,
   ensureTemplateRoomfilesFolder,
@@ -44,6 +45,7 @@ import {
   shouldUseNativeForPump,
 } from './question-recovery';
 import { AiReview } from './ai-review';
+import { resetAiGeneratorServerState } from './ai-generator-reset';
 import { AiOutlineReview, type ModuleSourceCatalog } from './ai-outline-review';
 import { AiModuleWorkspace } from './ai-module-workspace';
 import {
@@ -309,6 +311,19 @@ export function clearAiResumeKeys(keys: readonly string[]): void {
   } catch {
     // Server-side job discovery remains the source of truth when storage is unavailable.
   }
+}
+
+function aiGeneratorResumeKeys(roomId: string, userId: string): readonly string[] {
+  return [
+    'onboarding:ai:inventory:' + roomId,
+    'onboarding:ai:template:' + roomId,
+    'onboarding:ai:template:' + roomId + ':normal',
+    'onboarding:ai:template:' + roomId + ':advanced',
+    'onboarding:ai:publish:' + roomId + ':' + userId,
+    'onboarding:ai:selection:' + roomId,
+    'onboarding:ai:responsibilities:' + roomId,
+    'onboarding:ai:module:' + roomId,
+  ];
 }
 
 export function canPublishAiReview(flags: readonly VerificationFlag[]): {
@@ -902,6 +917,9 @@ export function AiGeneratorPage({
   const [roomJobs, setRoomJobs] = useState<readonly AiJobRecord[]>([]);
   const [checkingCleanup, setCheckingCleanup] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [sourcePanelEpoch, setSourcePanelEpoch] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
   const cleanupAbortRef = useRef<AbortController | null>(null);
   const appRef = useRef(app);
@@ -1162,6 +1180,80 @@ export function AiGeneratorPage({
       await refreshCleanups();
     } catch (caught) {
       if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
+    }
+  }
+
+  function resetLocalSession(
+    nextSources: readonly SourceSummary[],
+    sessionJobIds: ReadonlySet<string> = new Set(),
+  ) {
+    abortRef.current?.abort();
+    cleanupAbortRef.current?.abort();
+    abortRef.current = null;
+    cleanupAbortRef.current = null;
+    setStep(0);
+    setSources(nextSources);
+    setSelectedIds(new Set(nextSources.map((source) => source.sourceId)));
+    setSystemName('');
+    setSoftwareVersion('');
+    setEffectiveDate('');
+    setInventoryJob(null);
+    setTemplateRuns([]);
+    setTemplateSelection(null);
+    setTemplateTitle('');
+    setResponsibilities('');
+    setPublishTargets([]);
+    setPublishProgress(null);
+    setActiveReviewIndex(0);
+    setBusy(false);
+    setEditingOutline(false);
+    setOutlineFocusModuleId(null);
+    setModuleSourceCatalog([]);
+    setSelectedTemplateKind(null);
+    setSelectedModuleId('');
+    setNotice(null);
+    setRoomJobs((current) => current.filter((job) => !sessionJobIds.has(job.jobId)));
+    setCheckingCleanup(false);
+    setCancelling(false);
+    setResetConfirmOpen(false);
+    setSourcePanelEpoch((current) => current + 1);
+  }
+
+  async function resetGeneratorSession() {
+    if (!roomId || resetting) return;
+    setResetting(true);
+    setNotice(null);
+    const jobs = [inventoryJob, ...templateRuns.map((run) => run.job)]
+      .filter((job): job is AiJobRecord => Boolean(job));
+    const reviews = templateRuns
+      .map((run) => run.review)
+      .filter((candidate): candidate is AdminTemplateDetail => Boolean(candidate));
+    const sessionJobIds = new Set(jobs.map((job) => job.jobId));
+    try {
+      await resetAiGeneratorServerState({
+        jobs,
+        reviews,
+        cancelJob: async (job) => {
+          const result = await cancelRunningAiJob(
+            api,
+            job.jobId,
+            () => abortRef.current?.abort(),
+            (call) => confirmAttempt(call, undefined, 'cancel'),
+          );
+          return { unconfirmed: result.unconfirmed };
+        },
+        deleteDraft: async (draft) => {
+          await api.adminTemplates('delete', { templateId: draft.id, version: draft.version });
+        },
+      });
+      const nextSources = await loadSources();
+      clearAiResumeKeys(aiGeneratorResumeKeys(roomId, userId));
+      resetLocalSession(nextSources, sessionJobIds);
+      setNotice({ message: 'Đã xóa dữ liệu tạo template. Nguồn đã thêm vẫn được giữ nguyên.', tone: 'success' });
+    } catch (caught) {
+      setNotice({ message: generationErrorMessage(caught), tone: 'error' });
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -1694,10 +1786,11 @@ export function AiGeneratorPage({
           <>
             <div className="ai-source-metadata">
               <label className="form-field"><span>Tên hệ thống *</span><input value={systemName} onChange={(event) => setSystemName(event.target.value)} placeholder="Ví dụ: PrivOS" /></label>
-              <label className="form-field"><span>Phiên bản</span><input value={softwareVersion} onChange={(event) => setSoftwareVersion(event.target.value)} placeholder="Ví dụ: 2.4" /></label>
+              <label className="form-field"><span>Phiên bản</span><input value={softwareVersion} onChange={(event) => setSoftwareVersion(event.target.value)} placeholder="Ví dụ: 2.3" /></label>
               <label className="form-field"><span>Ngày hiệu lực</span><input type="date" value={effectiveDate} onChange={(event) => setEffectiveDate(event.target.value)} /></label>
             </div>
             <SourcePanel
+              key={sourcePanelEpoch}
               sources={sources}
               selectedIds={selectedIds}
               busy={busy}
@@ -1956,26 +2049,33 @@ export function AiGeneratorPage({
       </div>
       {canGenerateWithAi && (
         <footer className="ai-generator-footer">
-          <button
-            className="button button-secondary"
-            type="button"
-            disabled={busy || step === 0 || publishTargets.some((target) => Boolean(target.publishedTemplate))
-              || (Boolean(initialTemplate) && step !== 3) || (step === 3 && Boolean(review) && !reviewNavigation.canBack)}
-            onClick={() => {
-              if (step === 3 && reviewNavigation.canBack) {
-                setActiveReviewIndex(moveReviewIndex(templateRuns, activeReviewIndex, 'back').index);
-              } else if (step === 3 && !review) {
-                setOutlineFocusModuleId(null);
-                setEditingOutline(true);
-                setStep(2);
-              } else if (step === 4) {
-                setActiveReviewIndex(Math.max(0, templateRuns.length - 1));
-                setStep(3);
-              } else {
-                setStep((value) => Math.max(0, value - 1));
-              }
-            }}
-          >{step === 3 && reviewNavigation.canBack ? 'Template trước' : 'Quay lại'}</button>
+          <div>
+            {!initialTemplate && (
+              <button className="button button-danger" type="button" disabled={busy || resetting} onClick={() => setResetConfirmOpen(true)}>
+                <DeleteOutlined /> Xóa dữ liệu
+              </button>
+            )}
+            <button
+              className="button button-secondary"
+              type="button"
+              disabled={busy || resetting || step === 0 || publishTargets.some((target) => Boolean(target.publishedTemplate))
+                || (Boolean(initialTemplate) && step !== 3) || (step === 3 && Boolean(review) && !reviewNavigation.canBack)}
+              onClick={() => {
+                if (step === 3 && reviewNavigation.canBack) {
+                  setActiveReviewIndex(moveReviewIndex(templateRuns, activeReviewIndex, 'back').index);
+                } else if (step === 3 && !review) {
+                  setOutlineFocusModuleId(null);
+                  setEditingOutline(true);
+                  setStep(2);
+                } else if (step === 4) {
+                  setActiveReviewIndex(Math.max(0, templateRuns.length - 1));
+                  setStep(3);
+                } else {
+                  setStep((value) => Math.max(0, value - 1));
+                }
+              }}
+            >{step === 3 && reviewNavigation.canBack ? 'Template trước' : 'Quay lại'}</button>
+          </div>
           <div>
             {step === 0 && <button className="button button-primary" type="button" disabled={selectedIds.size === 0} onClick={() => setStep(1)}>Tiếp tục</button>}
             {step === 1 && inventoryJob?.status === 'completed' && <button className="button button-primary" type="button" onClick={() => setStep(2)}>Chọn loại lộ trình</button>}
@@ -2008,6 +2108,19 @@ export function AiGeneratorPage({
             )}
           </div>
         </footer>
+      )}
+      {!initialTemplate && (
+        <ConfirmDialog
+          open={resetConfirmOpen}
+          danger
+          title="Xóa dữ liệu tạo template?"
+          description="Tiến trình AI, lộ trình, bài học, câu hỏi và các bản nháp chưa xuất bản của phiên này sẽ bị xóa. Nguồn đã thêm vẫn được giữ nguyên."
+          confirmLabel="Xóa dữ liệu"
+          busy={resetting}
+          busyLabel="Đang xóa…"
+          onCancel={() => { if (!resetting) setResetConfirmOpen(false); }}
+          onConfirm={() => void resetGeneratorSession()}
+        />
       )}
     </section>
   );

@@ -592,3 +592,148 @@ it('automatically recovers a failed Sandbox question through Native and grounded
   expect(api.adminAi.mock.calls.some(([action]) => action === 'update_module_questions')).toBe(false);
   view.unmount(); vi.unstubAllGlobals();
 });
+
+describe('AI generator reset UI', () => {
+  const source = {
+    id: 'source-row',
+    roomId: 'room-1',
+    sourceId: 'source-1',
+    kind: 'document' as const,
+    fileName: 'guide.pdf',
+    mimeType: 'application/pdf',
+    checksum: 'checksum',
+    systemName: 'Guide',
+    status: 'ready' as const,
+    textLength: 100,
+    createdBy: 'admin-1',
+    createdAt: '2026-10-29T00:00:00.000Z',
+    updatedAt: '2026-10-29T00:00:00.000Z',
+  };
+
+  it('shows Xóa dữ liệu only for a new generator and cancelling confirmation changes nothing', async () => {
+    const api = { adminAi: vi.fn(async (action: string) => {
+      if (action === 'list_sources') return { sources: [source] };
+      if (action === 'list_jobs') return { jobs: [] };
+      throw new Error('Unexpected action: ' + action);
+    }) };
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+
+    const reset = view.root.findAllByType('button').find((button) => button.children.join('').includes('Xóa dữ liệu'))!;
+    expect(reset).toBeDefined();
+    act(() => reset.props.onClick());
+    expect(view.root.findByProps({ 'aria-labelledby': 'confirm-title' })).toBeDefined();
+    act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Hủy')!.props.onClick());
+    expect(activeStepLabel(view)).toBe('Tài liệu nguồn');
+    expect(api.adminAi.mock.calls.map(([action]) => action)).toEqual(['list_sources', 'list_jobs']);
+    view.unmount();
+
+    const existing = materializedModuleReview();
+    const reviewApi = { adminAi: vi.fn(async (action: string) => {
+      if (action === 'list_sources') return { sources: [source] };
+      if (action === 'get_review') return { review: existing };
+      throw new Error('Unexpected action: ' + action);
+    }) };
+    await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: reviewApi as never, initialTemplate: { id: existing.id, version: existing.version }, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+    expect(view.root.findAllByType('button').some((button) => button.children.join('').includes('Xóa dữ liệu'))).toBe(false);
+    view.unmount();
+  });
+
+  it('cancels the current job, deletes its draft, clears resume keys, and returns to selected sources', async () => {
+    const storage = new Map<string, string>([
+      ['onboarding:ai:inventory:room-1', 'inventory-1'],
+      ['onboarding:ai:template:room-1', 'template-1'],
+      ['onboarding:ai:template:room-1:normal', 'template-1'],
+      ['onboarding:ai:template:room-1:advanced', 'template-2'],
+      ['onboarding:ai:publish:room-1:admin-1', 'checkpoint'],
+      ['onboarding:ai:selection:room-1', 'normal'],
+      ['onboarding:ai:responsibilities:room-1', 'Task'],
+      ['onboarding:ai:module:room-1', 'module-1'],
+    ]);
+    vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    const draft = materializedModuleReview();
+    const failed = { ...failedTemplateJob, templateKind: 'normal' as const, result: { templateId: draft.id, version: draft.version } };
+    const deletion = deferred<void>();
+    let sourceLoads = 0;
+    const api = {
+      adminAi: vi.fn(async (action: string) => {
+        if (action === 'list_sources') { sourceLoads += 1; return { sources: [source] }; }
+        if (action === 'list_jobs') return {
+          jobs: [inventoryJob, failed],
+          publicationBatches: [{
+            batchId: 'reset-batch',
+            createdBy: 'admin-1',
+            createdAt: '2026-10-29T00:00:00.000Z',
+            targets: [{ kind: 'normal', jobId: failed.jobId, templateId: draft.id, version: draft.version }],
+          }],
+        };
+        if (action === 'get_review') return { review: draft };
+        if (action === 'cancel_job') return { job: { ...failed, status: 'cancelled' as const } };
+        throw new Error('Unexpected action: ' + action);
+      }),
+      adminTemplates: vi.fn(async (action: string) => {
+        if (action === 'delete') return deletion.promise;
+        throw new Error('Unexpected template action: ' + action);
+      }),
+    };
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+    expect(activeStepLabel(view)).toBe('Xuất bản');
+    act(() => view.root.findAllByType('button').find((button) => button.children.join('').includes('Xóa dữ liệu'))!.props.onClick());
+    act(() => view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => button.children.join('') === 'Xóa dữ liệu')!.props.onClick());
+    const deleting = view.root.findAllByType('button').find((button) => button.children.join('').includes('Đang xóa…'))!;
+    expect(deleting.props.disabled).toBe(true);
+
+    await act(async () => { deletion.resolve(); await Promise.resolve(); await Promise.resolve(); });
+
+    expect(api.adminAi).toHaveBeenCalledWith('cancel_job', { jobId: failed.jobId });
+    expect(api.adminTemplates).toHaveBeenCalledWith('delete', { templateId: draft.id, version: draft.version });
+    expect(sourceLoads).toBe(2);
+    expect(storage.size).toBe(0);
+    expect(activeStepLabel(view)).toBe('Tài liệu nguồn');
+    expect(view.root.findByProps({ 'aria-label': 'Danh sách tài liệu nguồn' }).findByType('input').props.checked).toBe(true);
+    expect(api.adminAi.mock.calls.some(([action]) => action === 'delete_source')).toBe(false);
+    view.unmount(); vi.unstubAllGlobals();
+  });
+
+  it('keeps the current step when reloading sources for reset fails', async () => {
+    let sourceLoads = 0;
+    const api = { adminAi: vi.fn(async (action: string) => {
+      if (action === 'list_sources') {
+        sourceLoads += 1;
+        if (sourceLoads === 2) throw new Error('Cannot reload sources');
+        return { sources: [source] };
+      }
+      if (action === 'list_jobs') return { jobs: [] };
+      throw new Error('Unexpected action: ' + action);
+    }), adminTemplates: vi.fn() };
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+    act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Tiếp tục')!.props.onClick());
+    expect(activeStepLabel(view)).toBe('Phân tích');
+    act(() => view.root.findAllByType('button').find((button) => button.children.join('').includes('Xóa dữ liệu'))!.props.onClick());
+    await act(async () => { view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => button.children.join('') === 'Xóa dữ liệu')!.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
+
+    expect(activeStepLabel(view)).toBe('Phân tích');
+    expect(JSON.stringify(view.toJSON())).toContain('Cannot reload sources');
+    view.unmount();
+  });
+
+  it('remounts an unfinished Admin note form while keeping saved sources', async () => {
+    const api = { adminAi: vi.fn(async (action: string) => {
+      if (action === 'list_sources') return { sources: [source] };
+      if (action === 'list_jobs') return { jobs: [] };
+      throw new Error('Unexpected action: ' + action);
+    }), adminTemplates: vi.fn() };
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+    act(() => view.root.findAllByType('button').find((button) => button.children.join('').includes('Thêm ghi chú Admin'))!.props.onClick());
+    expect(view.root.findAllByType('textarea')).toHaveLength(1);
+    act(() => view.root.findAllByType('button').find((button) => button.children.join('').includes('Xóa dữ liệu'))!.props.onClick());
+    await act(async () => { view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => button.children.join('') === 'Xóa dữ liệu')!.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
+
+    expect(view.root.findAllByType('textarea')).toHaveLength(0);
+    expect(JSON.stringify(view.toJSON())).toContain('guide.pdf');
+    view.unmount();
+  });
+});
