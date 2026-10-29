@@ -434,6 +434,13 @@ export async function reconcileAttemptCleanups(
 
 export const NATIVE_CLEANUP_BLOCKED = 'Không thể retry bằng Native cho đến khi tiến trình trước đã dừng.';
 
+/** Esc inside a field or a nested panel that handles Esc itself must not close the modal. */
+function escapeBelongsToTarget(target: EventTarget | null): boolean {
+  const element = target as { closest?: (selector: string) => unknown } | null;
+  return typeof element?.closest === 'function'
+    && Boolean(element.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [data-esc-scope]'));
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException
     ? error.name === 'AbortError'
@@ -771,7 +778,9 @@ export function AiGeneratorPage({
   const [publishTargets, setPublishTargets] = useState<readonly AiPublishTarget[]>([]);
   const [publishProgress, setPublishProgress] = useState<AiPublishFileProgress | null>(null);
   const [activeReviewIndex, setActiveReviewIndex] = useState(0);
-  const [busy, setBusy] = useState(false);
+  /** The operation in flight; busy labels and the close confirmation depend on which one it is. */
+  const [operation, setOperation] = useState<'upload' | 'analyze' | 'save' | 'publish' | null>(null);
+  const busy = operation !== null;
   const [editingOutline, setEditingOutline] = useState(false);
   const [outlineFocusModuleId, setOutlineFocusModuleId] = useState<string | null>(null);
   const [moduleSourceCatalog, setModuleSourceCatalog] = useState<ModuleSourceCatalog>([]);
@@ -1068,7 +1077,7 @@ export function AiGeneratorPage({
     setPublishTargets([]);
     setPublishProgress(null);
     setActiveReviewIndex(0);
-    setBusy(false);
+    setOperation(null);
     setEditingOutline(false);
     setOutlineFocusModuleId(null);
     setModuleSourceCatalog([]);
@@ -1197,7 +1206,7 @@ export function AiGeneratorPage({
       setNotice({ message: 'Không xác định được room để tải tài liệu.', tone: 'error' });
       return;
     }
-    setBusy(true);
+    setOperation('upload');
     setNotice(null);
     try {
       const encoded = await readFile(file);
@@ -1230,12 +1239,12 @@ export function AiGeneratorPage({
     } catch (caught) {
       setNotice({ message: generationErrorMessage(caught), tone: 'error' });
     } finally {
-      setBusy(false);
+      setOperation(null);
     }
   }
 
   async function addNote(title: string, text: string) {
-    setBusy(true);
+    setOperation('save');
     setNotice(null);
     try {
       await api.adminAi('add_admin_note', {
@@ -1248,12 +1257,12 @@ export function AiGeneratorPage({
     } catch (caught) {
       setNotice({ message: generationErrorMessage(caught), tone: 'error' });
     } finally {
-      setBusy(false);
+      setOperation(null);
     }
   }
 
   async function deleteSource(sourceId: string) {
-    setBusy(true);
+    setOperation('save');
     try {
       await api.adminAi('delete_source', { sourceId });
       await loadSources();
@@ -1261,7 +1270,7 @@ export function AiGeneratorPage({
     } catch (caught) {
       setNotice({ message: generationErrorMessage(caught), tone: 'error' });
     } finally {
-      setBusy(false);
+      setOperation(null);
     }
   }
 
@@ -1313,19 +1322,41 @@ export function AiGeneratorPage({
   /** Step 1 primary: analyse the selected sources, then let the AI plan the chosen template kind. */
   async function analyzeAndPlan() {
     if (!templateSelection) return;
+    const kind = templateSelection;
     setStep(1);
-    setBusy(true);
+    setOperation('analyze');
     setNotice(null);
     try {
+      let existing = templateRuns.find((run) => run.kind === kind);
+      const staleJob = existing?.job;
+      const plannedFrom = staleJob?.inventoryJobId
+        ? [inventoryJob, ...roomJobs].find((job) => job?.jobId === staleJob.inventoryJobId)
+        : undefined;
+      if (staleJob && plannedFrom && !sameSourceIds(plannedFrom.sourceIds, selectedIds)) {
+        // The run was planned from another selection: it must not drive step 2 while the new inventory runs.
+        existing = undefined;
+        setTemplateRuns([{ kind, job: null, review: null }]);
+        setSelectedTemplateKind(null);
+        if (roomId) clearAiResumeKeys(['onboarding:ai:template:' + roomId]);
+        if (staleJob.status === 'running') {
+          try {
+            const cancelled = await cancelRunningAiJob(api, staleJob.jobId, () => abortRef.current?.abort(),
+              (call) => confirmAttempt(call, undefined, 'cancel'));
+            setRoomJobs((current) => current.map((job) => job.jobId === cancelled.job.jobId ? cancelled.job : job));
+          } catch {
+            // Best effort: the old job no longer belongs to this session either way.
+          }
+        }
+      }
       const inventory = await runInventory();
       if (inventory.status !== 'completed') throw new Error('Chưa phân tích xong tài liệu nguồn.');
-      await generateTemplate(inventory, templateSelection);
+      await generateTemplate(inventory, kind, existing);
     } catch (caught) {
       if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
       // A timed-out or late-cancelled attempt may still run; reconcile it in the background.
       void refreshCleanups().catch(() => undefined);
     } finally {
-      setBusy(false);
+      setOperation(null);
     }
   }
 
@@ -1339,10 +1370,10 @@ export function AiGeneratorPage({
 
   async function resumeModuleJob() {
     if (!templateJob) return;
-    setBusy(true); setNotice(null);
+    setOperation('analyze'); setNotice(null);
     try { const job = await pump(templateJob); setTemplateJob(job); await openCompletedModuleReview(job); }
     catch (caught) { if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' }); }
-    finally { setBusy(false); }
+    finally { setOperation(null); }
   }
 
   async function openCompletedModuleReview(job: AiJobRecord) {
@@ -1355,7 +1386,7 @@ export function AiGeneratorPage({
 
   async function editApprovedModules() {
     if (!review) return;
-    setBusy(true); setNotice(null);
+    setOperation('save'); setNotice(null);
     try {
       const job = activeReviewRun.job ?? (await api.adminAi<{ job: AiJobRecord }>('get_job', { jobId: review.jobId })).job;
       setTemplateRuns((current) => current.map((run) => run.kind === activeReviewRun.kind
@@ -1365,12 +1396,12 @@ export function AiGeneratorPage({
       setOutlineFocusModuleId(null);
       setStep(2);
     } catch (caught) { setNotice({ message: generationErrorMessage(caught), tone: 'error' }); }
-    finally { setBusy(false); }
+    finally { setOperation(null); }
   }
 
   async function moduleAction(action: string, args: Record<string, unknown>, resume = false): Promise<boolean> {
     if (!templateJob) return false;
-    setBusy(true); setNotice(null);
+    setOperation(resume ? 'analyze' : 'save'); setNotice(null);
     try {
       let job = (await api.adminAi<{ job: AiJobRecord }>(action, { jobId: templateJob.jobId, ...args })).job;
       setTemplateJob(job);
@@ -1383,7 +1414,7 @@ export function AiGeneratorPage({
       if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
       return false;
     }
-    finally { setBusy(false); }
+    finally { setOperation(null); }
   }
 
   async function approveOutlineAndStartDrafting(): Promise<void> {
@@ -1395,8 +1426,7 @@ export function AiGeneratorPage({
     if (!approved) setStep(1);
   }
 
-  async function generateTemplate(inventory: AiJobRecord, kind: EmployeeType) {
-    const existing = templateRuns.find((run) => run.kind === kind);
+  async function generateTemplate(inventory: AiJobRecord, kind: EmployeeType, existing: AiTemplateRun | undefined) {
     // A job planned from another inventory belongs to an older selection; start a fresh one.
     const runs: readonly AiTemplateRun[] = [existing?.job && existing.job.inventoryJobId !== inventory.jobId
       ? { kind, job: null, review: null }
@@ -1499,13 +1529,13 @@ export function AiGeneratorPage({
       setNotice({ message: generationErrorMessage(caught), tone: 'error' });
     } finally {
       setCancelling(false);
-      setBusy(false);
+      setOperation(null);
     }
   }
 
   async function updateReview(ops: readonly AiReviewOperation[]) {
     if (!review) return;
-    setBusy(true);
+    setOperation('save');
     try {
       const result = await api.adminAi<{ review: AdminTemplateDetail }>('update_review', {
         templateId: review.id,
@@ -1518,7 +1548,7 @@ export function AiGeneratorPage({
     } catch (caught) {
       setNotice({ message: generationErrorMessage(caught), tone: 'error' });
     } finally {
-      setBusy(false);
+      setOperation(null);
     }
   }
 
@@ -1529,7 +1559,7 @@ export function AiGeneratorPage({
     chosenEvidenceIndex?: number,
   ) {
     if (!review) return;
-    setBusy(true);
+    setOperation('save');
     try {
       const result = await api.adminAi<{ review: AdminTemplateDetail }>('resolve_flag', {
         templateId: review.id,
@@ -1545,7 +1575,7 @@ export function AiGeneratorPage({
     } catch (caught) {
       setNotice({ message: generationErrorMessage(caught), tone: 'error' });
     } finally {
-      setBusy(false);
+      setOperation(null);
     }
   }
 
@@ -1567,7 +1597,7 @@ export function AiGeneratorPage({
       return;
     }
 
-    setBusy(true);
+    setOperation('publish');
     setNotice(null);
     try {
       const targets = publishTargets.length > 0
@@ -1622,7 +1652,7 @@ export function AiGeneratorPage({
         setNotice({ message: generationErrorMessage(caught), tone: 'error' });
       }
     } finally {
-      setBusy(false);
+      setOperation(null);
     }
   }
   const publishReadiness = useMemo(() => {
@@ -1646,7 +1676,7 @@ export function AiGeneratorPage({
   const outlineReady = templateJob?.pipelineVersion === 'module_v2' && Boolean(templateJob.outline) && !templateJob.planPending;
   const publishing = publishTargets.some((target) => PUBLISHING_PHASES.has(target.phase));
   /** True while closing the modal would interrupt AI work; closing then asks first. */
-  const aiWorking = busy
+  const aiWorking = operation === 'analyze' || operation === 'publish' || operation === 'upload'
     || (inventoryJob?.status === 'running' && inventoryRecoveryAbortRef.current !== null)
     || Boolean(templateJob?.planPending)
     || (templateJob?.autoApprove === true && templateJob.status === 'running' && outlineApproved)
@@ -1665,7 +1695,10 @@ export function AiGeneratorPage({
   };
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') escapeRef.current(); };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || escapeBelongsToTarget(event.target)) return;
+      escapeRef.current();
+    };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
@@ -1680,7 +1713,11 @@ export function AiGeneratorPage({
           ? 'Nhập 2–8 nhiệm vụ chính'
           : null;
   const canAnalyze = !busy && !restoring && !resetting && !sourcesHint && !requestHasErrors;
-  const progressJob = templateJob ?? inventoryJob;
+  // A running inventory always belongs to the current selection, so it wins over any planned run.
+  const inventoryRunning = inventoryJob?.status === 'running';
+  const progressJob = inventoryRunning ? inventoryJob : templateJob ?? inventoryJob;
+  const planning = Boolean(templateJob) && !inventoryRunning;
+  const showOutline = outlineReady && !inventoryRunning;
   const progressFailed = progressJob?.status === 'failed';
   const cleanupStatus = cancelling
     ? <p className="ai-cleanup-status" role="status"><LoadingOutlined spin /> Đang chờ PrivOS xác nhận hủy tiến trình AI nền</p>
@@ -1702,15 +1739,17 @@ export function AiGeneratorPage({
   }
 
   let hint: string | null = null;
-  let primary: { readonly label: string; readonly disabled: boolean; readonly onClick: () => void } | null = null;
+  let primary: { readonly label: string; readonly working?: boolean; readonly disabled: boolean; readonly onClick: () => void } | null = null;
+  const analyzing = operation === 'analyze';
   if (step === 0) {
     hint = sourcesHint;
-    primary = { label: busy ? 'Đang phân tích…' : 'Phân tích tài liệu', disabled: !canAnalyze, onClick: () => void analyzeAndPlan() };
+    primary = { label: analyzing ? 'Đang phân tích…' : 'Phân tích tài liệu', working: analyzing, disabled: !canAnalyze, onClick: () => void analyzeAndPlan() };
   } else if (step === 1) {
-    if (outlineReady) hint = 'Duyệt lộ trình để AI viết nội dung';
+    if (showOutline) hint = 'Duyệt lộ trình để AI viết nội dung';
     else {
       primary = {
-        label: busy ? 'AI đang xử lý…' : progressFailed ? 'Thử lại' : 'Tiếp tục',
+        label: analyzing ? 'AI đang xử lý…' : progressFailed ? 'Thử lại' : 'Tiếp tục',
+        working: analyzing,
         disabled: busy || restoring || resetting || !templateSelection || requestHasErrors,
         onClick: () => void analyzeAndPlan(),
       };
@@ -1718,18 +1757,19 @@ export function AiGeneratorPage({
   } else if (step === 2) {
     primary = templateJob?.status === 'running' && !busy
       ? { label: 'Tiếp tục xử lý', disabled: false, onClick: () => void resumeModuleJob() }
-      : { label: busy ? 'AI đang tạo nội dung…' : 'Xem lại template', disabled: busy || templateJob?.status !== 'completed', onClick: () => void resumeModuleJob() };
+      : { label: analyzing ? 'AI đang tạo nội dung…' : 'Xem lại template', working: analyzing, disabled: busy || templateJob?.status !== 'completed', onClick: () => void resumeModuleJob() };
   } else if (templateRuns.length > 0) {
     if (publishReadiness.blockingCount > 0) hint = `Còn ${publishReadiness.blockingCount} cờ bắt buộc`;
     primary = {
-      label: busy
+      working: operation === 'publish',
+      label: operation === 'publish'
         ? 'Đang xuất bản…'
         : publishTargets.some((target) => target.phase === 'failed') ? 'Thử lại xuất bản' : 'Xuất bản template',
       disabled: busy || !publishReadiness.allowed,
       onClick: () => void publish(),
     };
   }
-  const progressCancellable = step === 1 && !outlineReady && progressJob?.status === 'running';
+  const progressCancellable = step === 1 && !showOutline && progressJob?.status === 'running';
 
   return (
     <div
@@ -1797,19 +1837,19 @@ export function AiGeneratorPage({
           )}
           {canGenerateWithAi && step === 1 && (
             <div className="ai-step-coverage">
-              {outlineReady && templateJob?.outline ? (
+              {showOutline && templateJob?.outline ? (
                 <section className="ai-workspace-card ai-module-stage">
                   <AiOutlineReview key={templateJob.jobId} outline={templateJob.outline} templateKind={templateJob.templateKind ?? 'normal'} responsibilities={templateJob.roleProfile?.responsibilities ?? []} busy={busy} initialModuleId={outlineFocusModuleId ?? selectedModuleId} initialPanel={outlineFocusModuleId ? 'source' : 'closed'} sourceCatalog={moduleSourceCatalog} onSupplement={(moduleLocalId, sourceIds, sectionIds) => void moduleAction('supplement_module_sources', { expectedRevision: templateJob.outline!.revision, moduleLocalId, sourceIds, sectionIds })} onEdit={(edits) => void moduleAction('update_outline', { expectedRevision: templateJob.outline!.revision, edits })} onApprove={() => void approveOutlineAndStartDrafting()} />
                 </section>
               ) : (
                 <section className="ai-workspace-card ai-workspace-progress-card">
-                  <h3>{templateJob
+                  <h3>{planning
                     ? progressFailed ? 'AI chưa lập xong lộ trình' : 'AI đang lập lộ trình…'
                     : progressFailed ? 'AI chưa đọc xong tài liệu' : 'AI đang đọc tài liệu…'}</h3>
                   <AiMilestoneProgress
-                    label={templateJob ? 'Lập lộ trình' : 'Phân tích tài liệu'}
+                    label={planning ? 'Lập lộ trình' : 'Phân tích tài liệu'}
                     job={progressJob}
-                    milestones={templateJob ? templateMilestones(templateJob) : inventoryMilestones(inventoryJob, selectedIds.size)}
+                    milestones={planning ? templateMilestones(templateJob) : inventoryMilestones(inventoryJob, selectedIds.size)}
                   />
                 </section>
               )}
@@ -1949,7 +1989,7 @@ export function AiGeneratorPage({
                   className="button button-ghost"
                   type="button"
                   disabled={cancelling}
-                  onClick={() => void cancelJob(progressJob.jobId, templateJob ? setTemplateJob : setInventoryJob)}
+                  onClick={() => void cancelJob(progressJob.jobId, progressJob.kind === 'inventory' ? setInventoryJob : setTemplateJob)}
                 >Hủy job</button>
               )}
             </div>
@@ -1957,7 +1997,7 @@ export function AiGeneratorPage({
               {hint && <span className="ai-generator-hint">{hint}</span>}
               {primary && (
                 <button className="button button-primary" type="button" disabled={primary.disabled} onClick={primary.onClick}>
-                  {busy && <LoadingOutlined spin />}{primary.label}
+                  {primary.working && <LoadingOutlined spin />}{primary.label}
                 </button>
               )}
             </div>

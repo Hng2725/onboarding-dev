@@ -217,6 +217,7 @@ describe('Admin AI template UI model', () => {
   it('derives an upload system name from the selected file when the field is blank', () => {
     expect(resolveUploadSystemName('', 'employee-handbook.docx')).toBe('employee handbook');
     expect(resolveUploadSystemName('  Payroll Portal  ', 'guide.pdf')).toBe('Payroll Portal');
+    expect(resolveUploadSystemName('', '---.pdf')).toBe('Tài liệu onboarding');
   });
 
   it('models the four source-to-publish steps in the requested order', () => {

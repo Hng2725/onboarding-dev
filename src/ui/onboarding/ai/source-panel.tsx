@@ -19,7 +19,7 @@ export function resolveUploadSystemName(currentName: string, fileName: string): 
     .replace(/[-_]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  return derived || 'Onboarding document';
+  return derived || 'Tài liệu onboarding';
 }
 
 export function validateSourceFile(file: Pick<File, 'name' | 'size'>): string | null {

@@ -172,9 +172,10 @@ describe('AI generator shell', () => {
   });
 
   it('routes Esc and a backdrop click through the close confirmation', async () => {
-    const listeners = new Map<string, (event: { key: string }) => void>();
+    type KeyEvent = { key: string; defaultPrevented?: boolean; target?: unknown };
+    const listeners = new Map<string, (event: KeyEvent) => void>();
     vi.stubGlobal('window', {
-      addEventListener: (type: string, listener: (event: { key: string }) => void) => listeners.set(type, listener),
+      addEventListener: (type: string, listener: (event: KeyEvent) => void) => listeners.set(type, listener),
       removeEventListener: (type: string) => listeners.delete(type),
     });
     const planning: AiJobRecord = {
@@ -192,7 +193,18 @@ describe('AI generator shell', () => {
     expect(activeStep(view)).toBe('Kiểm tra độ phủ');
     expect(JSON.stringify(view.toJSON())).toContain('AI đang lập lộ trình…');
 
-    act(() => listeners.get('keydown')!({ key: 'Escape' }));
+    // Esc already handled, typed in a field, or inside a panel with its own Esc never reaches the modal.
+    const inside = (match: string) => ({ closest: (selector: string) => selector.includes(match) ? {} : null });
+    const ignored: KeyEvent[] = [
+      { key: 'Escape', defaultPrevented: true },
+      ...['input', 'textarea', 'select', '[contenteditable]', '[data-esc-scope]'].map((match) => ({ key: 'Escape', target: inside(match) })),
+    ];
+    for (const event of ignored) {
+      act(() => listeners.get('keydown')!(event));
+      expect(view.root.findAllByProps({ 'aria-labelledby': 'confirm-title' }), JSON.stringify(event)).toHaveLength(0);
+    }
+
+    act(() => listeners.get('keydown')!({ key: 'Escape', target: { closest: () => null } }));
     expect(onClose).not.toHaveBeenCalled();
     expect(view.root.findAllByProps({ 'aria-labelledby': 'confirm-title' })).toHaveLength(1);
     act(() => listeners.get('keydown')!({ key: 'Escape' }));
@@ -235,5 +247,91 @@ describe('AI generator shell', () => {
     }));
     expect(activeStep(view)).toBe('Kiểm tra độ phủ');
     expect(JSON.stringify(view.toJSON())).toContain('Tổng quan');
+  });
+
+  it('drops a run planned from another selection so step 2 tracks the new inventory', async () => {
+    const second = { ...source, id: 'source-row-2', sourceId: 'source-2', fileName: 'policy.pdf' };
+    const module = { moduleLocalId: 'm0', frameKey: 't1-overview', order: 0, title: 'Module kế hoạch cũ', description: '', estimatedMinutes: 10,
+      objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] };
+    const planned: AiJobRecord = {
+      ...completedInventory, id: 'template-row', jobId: 'template-1', kind: 'template', status: 'running',
+      templateKind: 'normal', inventoryJobId: 'inventory-1', result: undefined, pipelineVersion: 'module_v2', planPending: false,
+      outline: { revision: 1, modules: [module], flags: [], taskCoverage: [] } as never, outlineApprovedRevision: 0,
+      moduleRuns: [{ outline: module, outlineRevision: 1, lessonState: 'queued', lessonVersion: 0, questionState: 'blocked', questionVersion: 0 }] as never,
+    };
+    const newInventory: AiJobRecord = { ...completedInventory, jobId: 'inventory-2', status: 'running', result: undefined,
+      sourceIds: ['source-1', 'source-2'], calls: [{ callId: 'A1', stage: 'A', operationId: 'inventory-2:A1', status: 'pending' }] as never };
+    const api = { adminAi: vi.fn(async (action: string, args?: Record<string, unknown>) => {
+      if (action === 'list_sources') return { sources: [source, second] };
+      if (action === 'list_jobs') return { jobs: [completedInventory, planned] };
+      if (action === 'list_module_sources') return { sources: [] };
+      if (action === 'cancel_job') return { job: { ...(args?.jobId === 'template-1' ? planned : newInventory), status: 'cancelled' } };
+      if (action === 'start_job' && args?.kind === 'inventory') return { job: newInventory };
+      if (action === 'next_step') return new Promise(() => undefined);
+      throw new Error('Unexpected action: ' + action);
+    }) };
+    const { view } = await render(api);
+    views.push(view);
+    expect(JSON.stringify(view.toJSON())).toContain('Module kế hoạch cũ');
+
+    act(() => buttonByText(view, 'Quay lại')!.props.onClick());
+    const policy = view.root.findByProps({ 'aria-label': 'Danh sách tài liệu nguồn' }).findAllByType('input')[1];
+    expect(policy.props.checked).toBe(false);
+    act(() => policy.props.onChange());
+    await act(async () => { buttonByText(view, 'Phân tích tài liệu')!.props.onClick(); });
+
+    expect(api.adminAi).toHaveBeenCalledWith('cancel_job', { jobId: 'template-1' });
+    expect(api.adminAi).toHaveBeenCalledWith('start_job', expect.objectContaining({ kind: 'inventory', sourceIds: ['source-1', 'source-2'] }));
+    expect(activeStep(view)).toBe('Kiểm tra độ phủ');
+    const json = JSON.stringify(view.toJSON());
+    expect(json).toContain('AI đang đọc tài liệu…');
+    expect(json).not.toContain('Module kế hoạch cũ');
+
+    await act(async () => { buttonByText(view, 'Hủy job')!.props.onClick(); });
+    expect(api.adminAi).toHaveBeenLastCalledWith('cancel_job', { jobId: 'inventory-2' });
+  });
+
+  it('labels a save without analysing and closes without asking', async () => {
+    const deletion = deferred<unknown>();
+    const api = { adminAi: vi.fn(async (action: string) => {
+      if (action === 'list_sources') return { sources: [source] };
+      if (action === 'list_jobs') return { jobs: [] };
+      if (action === 'delete_source') return deletion.promise;
+      throw new Error('Unexpected action: ' + action);
+    }) };
+    const { view, onClose } = await render(api);
+    views.push(view);
+    chooseKind(view, 'Thông thường');
+
+    await act(async () => { view.root.findByProps({ 'aria-label': 'Xóa guide.pdf' }).props.onClick(); });
+    const primary = view.root.findByType('footer').findByProps({ className: 'button button-primary' });
+    expect(text(primary)).toBe('Phân tích tài liệu');
+    expect(primary.props.disabled).toBe(true);
+    act(() => view.root.findByProps({ 'aria-label': 'Đóng' }).props.onClick());
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks before closing while a source uploads, without an analysing label', async () => {
+    vi.stubGlobal('FileReader', class {
+      result = 'data:application/pdf;base64,YQ==';
+      onload: (() => void) | null = null;
+      readAsDataURL() { this.onload?.(); }
+    });
+    host.app.rest.mockImplementation(() => new Promise(() => undefined));
+    const api = { adminAi: vi.fn(async (action: string) => {
+      if (action === 'list_sources') return { sources: [source] };
+      if (action === 'list_jobs') return { jobs: [] };
+      throw new Error('Unexpected action: ' + action);
+    }) };
+    const { view, onClose } = await render(api);
+    views.push(view);
+    const upload = view.root.find((node) => node.type === 'input' && node.props.type === 'file');
+    await act(async () => { upload.props.onChange({ target: { files: [{ name: 'new.pdf', size: 10, type: 'application/pdf' }], value: '' } }); });
+
+    expect(text(view.root.findByType('footer').findByProps({ className: 'button button-primary' }))).toBe('Phân tích tài liệu');
+    act(() => view.root.findByProps({ 'aria-label': 'Đóng' }).props.onClick());
+    expect(onClose).not.toHaveBeenCalled();
+    expect(text(view.root.findByProps({ 'aria-labelledby': 'confirm-title' }))).toContain('Đóng cửa sổ?');
+    host.app.rest.mockReset();
   });
 });
