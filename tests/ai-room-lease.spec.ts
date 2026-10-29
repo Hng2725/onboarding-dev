@@ -57,6 +57,59 @@ async function approveOtherLessons(service: ReturnType<typeof createAiJobService
 }
 
 describe('room AI serialization', () => {
+  it.each(['schema', 'transient', 'project_busy', 'schema_cancel'] as const)('keeps a lesson %s successor ahead of a deferred question through dispatch and output', async (kind) => {
+    const { service, inventoryJob, templateJob, advance } = await setup();
+    const job = await templateJob();
+    const first = job.moduleRuns![0];
+    let current = await service.updateModuleLesson(admin, { jobId: job.jobId, moduleLocalId: first.outline.moduleLocalId, expectedVersion: first.lessonVersion, module: { ...generatedTemplate.modules[0], localId: first.outline.moduleLocalId, frameKey: first.outline.frameKey, featureIds: first.outline.featureIds, questions: [] } });
+    await service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId: first.outline.moduleLocalId, expectedVersion: current.moduleRuns![0].lessonVersion });
+    await approveOtherLessons(service, job.jobId);
+    const blocker = await inventoryJob('blocker');
+    const blockingCall = await service.nextStep(admin, { jobId: blocker.jobId, workerId: 'blocker' });
+    if (blockingCall.kind !== 'ai_call') throw new Error('Expected blocker');
+    expect((await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).kind).toBe('wait');
+    current = await service.getJob(admin, job.jobId);
+    const question = current.calls.find((call) => call.moduleTarget === 'questions' && call.status === 'pending')!;
+    const audit = current.stageOutputs.__moduleAudit;
+    const other = current.moduleRuns![1];
+    await service.retryModule(admin, { jobId: job.jobId, moduleLocalId: other.outline.moduleLocalId, target: 'lesson', expectedVersion: other.lessonVersion });
+    await service.submitAiOutput(admin, { jobId: blocker.jobId, workerId: 'blocker', callId: blockingCall.callId, text: JSON.stringify(inventory) });
+    expect((await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).kind).toBe('awaiting_admin');
+    const lessonCall = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    if (lessonCall.kind !== 'ai_call') throw new Error('Expected regenerated lesson');
+    await service.recordDispatch(admin, { jobId: job.jobId, workerId: 'tab-a', callId: lessonCall.callId, attemptRef: 'attempt-first', provider: 'sandbox' });
+    if (kind === 'schema' || kind === 'schema_cancel') await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: lessonCall.callId, text: '{invalid' });
+    else {
+      await service.reportAiFailure(admin, { jobId: job.jobId, workerId: 'tab-a', callId: lessonCall.callId, kind: 'failed', providerErrorCode: kind === 'transient' ? 'MODEL_PROVIDER_UNAVAILABLE' : 'PROJECT_BUSY' });
+      advance(3_000);
+    }
+    const successor = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    if (successor.kind !== 'ai_call') throw new Error('Expected lesson successor');
+    current = await service.getJob(admin, job.jobId);
+    expect(current.calls.find((call) => call.callId === successor.callId)).toMatchObject({ moduleLocalId: other.outline.moduleLocalId, moduleTarget: 'lesson' });
+    expect(successor.callId).not.toBe(question.callId);
+    await service.recordDispatch(admin, { jobId: job.jobId, workerId: 'tab-a', callId: successor.callId, attemptRef: 'attempt-successor', provider: 'sandbox' });
+    if (kind === 'schema_cancel') {
+      const cancelled = await service.cancelJob(admin, job.jobId);
+      expect(cancelled.calls.find((call) => call.callId === successor.callId)).toMatchObject({ attemptRef: 'attempt-successor', cleanupState: 'pending' });
+      expect(cancelled.calls.find((call) => call.callId === question.callId)?.attemptRef).toBeUndefined();
+      const later = await inventoryJob('later');
+      expect((await service.nextStep(admin, { jobId: later.jobId, workerId: 'later' })).kind).toBe('wait');
+      await service.recordAttemptCleanup(admin, { jobId: job.jobId, callId: successor.callId, attemptRef: 'attempt-successor', state: 'confirmed' });
+      expect((await service.nextStep(admin, { jobId: later.jobId, workerId: 'later' })).kind).toBe('ai_call');
+      return;
+    }
+    expect(await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).toMatchObject({ kind: 'ai_call', callId: successor.callId, attemptRef: 'attempt-successor' });
+    const { localId: _id, frameKey: _frame, featureIds: _features, questions: _questions, ...lesson } = generatedTemplate.modules[0];
+    current = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: successor.callId, text: JSON.stringify({ ...lesson, flags: [] }) });
+    expect(current.moduleRuns![1].lessonState).toBe('review_ready');
+    expect(current.stageOutputs.__moduleAudit).toEqual(audit);
+    expect((await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).kind).toBe('awaiting_admin');
+    await service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId: other.outline.moduleLocalId, expectedVersion: current.moduleRuns![1].lessonVersion });
+    const resumed = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    expect(resumed).toMatchObject({ kind: 'ai_call', callId: question.callId });
+    expect((await service.getJob(admin, job.jobId)).calls.filter((call) => call.moduleTarget === 'questions')).toHaveLength(1);
+  });
   it('adopts a recorded question attempt after another lesson is edited', async () => {
     const { service, templateJob } = await setup();
     const job = await templateJob();

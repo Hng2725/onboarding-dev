@@ -1346,6 +1346,12 @@ export function createAiJobService(
     };
   }
 
+  /** Keep a lesson successor ahead of a deferred question without moving live claims. */
+  function enqueueModuleSuccessor(calls: readonly AiCallRecord[], successor: AiCallRecord): AiCallRecord[] {
+    const deferred = successor.moduleTarget === 'lesson' ? calls.findIndex((call) => call.moduleTarget === 'questions' && call.status === 'pending' && !call.dispatchClaimedAt && !call.attemptRef) : -1;
+    return deferred < 0 ? [...calls, successor] : [...calls.slice(0, deferred), successor, ...calls.slice(deferred)];
+  }
+
   function clearRunWait(run: AiModuleDraftRun): AiModuleDraftRun {
     const { nextRetryAt: _retry, providerWaitStartedAt: _wait, ...rest } = run;
     return rest;
@@ -1467,10 +1473,10 @@ export function createAiJobService(
       errors = validationMessages(error);
       next = call.moduleTarget === 'lesson' ? await fallbackRun(actor, row, run) : { ...run, questionState: 'failed' };
     }
-    const calls = row.calls.map((item): AiCallRecord => item.callId === call.callId ? { ...item, status: errors.length ? 'invalid' : 'completed', ...(errors.length ? { errors } : {}) } : item);
+    let calls = row.calls.map((item): AiCallRecord => item.callId === call.callId ? { ...item, status: errors.length ? 'invalid' : 'completed', ...(errors.length ? { errors } : {}) } : item);
     if (errors.length && (run.schemaRepairs ?? 0) < 1) {
       next = { ...clearRunWait(run), schemaRepairs: (run.schemaRepairs ?? 0) + 1 };
-      calls.push(retryCall(row, call, 'schema'));
+      calls = enqueueModuleSuccessor(calls, retryCall(row, call, 'schema'));
     }
     return updateJob(actor, row, { moduleRuns: replaceRun(row, clearRunWait(next)), calls, stageOutputs: { ...row.stageOutputs, ['processed:' + call.callId]: true }, ...CLEARED_WAIT, ...RELEASED_LEASE });
   }
@@ -2016,7 +2022,7 @@ export function createAiJobService(
           : transient ? { ...clearRunWait(run), transientRetries: (run.transientRetries ?? 0) + 1, nextRetryAt: new Date(Date.parse(now()) + PROVIDER_RETRY_MS).toISOString() }
             : current.moduleTarget === 'lesson' ? await fallbackRun(actor, row, run) : { ...clearRunWait(run), questionState: 'failed' as const };
         const updated = await updateJob(actor, row, {
-          calls: canWait || transient ? [...calls, retryCall(row, current, canWait ? 'project_busy' : 'transient')] : calls,
+          calls: canWait || transient ? enqueueModuleSuccessor(calls, retryCall(row, current, canWait ? 'project_busy' : 'transient')) : calls,
           moduleRuns: replaceRun(row, next), ...RELEASED_LEASE,
           ...(canWait ? { providerWaitStartedAt: waitStartedAt, nextRetryAt, providerWaitAttempts: busyCount } : { ...CLEARED_WAIT, ...(transient ? { nextRetryAt: next.nextRetryAt } : {}) }),
         });
