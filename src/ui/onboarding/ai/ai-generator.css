@@ -157,6 +157,42 @@
 .ai-generating-banner.error { color: var(--on-danger); background: color-mix(in srgb, var(--on-danger) 10%, transparent); }
 .ai-generating-banner.warn { color: var(--on-warning); background: color-mix(in srgb, var(--on-warning) 10%, transparent); }
 
+/* Step 4: Xem lại & xuất bản */
+.ai-step-review { display: grid; gap: 16px; min-width: 0; }
+.ai-final-review { display: grid; gap: 14px; min-width: 0; }
+.ai-final-review-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 24px; align-items: start; }
+.ai-final-review-side { display: grid; gap: 14px; min-width: 0; }
+.ai-final-review-title { color: var(--on-text-soft); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .02em; overflow-wrap: anywhere; }
+.ai-final-review-nav { display: grid; gap: 4px; }
+.ai-final-review-nav button { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; width: 100%; padding: 9px 12px; border: 0; border-radius: 8px; color: var(--on-text); background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.ai-final-review-nav button span { min-width: 0; overflow-wrap: anywhere; }
+.ai-final-review-nav button small { color: var(--on-text-soft); font-size: 12px; white-space: nowrap; }
+.ai-final-review-nav button em { padding: 1px 7px; border-radius: 999px; color: var(--on-warning); background: color-mix(in srgb, var(--on-warning) 14%, transparent); font-size: 11px; font-style: normal; font-weight: 700; }
+.ai-final-review-nav button:hover { background: color-mix(in srgb, var(--on-text) 5%, transparent); }
+.ai-final-review-nav button.active { background: var(--on-primary-soft); font-weight: 600; }
+.ai-final-review-nav button.warn span { color: var(--on-warning); }
+.ai-final-review-nav button.error span { color: var(--on-danger); }
+.ai-final-review-nav button:focus-visible, .ai-pill:focus-visible, .ai-final-review-tabs button:focus-visible { outline: 3px solid color-mix(in srgb, var(--on-primary) 35%, transparent); outline-offset: 2px; }
+.ai-final-review-settings { position: relative; }
+.ai-final-review-pills { display: flex; flex-wrap: wrap; gap: 8px; }
+.ai-pill { padding: 6px 12px; border: 1px solid var(--on-border); border-radius: 999px; color: var(--on-text-soft); background: transparent; font: inherit; font-size: 13px; cursor: pointer; }
+.ai-pill[aria-expanded='true'] { border-color: color-mix(in srgb, var(--on-primary) 45%, var(--on-border)); color: var(--on-text); }
+.ai-settings-popover { position: absolute; z-index: 5; top: calc(100% + 8px); left: 0; display: grid; gap: 10px; width: min(260px, calc(100vw - 32px)); padding: 14px; border: 1px solid var(--on-border); border-radius: var(--on-radius-md); background: var(--on-surface-raised, var(--on-surface)); box-shadow: 0 12px 32px rgb(0 0 0 / 18%); }
+.ai-settings-popover .button { justify-self: end; }
+.ai-final-review-doc { display: grid; gap: 12px; min-width: 0; }
+.ai-final-review-tabs { display: flex; gap: 18px; border-bottom: 1px solid var(--on-border); }
+.ai-final-review-tabs button { padding: 0 0 10px; border: 0; color: var(--on-text-soft); background: transparent; font: inherit; font-weight: 600; cursor: pointer; }
+.ai-final-review-tabs button.active { color: var(--on-text); box-shadow: inset 0 -2px var(--on-primary); }
+.ai-final-review-updating { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--on-primary); font-size: 13px; font-weight: 600; }
+.ai-final-review-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ai-final-review-hint { color: var(--on-warning); font-size: 12px; }
+.ai-final-review-confirm { display: grid; gap: 10px; padding: 12px 14px; border-radius: 10px; color: var(--on-text); background: color-mix(in srgb, var(--on-warning) 10%, transparent); font-size: 13px; }
+.ai-final-review-confirm p { margin: 0; }
+.ai-final-review-confirm div { display: flex; flex-wrap: wrap; gap: 8px; }
+.ai-module-reading-meta { color: var(--on-text-soft); font-size: 13px; }
+.ai-cite-list { display: inline; }
+.ai-cite { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 6px; color: var(--on-primary); background: var(--on-primary-soft); font-size: 11px; white-space: nowrap; vertical-align: baseline; }
+
 @keyframes ai-coverage-pulse { 50% { opacity: .45; } }
 @media (prefers-reduced-motion: reduce) {
   .ai-coverage-pulse, .ai-skeleton-bar { animation: none; }
@@ -175,6 +211,7 @@
   .ai-coverage-fields { grid-template-columns: 1fr; }
   .ai-generating-module { grid-template-columns: 28px minmax(0, 1fr) auto; }
   .ai-generating-module .ai-chip:last-of-type { grid-column: 3; }
+  .ai-final-review-layout { grid-template-columns: 1fr; gap: 16px; }
   .ai-generator-footer { flex-wrap: wrap; padding: 12px 16px; padding-right: 88px; }
 }
 

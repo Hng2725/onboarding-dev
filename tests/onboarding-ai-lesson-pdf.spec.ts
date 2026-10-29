@@ -122,6 +122,14 @@ describe('AI lesson PDF artifacts', () => {
     expect(serialized).not.toContain('Giải thích bí mật');
   });
 
+  it('prints each block kind as its Vietnamese label, never the raw kind', () => {
+    const serialized = JSON.stringify(lessonPdfDocumentDefinition(review, 'module-1'));
+    expect(serialized).toContain('"text":"Khái niệm"');
+    expect(serialized).toContain('"text":"Các bước"');
+    expect(serialized).not.toMatch(/"text":"(?:concept|steps)"/);
+    expect(serialized.indexOf('"text":"Các bước"')).toBeLessThan(serialized.indexOf('Các bước thực hiện'));
+  });
+
   it('creates a stable ASCII filename and reports missing module content', () => {
     expect(lessonPdfFileName(review.modules[0].title, 0))
       .toBe('01-quy-trinh-xu-ly-don-hang.pdf');

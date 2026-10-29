@@ -218,6 +218,37 @@ describe('AI template autopilot', () => {
     await expect(service.pauseAutopilot({ ...admin, userId: 'admin-2' }, { jobId: job.jobId })).rejects.toMatchObject({ code: 'JOB_OWNER_REQUIRED' });
   });
 
+  it('lets a completed job be approved again from coverage and pumped back to done', async () => {
+    const { service, job } = await autopilotJob('autopilot-reapprove-done');
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: job.outline!.revision });
+    const first = await pump(service, job.jobId);
+    expect(first.step).toMatchObject({ kind: 'done', job: { status: 'completed' } });
+    const reapproved = await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: job.outline!.revision });
+    expect(reapproved).toMatchObject({ status: 'completed', outlineApprovedRevision: job.outline!.revision });
+    const again = await pump(service, job.jobId);
+    expect(again.order).toEqual([]);
+    expect(again.step).toMatchObject({ kind: 'done', job: { status: 'completed', result: first.step!.job.result } });
+  });
+
+  it('edits a completed module lesson through the job: questions regenerate and the draft re-materializes', async () => {
+    const { service, job } = await autopilotJob('autopilot-edit-done');
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: job.outline!.revision });
+    const done = (await pump(service, job.jobId)).step!.job;
+    const run = done.moduleRuns![0];
+    const edited = await service.updateModuleLesson(admin, {
+      jobId: done.jobId, moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion,
+      module: { ...run.lessonDraft!, title: 'Bài học đã sửa' },
+    });
+    expect(edited).toMatchObject({ status: 'running', result: null });
+    const { step, order } = await pump(service, done.jobId);
+    expect(order).toEqual(['questions:' + String(run.outline.order + 1)]);
+    expect(step).toMatchObject({ kind: 'done', job: { status: 'completed' } });
+    const after = step!.job.moduleRuns![0];
+    expect(after).toMatchObject({ lessonState: 'approved', lessonProvenance: 'manual', questionState: 'approved' });
+    expect(after.lessonDraft!.title).toBe('Bài học đã sửa');
+    expect(step!.job.result).toBeTruthy();
+  });
+
   it('switches a legacy-mode job to autopilot and approves its review-ready lesson once', async () => {
     const { store, service, job } = await autopilotJob('autopilot-legacy');
     const { id: _id, roomId: _room, planPending: _pending, autoApprove: _auto, ...persisted } = job;

@@ -2,6 +2,7 @@ import type { Content, TDocumentDefinitions } from 'pdfmake/interfaces';
 
 import type { LessonBlock, SourceRef } from '../../../onboarding/contracts';
 import type { AdminTemplateDetail } from '../../../onboarding/templates';
+import { BLOCK_KIND_LABELS } from './ai-labels';
 
 export interface LessonPdfArtifact {
   readonly fileName: string;
@@ -86,7 +87,8 @@ function markdownContent(value: string): Content[] {
 }
 
 function blockContent(block: LessonBlock): Content[] {
-  const content: Content[] = [];
+  // The kind is printed as its Vietnamese label; a raw kind such as `concept` never reaches the PDF.
+  const content: Content[] = [{ text: BLOCK_KIND_LABELS[block.kind] ?? 'Nội dung', style: 'blockKind' }];
   if (block.title) {
     content.push({ text: plainMarkdownText(block.title), style: 'blockTitle' });
   }
@@ -194,7 +196,8 @@ export function lessonPdfDocumentDefinition(
       description: { fontSize: 11, color: '#475467', margin: [0, 0, 0, 6] },
       metadata: { fontSize: 9, color: '#667085', margin: [0, 0, 0, 16] },
       sectionTitle: { fontSize: 14, bold: true, color: '#3448a5', margin: [0, 10, 0, 8] },
-      blockTitle: { fontSize: 11.5, bold: true, color: '#253052', margin: [0, 6, 0, 5] },
+      blockKind: { fontSize: 8.5, bold: true, color: '#3448a5', margin: [0, 10, 0, 2] },
+      blockTitle: { fontSize: 11.5, bold: true, color: '#253052', margin: [0, 0, 0, 5] },
     },
     content,
   };

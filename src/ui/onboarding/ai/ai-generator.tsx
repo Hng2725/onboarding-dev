@@ -53,6 +53,8 @@ import {
 import { AiCoverageSkeleton, AiStepCoverage, type ModuleSourceCatalog } from './ai-step-coverage';
 import { outlineReadiness } from '../../../onboarding/ai/outline-coverage';
 import { AiStepGenerating } from './ai-step-generating';
+import { AiStepReview } from './ai-step-review';
+import type { GeneratedModule, GeneratedQuestion } from '../../../onboarding/ai/validate';
 import {
   AiPublishBatchError,
   aiPublishTargetKey,
@@ -350,6 +352,22 @@ export function canPublishAiReview(flags: readonly VerificationFlag[]): {
 }
 
 export function generationErrorMessage(error: unknown): string {
+  return vietnameseErrorMessage(error);
+}
+
+/** A module change the server rejected; an invalid manual edit is the Admin's to fix, not AI's. */
+export function moduleChangeErrorMessage(
+  action: 'update_module_lesson' | 'update_module_questions' | 'retry_module',
+  error: unknown,
+): string {
+  if (errorCode(error) === 'AI_OUTPUT_INVALID') {
+    if (action === 'update_module_lesson') {
+      return 'Bài học chưa lưu được: mỗi nội dung cần có dẫn chứng khớp với tài liệu nguồn. Hãy kiểm tra lại rồi lưu.';
+    }
+    if (action === 'update_module_questions') {
+      return 'Câu hỏi chưa lưu được: mỗi câu cần có dẫn chứng khớp với tài liệu nguồn và bài học. Hãy kiểm tra lại rồi lưu.';
+    }
+  }
   return vietnameseErrorMessage(error);
 }
 
@@ -822,6 +840,8 @@ export function AiGeneratorPage({
   const [generationError, setGenerationError] = useState<{ readonly message: string; readonly fromPrepare: boolean } | null>(null);
   const [stalled, setStalled] = useState(false);
   const [pausing, setPausing] = useState(false);
+  /** Xem lại & xuất bản: a module edit or rewrite is being pumped through the job. */
+  const [moduleUpdating, setModuleUpdating] = useState(false);
   const [roomJobs, setRoomJobs] = useState<readonly AiJobRecord[]>([]);
   const [checkingCleanup, setCheckingCleanup] = useState(false);
   const [cancelling, setCancelling] = useState(false);
@@ -997,6 +1017,20 @@ export function AiGeneratorPage({
         if (initialTemplate) {
           const loaded = await loadReview(initialTemplate.id, initialTemplate.version);
           setTemplateSelection(loaded.employeeType);
+          // A module-approved AI draft is edited through its own job, like a fresh one.
+          if (loaded.jobId && loaded.content?.moduleApproval && loaded.status === 'draft') {
+            try {
+              const job = (await api.adminAi<{ job: AiJobRecord }>('get_job', { jobId: loaded.jobId })).job;
+              const output = job.result as { templateId?: unknown; version?: unknown } | null | undefined;
+              // Only the job whose current result is this very draft: its drafts are what the Admin sees.
+              if (active && job.pipelineVersion === 'module_v2' && job.moduleRuns?.length && job.createdBy === userId
+                && job.status === 'completed' && output?.templateId === loaded.id && output.version === loaded.version) {
+                setTemplateRuns((current) => current.map((run) => run.kind === loaded.employeeType ? { ...run, job } : run));
+              }
+            } catch {
+              // Without its job the draft still opens read-only in the legacy review.
+            }
+          }
           return;
         }
         const result = await api.adminAi<{ jobs: readonly AiJobRecord[]; publicationBatches?: readonly AiPublicationBatch[] }>('list_jobs');
@@ -1478,19 +1512,62 @@ export function AiGeneratorPage({
     setStep(3);
   }
 
-  async function editApprovedModules() {
-    if (!review) return;
-    setOperation('save'); setNotice(null);
+  /**
+   * Xem lại & xuất bản: change one module through the job (edit lesson, edit questions or AI
+   * rewrite), then pump on this step until autopilot re-approves and re-materializes the draft.
+   * A rejected change keeps the editor open and explains why; nothing navigates away.
+   */
+  async function updateModuleThroughJob(
+    action: 'update_module_lesson' | 'update_module_questions' | 'retry_module',
+    args: Record<string, unknown>,
+  ) {
+    const current = templateJob;
+    if (!current) return;
+    setModuleUpdating(true);
+    setOperation('save');
+    setNotice(null);
+    setGenerationError(null);
+    setStalled(false);
+    let changed: AiJobRecord;
     try {
-      const job = activeReviewRun.job ?? (await api.adminAi<{ job: AiJobRecord }>('get_job', { jobId: review.jobId })).job;
-      setTemplateRuns((current) => current.map((run) => run.kind === activeReviewRun.kind
-        ? { ...run, job, review: null }
-        : run));
-      setSelectedTemplateKind(activeReviewRun.kind);
-      setOutlineFocusModuleId(null);
-      setStep(2);
-    } catch (caught) { setNotice({ message: generationErrorMessage(caught), tone: 'error' }); }
-    finally { setOperation(null); }
+      // An older job approves nothing by itself; the change would wait forever without autopilot.
+      if (current.autoApprove !== true) {
+        recordJob((await api.adminAi<{ job: AiJobRecord }>('enable_autopilot', { jobId: current.jobId })).job);
+      }
+      changed = (await api.adminAi<{ job: AiJobRecord }>(action, { jobId: current.jobId, ...args })).job;
+    } catch (caught) {
+      setNotice({ message: moduleChangeErrorMessage(action, caught), tone: 'error' });
+      setOperation(null);
+      setModuleUpdating(false);
+      return;
+    }
+    setOperation(null);
+    try {
+      await runGeneration(async () => changed);
+    } finally {
+      setModuleUpdating(false);
+    }
+  }
+
+  function saveModuleLesson(moduleLocalId: string, lesson: GeneratedModule, expectedVersion: number) {
+    void updateModuleThroughJob('update_module_lesson', { moduleLocalId, expectedVersion, module: lesson });
+  }
+
+  function saveModuleQuestions(moduleLocalId: string, questions: readonly GeneratedQuestion[], expectedVersion: number) {
+    void updateModuleThroughJob('update_module_questions', { moduleLocalId, expectedVersion, questions });
+  }
+
+  function rewriteModuleLesson(moduleLocalId: string, expectedVersion: number) {
+    void updateModuleThroughJob('retry_module', { moduleLocalId, target: 'lesson', expectedVersion });
+  }
+
+  /**
+   * Footer "← Về độ phủ": a running job is paused first (that stops the pump); a completed one
+   * cannot be paused and needs no pause, so it simply opens Kiểm tra độ phủ.
+   */
+  function backToCoverage() {
+    if (templateJob?.status === 'running' && outlineApprovedFor(templateJob)) void pauseAndEditOutline();
+    else backToOutline();
   }
 
   async function moduleAction(action: string, args: Record<string, unknown>): Promise<boolean> {
@@ -1844,15 +1921,12 @@ export function AiGeneratorPage({
     }
   }
 
+  /** Publishes the one template of this session: exactly one publication target. */
   async function publish() {
-    const reviewedRuns = templateRuns.filter(
-      (run): run is AiTemplateRun & { readonly review: AdminTemplateDetail } => Boolean(run.review),
-    );
-    if (reviewedRuns.length !== templateRuns.length || reviewedRuns.length === 0) return;
-    const blockingCount = reviewedRuns.reduce(
-      (sum, run) => sum + aiReviewReadiness(run.review).blockingCount,
-      0,
-    );
+    const run = activeReviewRun;
+    const runReview = run?.review;
+    if (!run || !runReview) return;
+    const { blockingCount } = aiReviewReadiness(runReview);
     if (blockingCount > 0) {
       setNotice({ message: 'Còn ' + blockingCount + ' cờ bắt buộc cần xử lý.', tone: 'error' });
       return;
@@ -1865,42 +1939,30 @@ export function AiGeneratorPage({
     setOperation('publish');
     setNotice(null);
     try {
-      const targets = publishTargets.length > 0
-        ? publishTargets
-        : reviewedRuns.map((run): AiPublishTarget => ({
-            kind: run.kind,
-            review: run.review,
-            jsonExported: false,
-            phase: 'idle',
-          }));
-      const settingsByKind = Object.fromEntries(reviewedRuns.map((run) => [
-        run.kind,
-        run.settings ?? {
-          passingScore: run.review.passingScore ?? 70,
-          maxAttemptsPerModule: run.review.content?.maxAttemptsPerModule === undefined ? 2 : run.review.content.maxAttemptsPerModule,
-          learningMode: run.review.content?.learningMode ?? 'sequential',
-        },
-      ])) as Partial<Record<EmployeeType, AiTemplateSettings>>;
+      // A checkpoint of this very draft resumes where it stopped; anything else starts fresh.
+      const resumed = publishTargets.find((target) => target.kind === run.kind
+        && aiPublishTargetKey(target.review) === aiPublishTargetKey(runReview));
+      const target: AiPublishTarget = resumed ?? { kind: run.kind, review: runReview, jsonExported: false, phase: 'idle' };
+      const settings: AiTemplateSettings = run.settings ?? {
+        passingScore: runReview.passingScore ?? 70,
+        maxAttemptsPerModule: runReview.content?.maxAttemptsPerModule === undefined ? 2 : runReview.content.maxAttemptsPerModule,
+        learningMode: runReview.content?.learningMode ?? 'sequential',
+      };
       const dependencies = createAiPublishDependencies({
         app,
         api,
         roomId,
-        settingsByKind,
+        settingsByKind: { [run.kind]: settings } as Partial<Record<EmployeeType, AiTemplateSettings>>,
         onProgress: setPublishProgress,
       });
       const completed = await publishAiTemplateBatch(
-        targets,
+        [target],
         dependencies,
         checkpointTargets,
       );
       checkpointTargets(completed);
       setPublishProgress(null);
-      setNotice({
-        message: completed.length > 1
-          ? 'Đã xuất bản và lưu cả hai template vào Roomfiles.'
-          : 'Đã xuất bản và lưu template vào Roomfiles.',
-        tone: 'success',
-      });
+      setNotice({ message: 'Đã xuất bản và lưu template vào Roomfiles.', tone: 'success' });
       if (!finishSuccessfulAiPublish(completed, {
         clearResume: () => clearAiResumeKeys(aiGeneratorResumeKeys(roomId, userId)),
         resetSession: () => resetLocalSession(sources),
@@ -1920,18 +1982,7 @@ export function AiGeneratorPage({
       setOperation(null);
     }
   }
-  const publishReadiness = useMemo(() => {
-    const blockingCount = templateRuns.reduce(
-      (sum, run) => sum + aiReviewReadiness(run.review).blockingCount,
-      0,
-    );
-    return {
-      allowed: templateRuns.length > 0
-        && templateRuns.every((run) => Boolean(run.review))
-        && blockingCount === 0,
-      blockingCount,
-    };
-  }, [templateRuns]);
+  const publishReadiness = aiReviewReadiness(activeReviewRun?.review);
   const requestErrors = useMemo(() => validateTemplateRequest({
     selection: templateSelection,
     responsibilities,
@@ -2050,6 +2101,12 @@ export function AiGeneratorPage({
   /** Never silently stalled: a completed job whose review did not load can be pumped again. */
   const generationStalled = stalled
     || (templateJob?.status === 'completed' && !generationReviewLoaded && !busy && !restoring);
+  /** Step 4 edits a module through its job; a legacy or job-less draft keeps the old review. */
+  const reviewJob = activeReviewRun?.job?.pipelineVersion === 'module_v2' && activeReviewRun.job.moduleRuns?.length
+    ? activeReviewRun.job
+    : null;
+  const reviewUpdating = moduleUpdating || (step === 3 && operation === 'analyze');
+  const publishTarget = activeReviewRun ? publishTargets.find((target) => target.kind === activeReviewRun.kind) : undefined;
 
   let hint: string | null = null;
   let primary: { readonly label: string; readonly working?: boolean; readonly disabled: boolean; readonly onClick: () => void } | null = null;
@@ -2091,12 +2148,13 @@ export function AiGeneratorPage({
     };
   } else if (templateRuns.length > 0) {
     if (publishReadiness.blockingCount > 0) hint = `Còn ${publishReadiness.blockingCount} cờ bắt buộc`;
+    else if (!activeReviewRun?.review && !reviewUpdating) hint = 'Template chưa cập nhật xong';
     primary = {
       working: operation === 'publish',
       label: operation === 'publish'
         ? 'Đang xuất bản…'
         : publishTargets.some((target) => target.phase === 'failed') ? 'Thử lại xuất bản' : 'Xuất bản template',
-      disabled: busy || !publishReadiness.allowed,
+      disabled: busy || reviewUpdating || pausing || !publishReadiness.allowed,
       onClick: () => void publish(),
     };
   }
@@ -2220,18 +2278,50 @@ export function AiGeneratorPage({
           )}
           {canGenerateWithAi && step === 3 && (
             <div className="ai-step-review">
-              {review && activeReviewRun && (
+              {publishProgress ? (
+                <div className={'ai-publish-live-progress' + (publishProgress.error ? ' failed' : '')} role={publishProgress.error ? 'alert' : 'status'}>
+                  {busy && !publishProgress.error ? <LoadingOutlined spin /> : publishProgress.error ? <CloseOutlined /> : <CheckOutlined />}
+                  <div>
+                    <strong>{publishProgress.error ? 'Bước hiện tại chưa hoàn tất' : 'Đang chuẩn bị và xuất bản'}</strong>
+                    <span>{aiPublishProgressText(publishProgress)}</span>
+                    {publishProgress.error && <small>{publishProgress.error}</small>}
+                  </div>
+                </div>
+              ) : publishTarget && publishTarget.phase !== 'idle' ? (
+                // A publication restored from its checkpoint says where it stands.
+                <div className={'ai-publish-live-progress' + (publishTarget.phase === 'failed' ? ' failed' : '')} role={publishTarget.phase === 'failed' ? 'alert' : 'status'}>
+                  {publishTarget.phase === 'failed' ? <CloseOutlined /> : <CheckOutlined />}
+                  <div>
+                    <strong>{AI_PUBLISH_PHASE_LABELS[publishTarget.phase]}</strong>
+                    {publishTarget.error && <small>{publishTarget.error}</small>}
+                  </div>
+                </div>
+              ) : null}
+              {reviewJob ? (
+                <AiStepReview
+                  job={reviewJob}
+                  review={review}
+                  updating={reviewUpdating}
+                  busy={busy || pausing || restoring || resetting}
+                  settings={activeSettings}
+                  onSettings={updateActiveSettings}
+                  onSaveLesson={saveModuleLesson}
+                  onSaveQuestions={saveModuleQuestions}
+                  onRewrite={rewriteModuleLesson}
+                  onResolveFlag={(flag, action, note, index) => void resolveFlag(flag, action, note, index)}
+                  sourceNames={sourceNames}
+                  stalled={generationStalled}
+                  error={generationBanner}
+                  onRetry={retryGeneration}
+                  onRetryModule={retryStuckModule}
+                />
+              ) : review && activeReviewRun && (
+                // A draft without a module job (an older template) keeps the legacy review.
                 <div className="ai-review-stage">
-                  {review.content?.moduleApproval && <button className="button button-secondary" type="button" disabled={busy} onClick={() => void editApprovedModules()}>Chỉnh sửa module</button>}
                   <AiReview
                     api={api}
                     review={review}
                     busy={busy}
-                    sequence={{
-                      index: activeReviewIndex,
-                      total: templateRuns.length,
-                      kind: activeReviewRun.kind,
-                    }}
                     onUpdated={(ops) => void updateReview(ops)}
                     onResolve={(flag, action, note, index) => void resolveFlag(flag, action, note, index)}
                   />
@@ -2242,73 +2332,14 @@ export function AiGeneratorPage({
                   </section>
                 </div>
               )}
-              {templateRuns.length > 0 && templateRuns.every((run) => run.review) && (
-                <div className="ai-publish-summary ai-publish-batch-summary">
-                  {publishProgress && (
-                    <div className={'ai-publish-live-progress' + (publishProgress.error ? ' failed' : '')} role={publishProgress.error ? 'alert' : 'status'}>
-                      {busy && !publishProgress.error ? <LoadingOutlined spin /> : publishProgress.error ? <CloseOutlined /> : <CheckOutlined />}
-                      <div>
-                        <strong>{publishProgress.error ? 'Bước hiện tại chưa hoàn tất' : 'Đang chuẩn bị và xuất bản'}</strong>
-                        <span>{aiPublishProgressText(publishProgress)}</span>
-                        {publishProgress.error && <small>{publishProgress.error}</small>}
-                      </div>
-                    </div>
-                  )}
-                  <div className="ai-publish-targets">
-                    {templateRuns.map((run, index) => {
-                      if (!run.review) return null;
-                      const runReadiness = aiReviewReadiness(run.review);
-                      const publishTarget = publishTargets.find((target) => target.kind === run.kind);
-                      const settings = run.settings ?? {
-                        passingScore: run.review.passingScore ?? 70,
-                        maxAttemptsPerModule: run.review.content?.maxAttemptsPerModule === undefined ? 2 : run.review.content.maxAttemptsPerModule,
-                        learningMode: run.review.content?.learningMode ?? 'sequential',
-                      };
-                      const questionCount = run.review.modules.reduce(
-                        (sum, module) => sum + module.questions.length,
-                        0,
-                      );
-                      const lessonBlockCount = run.review.content?.modules.reduce(
-                        (sum, module) => sum + module.blocks.length,
-                        0,
-                      ) ?? 0;
-                      return (
-                        <article className="ai-publish-target" key={run.kind}>
-                          <header>
-                            <span className="ai-sequence-badge">Template {index + 1}/{templateRuns.length}</span>
-                            <strong>{run.review.title}</strong>
-                            <small>{run.kind === 'advanced' ? 'Nâng cao' : 'Thông thường'}</small>
-                          </header>
-                          <dl>
-                            <div><dt>Module</dt><dd>{run.review.modules.length}</dd></div>
-                            <div><dt>Tài liệu học</dt><dd>{lessonBlockCount} khối</dd></div>
-                            <div><dt>Câu hỏi</dt><dd>{questionCount}</dd></div>
-                            <div><dt>Ngưỡng đạt</dt><dd>{settings.passingScore}%</dd></div>
-                            <div><dt>Số lượt</dt><dd>{settings.maxAttemptsPerModule ?? 'Không giới hạn'}</dd></div>
-                            <div><dt>Chế độ</dt><dd>{settings.learningMode === 'free' ? 'Tự do' : 'Tuần tự'}</dd></div>
-                          </dl>
-                          <span className={publishTarget?.phase === 'failed' || !runReadiness.allowed
-                            ? 'ai-target-blocked'
-                            : 'ai-target-ready'}>
-                            {publishTarget
-                              ? AI_PUBLISH_PHASE_LABELS[publishTarget.phase]
-                              : runReadiness.allowed ? 'Sẵn sàng' : `${runReadiness.blockingCount} cờ bắt buộc`}
-                          </span>
-                          {publishTarget?.error && <small className="ai-publish-target-error" role="alert">{publishTarget.error}</small>}
-                        </article>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
             </div>
           )}
         </div>
         {canGenerateWithAi && (
           <footer className="ai-generator-footer">
             <div className="ai-generator-footer-start">
-              {/* Steps 1–2 go back instead. Step 3 keeps reset until its own footer (← Về độ phủ) exists. */}
-              {!initialTemplate && (step === 0 || step === 3) && (
+              {/* Reset lives on step 0 only; later steps go back first. */}
+              {!initialTemplate && step === 0 && (
                 <button className="button button-ghost" type="button" disabled={busy || resetting || restoring} onClick={() => setResetConfirmOpen(true)}>
                   Xóa phiên
                 </button>
@@ -2329,6 +2360,15 @@ export function AiGeneratorPage({
                   disabled={busy || resetting}
                   onClick={() => { if (step === 2) backToOutline(); else setStep(0); }}
                 >← Quay lại</button>
+              )}
+              {!initialTemplate && step === 3 && templateJob && (
+                // Like the step-3 pause, it stays usable while a module update runs: it stops that pump.
+                <button
+                  className="button button-ghost"
+                  type="button"
+                  disabled={pausing || resetting || restoring || operation === 'publish' || operation === 'save' || publishing}
+                  onClick={backToCoverage}
+                >← Về độ phủ</button>
               )}
               {progressCancellable && progressJob && (
                 <button
