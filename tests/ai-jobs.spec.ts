@@ -14,6 +14,7 @@ import { createTemplateService } from '../src/onboarding/templates';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
 import { completePlan } from './helpers/complete-plan';
+import { isModuleCovered } from '../src/onboarding/ai/outline-coverage';
 
 const admin: OnboardingActor = { userId: 'admin-1', roomId: 'room-a', access: 'admin' };
 const otherAdmin: OnboardingActor = { userId: 'admin-2', roomId: 'room-b', access: 'admin' };
@@ -1484,6 +1485,195 @@ describe('AI job service', () => {
       await expect(service.nextStep(admin, { jobId: legacyId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'awaiting_admin' });
       await expect(service.approveOutline(admin, { jobId: legacyId, expectedRevision: 1 })).resolves.toMatchObject({ outlineApprovedRevision: 1 });
       await expect(service.nextStep(admin, { jobId: legacyId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'ai_call', moduleTarget: 'lesson' });
+    });
+  });
+
+  describe('supplement from a new file (S), coverage override, add module', () => {
+    const FAILED_NOTE = 'AI chưa đọc được tài liệu bổ sung. Hãy thử lại hoặc chọn đoạn thủ công.';
+    async function coverageJob(operationId: string) {
+      const context = await setup();
+      const inventory = await context.service.startJob(admin, { kind: 'inventory', sourceIds: ['source-1'], operationId: 'inventory-' + operationId });
+      await context.service.nextStep(admin, { jobId: inventory.jobId, workerId: 'tab-a' });
+      await context.service.submitAiOutput(admin, { jobId: inventory.jobId, workerId: 'tab-a', callId: 'A1', text: inventoryOutput });
+      const started = await context.service.startJob(admin, { kind: 'template', inventoryJobId: inventory.jobId, templateKind: 'normal', operationId });
+      const job = await completePlan(context.service, admin, started);
+      const covered = job.outline!.modules.find((m) => m.sourceSectionIds.length > 0)!;
+      const target = job.outline!.modules.find((m) => m.coverage === 'insufficient')!;
+      return { ...context, job, covered, target };
+    }
+    async function addSource(store: MemoryOnboardingStore, sourceId: string, sections: readonly { id: string; headingPath: string[]; text: string }[]) {
+      await store.create(admin.roomId, 'onboarding_sources', {
+        sourceId, kind: 'document', fileName: sourceId + '.md', checksum: 'checksum-' + sourceId, systemName: 'PrivOS', status: 'ready',
+        sections, textLength: sections.reduce((sum, s) => sum + s.text.length, 0), createdBy: admin.userId,
+        createdAt: '2026-10-23T08:00:00.000Z', updatedAt: '2026-10-23T08:00:00.000Z',
+      });
+    }
+    const supportSections = [
+      { id: 'source-2#s1', headingPath: ['Xử lý lỗi'], text: 'Liên hệ bộ phận hỗ trợ khi đơn bị lỗi.' },
+      { id: 'source-2#s2', headingPath: ['Gửi lại đơn'], text: 'Bấm Gửi lại để gửi duyệt đơn lần nữa.' },
+    ];
+    const usableIds = (ids: readonly string[]) => new Set(ids);
+
+    it('reads only the new file and attaches its sections to the target and another module', async () => {
+      const { service, store, job, covered, target } = await coverageJob('supplement-flow');
+      await addSource(store, 'source-2', supportSections);
+      const queued = await service.supplementModuleDocument(admin, { jobId: job.jobId, expectedRevision: 1, moduleLocalId: target.moduleLocalId, sourceId: 'source-2' });
+      expect(queued.planPending).toBe(true);
+      expect(queued.sourceIds).toEqual(['source-1', 'source-2']);
+      expect(queued.outline!.revision).toBe(1);
+      expect(queued.calls.at(-1)).toMatchObject({ callId: 'supplement-1-b1', stage: 'S', planTarget: 'supplement', status: 'pending', supplementSourceId: 'source-2', supplementModuleLocalId: target.moduleLocalId, supplementBatch: 1 });
+      await expect(service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: [] })).rejects.toMatchObject({ code: 'OPERATION_CONFLICT' });
+
+      const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      if (step.kind !== 'ai_call') throw new Error('Expected the supplement call.');
+      expect(step.callId.startsWith('supplement-')).toBe(true);
+      expect(step.systemContext).toContain('Liên hệ bộ phận hỗ trợ khi đơn bị lỗi.');
+      expect(step.systemContext).not.toContain('source-1#s1');
+      expect(step.systemContext).not.toContain('Bấm nút Gửi duyệt để chuyển đơn.');
+
+      const submitted = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: step.callId, text: JSON.stringify({
+        attachments: [
+          { moduleLocalId: target.moduleLocalId, sectionIds: ['source-2#s1', 'source-1#s1'], reason: 'Nói về xử lý lỗi.' },
+          { moduleLocalId: covered.moduleLocalId, sectionIds: ['source-2#s2'], reason: 'Bổ sung thao tác gửi lại.' },
+        ],
+        coverageUpdates: [{ moduleLocalId: target.moduleLocalId, coverage: 'sufficient', gapNote: '' }],
+      }) });
+      expect(submitted.planPending).toBe(false);
+      expect(submitted.outline!.revision).toBe(2);
+      const usable = usableIds(['source-1#s1', 'source-2#s1', 'source-2#s2']);
+      const nextTarget = submitted.outline!.modules.find((m) => m.moduleLocalId === target.moduleLocalId)!;
+      expect(nextTarget.sourceSectionIds).toEqual(['source-2#s1']);
+      expect(isModuleCovered(nextTarget, usable)).toBe(true);
+      expect(submitted.outline!.flags.some((f) => f.location.moduleLocalId === target.moduleLocalId && f.type === 'missing')).toBe(false);
+      const nextCovered = submitted.outline!.modules.find((m) => m.moduleLocalId === covered.moduleLocalId)!;
+      expect(nextCovered.sourceSectionIds).toEqual(['source-1#s1', 'source-2#s2']);
+      expect(submitted.moduleRuns!.every((run) => run.outlineRevision === 2)).toBe(true);
+      await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'awaiting_admin', job: { outline: { revision: 2 } } });
+    });
+
+    it('runs one S call per batch in order and applies their merged result once', async () => {
+      const { service, store, job, target } = await coverageJob('supplement-batches');
+      const sections = Array.from({ length: 34 }, (_, i) => ({ id: 'source-3#s' + String(i + 1), headingPath: ['Mục ' + String(i + 1)], text: 'Nội dung mục ' + String(i + 1) + ' ' + 'a'.repeat(3_980) }));
+      await addSource(store, 'source-3', sections);
+      const queued = await service.supplementModuleDocument(admin, { jobId: job.jobId, expectedRevision: 1, moduleLocalId: target.moduleLocalId, sourceId: 'source-3' });
+      expect(queued.calls.filter((call) => call.stage === 'S').map((call) => [call.callId, call.supplementBatch])).toEqual([['supplement-1-b1', 1], ['supplement-1-b2', 2]]);
+
+      const first = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      expect(first).toMatchObject({ kind: 'ai_call', callId: 'supplement-1-b1' });
+      if (first.kind !== 'ai_call') throw new Error('Expected batch 1.');
+      expect(first.systemContext).toContain('source-3#s1"');
+      expect(first.systemContext).not.toContain('source-3#s34"');
+      const afterFirst = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'supplement-1-b1', text: JSON.stringify({
+        attachments: [{ moduleLocalId: target.moduleLocalId, sectionIds: ['source-3#s1'], reason: 'Liên quan.' }],
+        coverageUpdates: [{ moduleLocalId: target.moduleLocalId, coverage: 'insufficient', gapNote: 'Còn thiếu phần cuối.' }],
+      }) });
+      expect(afterFirst.planPending).toBe(true);
+      expect(afterFirst.outline!.revision).toBe(1);
+
+      const second = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      expect(second).toMatchObject({ kind: 'ai_call', callId: 'supplement-1-b2' });
+      if (second.kind !== 'ai_call') throw new Error('Expected batch 2.');
+      expect(second.systemContext).toContain('source-3#s34"');
+      expect(second.systemContext).not.toContain('source-3#s1"');
+      const done = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'supplement-1-b2', text: JSON.stringify({
+        attachments: [{ moduleLocalId: target.moduleLocalId, sectionIds: ['source-3#s34'], reason: 'Phần cuối.' }],
+        coverageUpdates: [{ moduleLocalId: target.moduleLocalId, coverage: 'sufficient', gapNote: '' }],
+      }) });
+      expect(done.planPending).toBe(false);
+      expect(done.outline!.revision).toBe(2);
+      const module = done.outline!.modules.find((m) => m.moduleLocalId === target.moduleLocalId)!;
+      expect(module.sourceSectionIds).toEqual(['source-3#s1', 'source-3#s34']);
+      expect(module.coverage).toBe('sufficient');
+    });
+
+    it('skips a supplement batch after one schema repair and one failure, keeping the job running', async () => {
+      const { service, store, job, target } = await coverageJob('supplement-skip');
+      await addSource(store, 'source-2', supportSections);
+      await service.supplementModuleDocument(admin, { jobId: job.jobId, expectedRevision: 1, moduleLocalId: target.moduleLocalId, sourceId: 'source-2' });
+      await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      const invalid = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'supplement-1-b1', text: 'not json' });
+      expect(invalid.calls.at(-1)).toMatchObject({ callId: 'supplement-1-b1-r1', stage: 'S', repairOf: 'supplement-1-b1', retryKind: 'schema', supplementSourceId: 'source-2', supplementModuleLocalId: target.moduleLocalId, supplementBatch: 1 });
+      await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'ai_call', callId: 'supplement-1-b1-r1' });
+      const failed = await service.reportAiFailure(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'supplement-1-b1-r1', kind: 'failed', message: 'boom' });
+      expect(failed.status).toBe('running');
+      expect(failed.planPending).toBe(false);
+      expect(failed.errorCode).toBeUndefined();
+      expect(failed.calls.filter((call) => call.stage === 'S').map((call) => [call.callId, call.status])).toEqual([['supplement-1-b1', 'invalid'], ['supplement-1-b1-r1', 'failed']]);
+      const module = failed.outline!.modules.find((m) => m.moduleLocalId === target.moduleLocalId)!;
+      expect(module).toMatchObject({ coverage: 'insufficient', gapNote: FAILED_NOTE, sourceSectionIds: [] });
+      await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'awaiting_admin', job: { status: 'running' } });
+    });
+
+    it('retries a transient supplement failure once before skipping', async () => {
+      const { service, store, job, target, advance } = await coverageJob('supplement-transient');
+      await addSource(store, 'source-2', supportSections);
+      await service.supplementModuleDocument(admin, { jobId: job.jobId, expectedRevision: 1, moduleLocalId: target.moduleLocalId, sourceId: 'source-2' });
+      await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      const first = await service.reportAiFailure(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'supplement-1-b1', kind: 'failed', message: 'busy', providerErrorCode: 'PROVIDER_TRANSIENT' });
+      expect(first.calls.at(-1)).toMatchObject({ callId: 'supplement-1-b1-retry1', stage: 'S', retryKind: 'transient', supplementSourceId: 'source-2' });
+      advance(3_000);
+      await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'ai_call', callId: 'supplement-1-b1-retry1' });
+      const second = await service.reportAiFailure(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'supplement-1-b1-retry1', kind: 'failed', message: 'busy', providerErrorCode: 'PROVIDER_TRANSIENT' });
+      expect(second.planPending).toBe(false);
+      expect(second.outline!.modules.find((m) => m.moduleLocalId === target.moduleLocalId)!.gapNote).toBe(FAILED_NOTE);
+    });
+
+    it('rejects a source the job already has, an unready source and a stale revision', async () => {
+      const { service, store, job, target } = await coverageJob('supplement-reject');
+      await expect(service.supplementModuleDocument(admin, { jobId: job.jobId, expectedRevision: 1, moduleLocalId: target.moduleLocalId, sourceId: 'source-1' }))
+        .rejects.toMatchObject({ code: 'OPERATION_CONFLICT', message: 'Tài liệu này đã có trong lộ trình. Hãy dùng "Chọn đoạn từ tài liệu đã có".' });
+      await expect(service.supplementModuleDocument(admin, { jobId: job.jobId, expectedRevision: 1, moduleLocalId: target.moduleLocalId, sourceId: 'missing' }))
+        .rejects.toMatchObject({ code: 'SOURCE_NOT_FOUND' });
+      await addSource(store, 'source-2', supportSections);
+      await expect(service.supplementModuleDocument(admin, { jobId: job.jobId, expectedRevision: 2, moduleLocalId: target.moduleLocalId, sourceId: 'source-2' }))
+        .rejects.toMatchObject({ code: 'OPERATION_CONFLICT' });
+      await expect(service.supplementModuleDocument({ ...admin, roomId: 'room-b' }, { jobId: job.jobId, expectedRevision: 1, moduleLocalId: target.moduleLocalId, sourceId: 'source-2' }))
+        .rejects.toMatchObject({ code: 'JOB_NOT_FOUND' });
+    });
+
+    it('rejects a coverage override on a module without usable sections', async () => {
+      const { service, job, covered, target } = await coverageJob('coverage-override');
+      await expect(service.setCoverageOverride(admin, { jobId: job.jobId, expectedRevision: 1, moduleLocalId: target.moduleLocalId, override: true }))
+        .rejects.toMatchObject({ code: 'COVERAGE_INCOMPLETE', message: 'Module chưa có đoạn tài liệu dùng được.' });
+      const edited = await service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: [{ type: 'update', moduleLocalId: covered.moduleLocalId, patch: { coverage: 'insufficient', gapNote: 'Chưa đủ.' } }] });
+      const overridden = await service.setCoverageOverride(admin, { jobId: job.jobId, expectedRevision: edited.outline!.revision, moduleLocalId: covered.moduleLocalId, override: true });
+      expect(overridden.outline!.revision).toBe(edited.outline!.revision + 1);
+      const module = overridden.outline!.modules.find((m) => m.moduleLocalId === covered.moduleLocalId)!;
+      expect(module.coverageOverride).toBe(true);
+      expect(isModuleCovered(module, usableIds(['source-1#s1']))).toBe(true);
+    });
+
+    it('marks a module sufficient after the admin picks sections for it', async () => {
+      const { service, job, target } = await coverageJob('picker-sufficient');
+      const updated = await service.supplementModuleSources(admin, { jobId: job.jobId, expectedRevision: 1, moduleLocalId: target.moduleLocalId, sourceIds: ['source-1'], sectionIds: ['source-1#s1'] });
+      const module = updated.outline!.modules.find((m) => m.moduleLocalId === target.moduleLocalId)!;
+      expect(module).toMatchObject({ sourceSectionIds: ['source-1#s1'], coverage: 'sufficient' });
+      expect(isModuleCovered(module, usableIds(['source-1#s1']))).toBe(true);
+    });
+
+    it('adds a module on the next unused frame and lets AI pick sections from the catalog', async () => {
+      const { service, job } = await coverageJob('add-module');
+      const added = await service.addOutlineModule(admin, { jobId: job.jobId, expectedRevision: 1, title: 'Mẹo sử dụng', description: 'Các mẹo nhanh.' });
+      expect(added.outline!.revision).toBe(2);
+      const active = added.outline!.modules.filter((m) => !m.tombstoned);
+      const module = active.at(-1)!;
+      expect(active).toHaveLength(job.outline!.modules.length + 1);
+      expect(module).toMatchObject({ title: 'Mẹo sử dụng', description: 'Các mẹo nhanh.', coverage: 'insufficient', sourceSectionIds: [], order: active.length - 1 });
+      expect(job.outline!.modules.some((m) => m.frameKey === module.frameKey)).toBe(false);
+      expect(added.planPending).toBe(true);
+      expect(added.calls.at(-1)).toMatchObject({ callId: 'supplement-1-b1', stage: 'S', planTarget: 'supplement', supplementModuleLocalId: module.moduleLocalId, status: 'pending' });
+      expect(added.calls.at(-1)!.supplementSourceId).toBeUndefined();
+
+      const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+      if (step.kind !== 'ai_call') throw new Error('Expected the catalog call.');
+      expect(step.callId).toBe('supplement-1-b1');
+      expect(step.systemContext).toContain('source-1#s1');
+      const done = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: step.callId, text: JSON.stringify({
+        attachments: [{ moduleLocalId: module.moduleLocalId, sectionIds: ['source-1#s1'], reason: 'Có mẹo gửi duyệt.' }],
+        coverageUpdates: [{ moduleLocalId: module.moduleLocalId, coverage: 'sufficient', gapNote: '' }],
+      }) });
+      expect(done.outline!.revision).toBe(3);
+      expect(isModuleCovered(done.outline!.modules.find((m) => m.moduleLocalId === module.moduleLocalId)!, usableIds(['source-1#s1']))).toBe(true);
     });
   });
 

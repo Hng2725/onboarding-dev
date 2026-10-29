@@ -200,7 +200,9 @@ export function applyTemplateOutlineEdits(outline: TemplateOutline, edits: reado
   const metadataErrors = validateOutlineMetadata(active);
   if (metadataErrors.length) throw new Error(metadataErrors[0].message);
   const allIds = new Set(outline.modules.map((m) => m.moduleLocalId));
-  const flags = outline.flags.filter((f) => !(f.type === 'missing' && (isTaskCoverageFlag(f) || (isMissingSourceFlag(f) && f.location.moduleLocalId && !active.some((m) => m.moduleLocalId === f.location.moduleLocalId)))));
+  // A missing-source flag stays only while its module is live and still has no source section.
+  const lacksSources = (id: string): boolean => active.some((m) => m.moduleLocalId === id && !m.sourceSectionIds.some((s) => s.trim()));
+  const flags = outline.flags.filter((f) => !(f.type === 'missing' && (isTaskCoverageFlag(f) || (isMissingSourceFlag(f) && f.location.moduleLocalId && !lacksSources(f.location.moduleLocalId)))));
   active.filter((m) => !m.sourceSectionIds.some((id) => id.trim()) && (!allIds.has(m.moduleLocalId) || !flags.some((f) => f.type === 'missing' && f.severity === 'blocking' && f.location.moduleLocalId === m.moduleLocalId))).forEach((m) => flags.push(missingSource(m.moduleLocalId)));
   return { revision: outline.revision + 1, modules: [...active, ...tombstones], flags, taskCoverage: coverage(outline.taskCoverage.map((c) => c.task), active, flags) };
 }

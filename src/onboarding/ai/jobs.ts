@@ -8,6 +8,7 @@ import type {
   AiPipelineVersion,
   OutlineEdit,
   TemplateOutline,
+  TemplateOutlineModule,
   AiJobRecord,
   AiProvider,
   EmployeeType,
@@ -28,9 +29,11 @@ import {
 import { AI_GENERATION_LIMITS } from './limits';
 import { sanitizeAiDiagnosticText } from './diagnostics';
 import { materializeAiTemplate, materializeModuleTemplate } from './materialize';
-import { buildTemplateOutline, applyTemplateOutlineEdits } from './outline';
+import { buildTemplateOutline, applyTemplateOutlineEdits, GAP_NOTE } from './outline';
 import { moduleHasUsableSources, usableSectionIds } from './outline-coverage';
 import { buildOutlinePlanPrompt, buildOutlinePlanRepairPrompt, validateOutlinePlanOutput, type OutlinePlanValidationInput } from './outline-plan';
+import { buildSupplementPrompt, buildSupplementRepairPrompt, SUPPLEMENT_EXCERPT_CHARS, validateSupplementOutput, type SupplementCoverageUpdate, type SupplementOutput, type SupplementPromptInput } from './outline-supplement';
+import { batchSources, planBatches as planSourceBatches, SourceBatchError } from './source-batches';
 import { buildFallbackLesson } from './fallback-lessons';
 import { buildFallbackQuestions } from './fallback-questions';
 import { buildModuleLessonPrompt, buildModuleLessonRepairPrompt, buildModuleQuestionRepairPrompt, buildModuleQuestionPrompt, validateModuleLessonOutput, validateModuleQuestionOutput, validApprovedLesson, type ModuleLessonPromptInput } from './module-draft';
@@ -50,6 +53,8 @@ import {
   type AiPromptRequest,
 } from './prompts';
 import {
+  ADVANCED_FRAMES,
+  NORMAL_FRAMES,
   removeQuestionsBlockedByFlags,
   validateGeneratedTemplate,
   type GeneratedTemplate,
@@ -260,6 +265,7 @@ export type AiJobServiceErrorCode =
   | 'AI_FAILED'
   | 'AI_TIMEOUT'
   | 'AI_DISPATCH_UNKNOWN'
+  | 'COVERAGE_INCOMPLETE'
   | 'OPERATION_CONFLICT';
 
 export class AiJobServiceError extends Error {
@@ -334,15 +340,33 @@ const MAX_PROVIDER_WAIT_MS = 120_000;
 const PROVIDER_RETRY_MS = 3_000;
 const TRANSIENT_PROVIDER_ERROR = /(?:TRANSIENT|UNAVAILABLE|OVERLOADED|RATE_LIMIT|SERVER_ERROR)/;
 const PLAN_PENDING_MESSAGE = 'AI đang lập lộ trình, vui lòng chờ.';
+const SUPPLEMENT_FAILED_NOTE = 'AI chưa đọc được tài liệu bổ sung. Hãy thử lại hoặc chọn đoạn thủ công.';
+const SUPPLEMENT_CALL = /^supplement-(\d+)-b(\d+)/;
 
-/** Outline planner calls carry no module, so they must never reach a module-run lookup. */
+/**
+ * Outline planner (P) and supplement (S) calls carry no module, so they must never reach a
+ * module-run lookup. They share dispatch, retry and settle-before-the-admin-gate handling.
+ */
 function isPlanCall(call: AiCallRecord): boolean {
-  return call.stage === 'P';
+  return call.stage === 'P' || call.stage === 'S';
 }
 
 /** A planner (P) or supplement (S) call is still pending or dispatched. */
 function planPending(calls: readonly AiCallRecord[]): boolean {
-  return calls.some((call) => (call.stage === 'P' || call.stage === 'S') && (call.status === 'pending' || call.status === 'dispatched'));
+  return calls.some((call) => isPlanCall(call) && (call.status === 'pending' || call.status === 'dispatched'));
+}
+
+/** The supplement request number `n` of an S call `supplement-<n>-b<k>[-rN|-retryN]`. */
+function supplementRequest(call: AiCallRecord): number | undefined {
+  const match = call.stage === 'S' ? SUPPLEMENT_CALL.exec(call.callId) : null;
+  return match ? Number(match[1]) : undefined;
+}
+
+/** Persisted per request under `supplement:<n>`. New-file requests carry the source and its batches. */
+interface SupplementRequest {
+  readonly moduleLocalId: string;
+  readonly sourceId?: string;
+  readonly batches?: readonly (readonly string[])[];
 }
 
 export type AiJobNextStep =
@@ -367,6 +391,11 @@ export interface AiJobService {
   approveOutline(actor: OnboardingActor, input: OutlineVersionInput): Promise<AiJobRecord>;
   listModuleSources(actor: OnboardingActor, jobId: string): Promise<readonly { sourceId: string; fileName: string; sections: readonly { id: string; headingPath: readonly string[] }[] }[]>;
   supplementModuleSources(actor: OnboardingActor, input: OutlineVersionInput & ModuleInput & { readonly sourceIds: readonly string[]; readonly sectionIds: readonly string[] }): Promise<AiJobRecord>;
+  /** Adds one new ready room source and lets AI read only that file (S calls) to fill the module. */
+  supplementModuleDocument(actor: OnboardingActor, input: OutlineVersionInput & ModuleInput & { readonly sourceId: string }): Promise<AiJobRecord>;
+  /** Appends a module on the next unused frame and lets AI pick sections from the job's catalog. */
+  addOutlineModule(actor: OnboardingActor, input: OutlineVersionInput & { readonly title: string; readonly description: string }): Promise<AiJobRecord>;
+  setCoverageOverride(actor: OnboardingActor, input: OutlineVersionInput & ModuleInput & { readonly override: boolean }): Promise<AiJobRecord>;
   updateModuleLesson(actor: OnboardingActor, input: ModuleVersionInput & { readonly module: GeneratedModule }): Promise<AiJobRecord>;
   approveModuleLesson(actor: OnboardingActor, input: ModuleVersionInput): Promise<AiJobRecord>;
   useSourceFallback(actor: OnboardingActor, input: ModuleVersionInput): Promise<AiJobRecord>;
@@ -782,32 +811,12 @@ export function createAiJobService(
   }
 
   function planBatches(sources: readonly SourceRecord[]): readonly (readonly string[])[] {
-    const sections = sources.flatMap((source) => source.sections ?? []);
-    const totalBytes = Buffer.byteLength(sections.map((section) => section.text).join('\n'), 'utf8');
-    if (totalBytes > AI_GENERATION_LIMITS.maxJobTextBytes) {
-      throw new AiJobServiceError('SOURCE_TOO_LARGE', 'Selected source text exceeds the job limit.');
+    try {
+      return planSourceBatches(sources);
+    } catch (error) {
+      if (error instanceof SourceBatchError) throw new AiJobServiceError(error.code, error.message);
+      throw error;
     }
-    const batches: string[][] = [];
-    let current: string[] = [];
-    let currentSize = 0;
-    for (const section of sections) {
-      const estimatedSize = section.text.length + section.id.length + 500;
-      if (
-        current.length > 0
-        && currentSize + estimatedSize > AI_GENERATION_LIMITS.maxSystemContextChars - 1_000
-      ) {
-        batches.push(current);
-        current = [];
-        currentSize = 0;
-      }
-      current.push(section.id);
-      currentSize += estimatedSize;
-    }
-    if (current.length > 0) batches.push(current);
-    if (batches.length === 0) {
-      throw new AiJobServiceError('SOURCE_NOT_FOUND', 'Selected sources contain no extracted sections.');
-    }
-    return batches;
   }
 
   async function updateJob(
@@ -822,17 +831,6 @@ export function createAiJobService(
       { ...data, updatedAt: new Date(Math.max(Date.parse(now()), Date.parse(row.updatedAt) + 1)).toISOString() },
       { expectedUpdatedAt: row.updatedAt },
     );
-  }
-
-  function batchSources(
-    sources: readonly SourceRecord[],
-    sectionIds: readonly string[],
-  ): readonly SourceRecord[] {
-    const selected = new Set(sectionIds);
-    return sources.map((source) => ({
-      ...source,
-      sections: source.sections?.filter((section) => selected.has(section.id)) ?? [],
-    })).filter((source) => (source.sections?.length ?? 0) > 0);
   }
 
   function rootCall(call: AiCallRecord): string {
@@ -1393,10 +1391,13 @@ export function createAiJobService(
       && Date.parse(now()) - Date.parse(row.providerWaitStartedAt) >= MAX_PROVIDER_WAIT_MS) {
       const calls = row.calls.map((call) => call.callId === current.callId ? { ...call, status: 'failed' as const, errors: ['PROJECT_BUSY'], finishedAt: now() } : call);
       if (row.pipelineVersion === 'module_v2' && row.kind === 'template' && isPlanCall(current)) {
-        // The planner is optional: a project that stays busy keeps the deterministic outline.
-        const updated = await updateJob(actor, row, { calls, stageOutputs: { ...row.stageOutputs, __planFallback: true }, ...CLEARED_WAIT, ...RELEASED_LEASE });
+        // Planner work is optional: a project that stays busy keeps the deterministic outline
+        // (P) or skips the supplement batch (S).
+        let updated = await updateJob(actor, row, { calls, ...planGiveUp(row, current), ...CLEARED_WAIT, ...RELEASED_LEASE });
         await releaseCallLease(actor, row, current);
-        return { kind: 'awaiting_admin', job: jobFrom(updated, actor.roomId) };
+        if (current.stage === 'S') updated = await settleSupplements(actor, updated);
+        // Later supplement batches still run; the pump polls again for them.
+        return { kind: planPending(updated.calls) ? 'wait' : 'awaiting_admin', job: jobFrom(updated, actor.roomId) };
       }
       if (row.pipelineVersion === 'module_v2' && row.kind === 'template') {
         const run = moduleForCall(row, current);
@@ -1479,9 +1480,71 @@ export function createAiJobService(
    * counts: the next step would apply it over the admin's change.
    */
   function assertPlanSettled(row: AiJobDbRecord): void {
-    const unprocessed = row.calls.some((call) => (call.stage === 'P' || call.stage === 'S') && call.status === 'completed'
+    // A settled supplement request whose result was not yet applied counts the same way.
+    if (unprocessedPlanCall(row) || planPending(row.calls) || settledSupplements(row).length > 0) throw new AiJobServiceError('OPERATION_CONFLICT', PLAN_PENDING_MESSAGE);
+  }
+  function unprocessedPlanCall(row: AiJobDbRecord): AiCallRecord | undefined {
+    return row.calls.find((call) => isPlanCall(call) && call.status === 'completed'
       && rawOutput(row.stageOutputs, call.callId) !== undefined && row.stageOutputs['processed:' + call.callId] !== true);
-    if (unprocessed || planPending(row.calls)) throw new AiJobServiceError('OPERATION_CONFLICT', PLAN_PENDING_MESSAGE);
+  }
+  /** Supplement requests whose calls have all settled but whose merged result is not yet applied. */
+  function settledSupplements(row: AiJobDbRecord): readonly number[] {
+    const requests = [...new Set(row.calls.map(supplementRequest).filter((n): n is number => n !== undefined))].sort((a, b) => a - b);
+    return requests.filter((n) => row.stageOutputs['applied:supplement-' + String(n)] !== true
+      && row.calls.every((call) => supplementRequest(call) !== n || !(call.status === 'pending' || call.status === 'dispatched'
+        || (call.status === 'completed' && rawOutput(row.stageOutputs, call.callId) !== undefined && row.stageOutputs['processed:' + call.callId] !== true))));
+  }
+  function requeueDrafting(run: AiModuleDraftRun): AiModuleDraftRun {
+    return { ...run, ...(run.lessonState === 'drafting' ? { lessonState: 'queued' } : {}), ...(run.questionState === 'drafting' ? { questionState: 'queued' } : {}) };
+  }
+  /** Shared checks for Admin outline-coverage actions: current revision, planner settled, no live call. */
+  async function requireOutlineEdit(actor: OnboardingActor, input: OutlineVersionInput): Promise<AiJobDbRecord> {
+    const row = await requireModuleJob(actor, input.jobId);
+    assertPlanSettled(row);
+    assertOutlineRevision(row, input.expectedRevision);
+    if (row.calls.some(aiCallMayBeLive)) throw new AiJobServiceError('OPERATION_CONFLICT', 'An AI call is still active.');
+    return row;
+  }
+  function requireActiveModule(row: AiJobDbRecord, moduleLocalId: string): TemplateOutlineModule {
+    const module = row.outline!.modules.find((item) => !item.tombstoned && item.moduleLocalId === moduleLocalId);
+    if (!module) throw new AiJobServiceError('OPERATION_CONFLICT', 'Active module not found.');
+    return module;
+  }
+  function nextSupplementNumber(row: AiJobDbRecord): number {
+    return Math.max(0, ...row.calls.map(supplementRequest).filter((n): n is number => n !== undefined)) + 1;
+  }
+  function supplementCall(row: AiJobDbRecord, request: number, batch: number, moduleLocalId: string, sourceId?: string): AiCallRecord {
+    const callId = 'supplement-' + String(request) + '-b' + String(batch);
+    return {
+      callId, stage: 'S', planTarget: 'supplement', status: 'pending', operationId: row.jobId + ':' + callId,
+      supplementModuleLocalId: moduleLocalId, supplementBatch: batch, ...(sourceId ? { supplementSourceId: sourceId } : {}),
+    };
+  }
+  /**
+   * The section picker's write path, shared by every coverage action and by applied supplement
+   * results: one outline revision, invalidated changed modules, superseded module calls and a
+   * reset outline approval.
+   */
+  async function applyOutlineEdits(actor: OnboardingActor, row: AiJobDbRecord, input: {
+    readonly edits: readonly OutlineEdit[];
+    readonly sourceIds?: readonly string[];
+    readonly newId?: (frameKey: string) => string;
+    readonly extraCalls?: readonly AiCallRecord[];
+    readonly stageOutputs?: Readonly<Record<string, unknown>>;
+  }): Promise<AiJobDbRecord> {
+    let outline: TemplateOutline;
+    try {
+      outline = applyTemplateOutlineEdits(row.outline!, input.edits, input.newId ?? (() => 'unused'));
+    } catch {
+      throw new AiJobServiceError('OPERATION_CONFLICT', 'Outline edits are invalid.');
+    }
+    validateOutline(row, outline);
+    const runs = reconcileModuleRuns(row.moduleRuns!, outline).map(requeueDrafting);
+    const calls = [...obsoleteCalls(row, new Set(row.moduleRuns!.map((item) => item.outline.moduleLocalId))), ...(input.extraCalls ?? [])];
+    return updateJob(actor, row, {
+      ...(input.sourceIds ? { sourceIds: input.sourceIds } : {}), outline, outlineApprovedRevision: 0, moduleRuns: runs, calls, status: 'running', result: null,
+      ...(input.stageOutputs ? { stageOutputs: input.stageOutputs } : {}), ...leaseAfterChanges(calls),
+    });
   }
   function assertOutlineRevision(row: AiJobDbRecord, revision: number): void {
     if (row.outline!.revision !== revision || !Number.isSafeInteger(revision)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Outline revision conflict.');
@@ -1541,19 +1604,64 @@ export function createAiJobService(
       responsibilities: row.roleProfile?.responsibilities ?? [],
     };
   }
+  /** The last invalid output of the same planner root, parsed; malformed text is never forwarded. */
+  function previousPlanOutput(row: AiJobDbRecord, call: AiCallRecord): { readonly previous: unknown; readonly errors?: readonly string[] } {
+    const invalid = row.calls.filter((item) => isPlanCall(item) && rootCall(item) === rootCall(call) && item.status === 'invalid').slice(-1)[0] as AiCallRecord | undefined;
+    let previous: unknown = {};
+    try { previous = invalid ? parseAiJsonObject(rawOutput(row.stageOutputs, invalid.callId) ?? '', { allowLeadingNarration: callProvider(invalid) === 'native_chat' }) : {}; } catch { /* Do not forward malformed untrusted text. */ }
+    return { previous, ...(invalid?.errors ? { errors: invalid.errors } : {}) };
+  }
   async function planPrompt(actor: OnboardingActor, row: AiJobDbRecord, call: AiCallRecord): Promise<AiPromptRequest> {
+    if (call.stage === 'S') return supplementPrompt(actor, row, call);
     const records = await liveJobSources(actor, row);
     const usable = usableSectionIds(records);
     const sections = records.flatMap((source) => (source.sections ?? []).filter((section) => usable.has(section.id))
       .map((section) => ({ id: section.id, sourceId: source.sourceId, fileName: source.fileName, headingPath: section.headingPath, chars: section.text.length })));
     const input = { templateKind: row.templateKind ?? 'normal', inventory: row.stageOutputs.__inventory as FeatureInventory, sections, responsibilities: row.roleProfile?.responsibilities ?? [], range: planRange(row) } as const;
     if (!call.repairOf) return buildOutlinePlanPrompt(input);
-    const invalid = row.calls.filter((item) => isPlanCall(item) && item.status === 'invalid').slice(-1)[0] as AiCallRecord | undefined;
-    let previous: unknown = {};
-    try { previous = invalid ? parseAiJsonObject(rawOutput(row.stageOutputs, invalid.callId) ?? '', { allowLeadingNarration: callProvider(invalid) === 'native_chat' }) : {}; } catch { /* Do not forward malformed untrusted text. */ }
-    return buildOutlinePlanRepairPrompt({ ...input, previous, errors: invalid?.errors ?? ['Invalid outline plan output'] });
+    const { previous, errors } = previousPlanOutput(row, call);
+    return buildOutlinePlanRepairPrompt({ ...input, previous, errors: errors ?? ['Invalid outline plan output'] });
   }
-  /** Planner retries mirror `retryCall`: one schema repair (`-r1`) and one transient retry (`-retryN`) per plan. */
+  /**
+   * What one S call may see and return. New-file calls see only their batch of the new source
+   * (full text); catalog calls see id, heading and a 300-character excerpt of the job's sections.
+   */
+  async function supplementCallContext(actor: OnboardingActor, row: AiJobDbRecord, call: AiCallRecord): Promise<{
+    readonly input: SupplementPromptInput; readonly allowedSectionIds: ReadonlySet<string>; readonly moduleIds: ReadonlySet<string>;
+  }> {
+    const records = await liveJobSources(actor, row);
+    const usable = usableSectionIds(records);
+    const headings = new Map(records.flatMap((source) => (source.sections ?? []).map((section) => [section.id, section.headingPath.join(' > ')] as const)));
+    const active = row.outline!.modules.filter((module) => !module.tombstoned).sort((a, b) => a.order - b.order);
+    const modules = active.map((module) => ({
+      moduleLocalId: module.moduleLocalId, order: module.order, title: module.title, description: module.description, objectives: module.objectives,
+      ...(module.coverage === 'insufficient' && module.gapNote ? { gapNote: module.gapNote } : {}),
+      sectionHeadings: module.sourceSectionIds.map((id) => headings.get(id)).filter((heading): heading is string => Boolean(heading)),
+    }));
+    const moduleIds = new Set(active.map((module) => module.moduleLocalId));
+    const targetModuleLocalId = call.supplementModuleLocalId ?? '';
+    if (call.supplementSourceId) {
+      const request = row.stageOutputs['supplement:' + String(supplementRequest(call))] as SupplementRequest | undefined;
+      const source = records.find((item) => item.sourceId === call.supplementSourceId);
+      const batch = request?.batches?.[(call.supplementBatch ?? 1) - 1];
+      if (!source || !batch) throw new AiJobServiceError('SOURCE_NOT_FOUND', 'The supplement source is no longer available.');
+      const sections = batchSources([source], batch).flatMap((item) => item.sections ?? []).filter((section) => usable.has(section.id));
+      return {
+        input: { mode: 'new_file', targetModuleLocalId, modules, sections, batch: { index: call.supplementBatch ?? 1, total: request!.batches!.length } },
+        allowedSectionIds: new Set(sections.map((section) => section.id)), moduleIds,
+      };
+    }
+    const sections = records.flatMap((source) => (source.sections ?? []).filter((section) => usable.has(section.id))
+      .map((section) => ({ id: section.id, headingPath: section.headingPath, excerpt: section.text.slice(0, SUPPLEMENT_EXCERPT_CHARS) })));
+    return { input: { mode: 'catalog', targetModuleLocalId, modules, sections }, allowedSectionIds: new Set(sections.map((section) => section.id)), moduleIds };
+  }
+  async function supplementPrompt(actor: OnboardingActor, row: AiJobDbRecord, call: AiCallRecord): Promise<AiPromptRequest> {
+    const { input } = await supplementCallContext(actor, row, call);
+    if (!call.repairOf) return buildSupplementPrompt(input);
+    const { previous, errors } = previousPlanOutput(row, call);
+    return buildSupplementRepairPrompt({ ...input, previous, errors: errors ?? ['Invalid supplement output'] });
+  }
+  /** Planner retries mirror `retryCall`: one schema repair (`-r1`) and one transient retry (`-retryN`) per planner call. */
   function planRetryCall(row: AiJobDbRecord, call: AiCallRecord, kind: NonNullable<AiCallRecord['retryKind']>): AiCallRecord {
     const root = rootCall(call);
     const callId = kind === 'schema'
@@ -1562,13 +1670,99 @@ export function createAiJobService(
     return {
       callId, operationId: row.jobId + ':' + callId, stage: call.stage, status: 'pending', retryKind: kind,
       ...(call.planTarget ? { planTarget: call.planTarget } : {}),
+      ...(call.supplementSourceId ? { supplementSourceId: call.supplementSourceId } : {}),
+      ...(call.supplementModuleLocalId ? { supplementModuleLocalId: call.supplementModuleLocalId } : {}),
+      ...(call.supplementBatch !== undefined ? { supplementBatch: call.supplementBatch } : {}),
       ...(kind === 'schema' ? { repairOf: root } : call.repairOf ? { repairOf: call.repairOf } : {}),
     };
   }
-  function planRetryUsed(row: AiJobDbRecord, kind: NonNullable<AiCallRecord['retryKind']>): boolean {
-    return row.calls.some((item) => isPlanCall(item) && item.retryKind === kind);
+  /** A retry runs right after its failed call, ahead of later supplement batches. */
+  function enqueuePlanRetry(calls: readonly AiCallRecord[], retry: AiCallRecord): AiCallRecord[] {
+    const next = calls.findIndex((item) => item.status === 'pending' && !item.dispatchClaimedAt && !item.attemptRef);
+    return next < 0 ? [...calls, retry] : [...calls.slice(0, next), retry, ...calls.slice(next)];
+  }
+  /** Each planner root call gets its own budget of one retry per kind. */
+  function planRetryUsed(row: AiJobDbRecord, call: AiCallRecord, kind: NonNullable<AiCallRecord['retryKind']>): boolean {
+    const root = rootCall(call);
+    return row.calls.some((item) => isPlanCall(item) && rootCall(item) === root && item.retryKind === kind);
+  }
+  /** Out of retries: the plan keeps the deterministic outline; a supplement batch is skipped (applied on settle). */
+  function planGiveUp(row: AiJobDbRecord, call: AiCallRecord): StoreRecord {
+    return call.stage === 'P' ? { stageOutputs: { ...row.stageOutputs, __planFallback: true } } : {};
+  }
+  async function processSupplementOutput(actor: OnboardingActor, row: AiJobDbRecord, call: AiCallRecord): Promise<AiJobDbRecord> {
+    const text = rawOutput(row.stageOutputs, call.callId) ?? '';
+    let errors: readonly string[] = ['Outline is missing.'];
+    let value: SupplementOutput | undefined;
+    if (row.outline && row.moduleRuns) {
+      try {
+        const context = await supplementCallContext(actor, row, call);
+        const result = validateSupplementOutput(parseAiJsonObject(text, { allowLeadingNarration: callProvider(call) === 'native_chat' }), context);
+        if (result.ok) value = result.value;
+        else errors = result.errors;
+      } catch (error) {
+        errors = validationMessages(error);
+      }
+    }
+    const stageOutputs = { ...row.stageOutputs, ['processed:' + call.callId]: true, ...(value ? { ['result:' + rootCall(call)]: value } : {}) };
+    if (value) return settleSupplements(actor, await updateJob(actor, row, { stageOutputs, ...CLEARED_WAIT, ...RELEASED_LEASE }));
+    const calls = row.calls.map((item): AiCallRecord => item.callId === call.callId ? { ...item, status: 'invalid', errors: errors.slice(0, 30), rawExcerpt: text.slice(0, 50 * 1024) } : item);
+    if (!planRetryUsed(row, call, 'schema')) return updateJob(actor, row, { calls: enqueuePlanRetry(calls, planRetryCall(row, call, 'schema')), stageOutputs, ...CLEARED_WAIT, ...RELEASED_LEASE });
+    return settleSupplements(actor, await updateJob(actor, row, { calls, stageOutputs, ...CLEARED_WAIT, ...RELEASED_LEASE }));
+  }
+  async function settleSupplements(actor: OnboardingActor, initial: AiJobDbRecord): Promise<AiJobDbRecord> {
+    let row = initial;
+    for (const request of settledSupplements(row)) row = await applySupplement(actor, row, request);
+    return row;
+  }
+  /**
+   * Merges a settled request's batch results: the union of attachments, and per module the
+   * coverage update of the last batch that mentions it. The server then downgrades any module
+   * without usable sources. A skipped batch leaves the target insufficient with a retry note.
+   */
+  async function applySupplement(actor: OnboardingActor, row: AiJobDbRecord, requestNumber: number): Promise<AiJobDbRecord> {
+    const request = row.stageOutputs['supplement:' + String(requestNumber)] as SupplementRequest | undefined;
+    const stageOutputs = { ...row.stageOutputs, ['applied:supplement-' + String(requestNumber)]: true };
+    const settledOnly = { stageOutputs, ...CLEARED_WAIT, ...RELEASED_LEASE };
+    if (!row.outline || !row.moduleRuns || !request) return updateJob(actor, row, settledOnly);
+    const roots = row.calls.filter((call) => supplementRequest(call) === requestNumber && call.callId === rootCall(call))
+      .sort((a, b) => (a.supplementBatch ?? 0) - (b.supplementBatch ?? 0));
+    const results = roots.map((call) => row.stageOutputs['result:' + call.callId] as SupplementOutput | undefined);
+    const skipped = results.some((result) => !result);
+    const usable = usableSectionIds(await liveJobSources(actor, row));
+    const attached = new Map<string, string[]>();
+    const updates = new Map<string, SupplementCoverageUpdate>();
+    for (const result of results) {
+      for (const attachment of result?.attachments ?? []) {
+        attached.set(attachment.moduleLocalId, [...new Set([...(attached.get(attachment.moduleLocalId) ?? []), ...attachment.sectionIds.filter((id) => usable.has(id))])]);
+      }
+      for (const update of result?.coverageUpdates ?? []) updates.set(update.moduleLocalId, update);
+    }
+    const touched = new Set([request.moduleLocalId, ...attached.keys(), ...updates.keys()]);
+    const edits = row.outline.modules.filter((module) => !module.tombstoned && touched.has(module.moduleLocalId)).map((module): OutlineEdit => {
+      const extra = attached.get(module.moduleLocalId) ?? [];
+      const sourceSectionIds = extra.length ? [...new Set([...module.sourceSectionIds.filter((id) => usable.has(id)), ...extra])] : module.sourceSectionIds;
+      const update = updates.get(module.moduleLocalId);
+      let coverage = update?.coverage ?? module.coverage;
+      let gapNote = update ? update.gapNote : module.gapNote;
+      if (!moduleHasUsableSources({ ...module, sourceSectionIds }, usable)) coverage = 'insufficient';
+      if (skipped && module.moduleLocalId === request.moduleLocalId) { coverage = 'insufficient'; gapNote = SUPPLEMENT_FAILED_NOTE; }
+      if (coverage === 'insufficient' && !gapNote) gapNote = GAP_NOTE;
+      return { type: 'update', moduleLocalId: module.moduleLocalId, patch: { sourceSectionIds, ...(coverage ? { coverage } : {}), ...(gapNote !== undefined ? { gapNote } : {}) } };
+    });
+    const failedNote: OutlineEdit = { type: 'update', moduleLocalId: request.moduleLocalId, patch: { coverage: 'insufficient', gapNote: SUPPLEMENT_FAILED_NOTE } };
+    // A result the outline cannot take still settles: first the target's retry note, then nothing.
+    for (const attempt of [edits, [failedNote]]) {
+      try {
+        return await applyOutlineEdits(actor, row, { edits: attempt, stageOutputs });
+      } catch (error) {
+        if (!(error instanceof AiJobServiceError)) throw error;
+      }
+    }
+    return updateJob(actor, row, settledOnly);
   }
   async function processPlanOutput(actor: OnboardingActor, row: AiJobDbRecord, call: AiCallRecord): Promise<AiJobDbRecord> {
+    if (call.stage === 'S') return processSupplementOutput(actor, row, call);
     const text = rawOutput(row.stageOutputs, call.callId) ?? '';
     let errors: readonly string[] = ['Outline is missing.'];
     let outline: TemplateOutline | undefined;
@@ -1584,17 +1778,20 @@ export function createAiJobService(
     const stageOutputs = { ...row.stageOutputs, ['processed:' + call.callId]: true };
     if (outline) return updateJob(actor, row, { outline, moduleRuns: reconcileModuleRuns(row.moduleRuns!, outline), stageOutputs, ...CLEARED_WAIT, ...RELEASED_LEASE });
     const calls = row.calls.map((item): AiCallRecord => item.callId === call.callId ? { ...item, status: 'invalid', errors: errors.slice(0, 30), rawExcerpt: text.slice(0, 50 * 1024) } : item);
-    if (!planRetryUsed(row, 'schema')) return updateJob(actor, row, { calls: [...calls, planRetryCall(row, call, 'schema')], stageOutputs, ...CLEARED_WAIT, ...RELEASED_LEASE });
+    if (!planRetryUsed(row, call, 'schema')) return updateJob(actor, row, { calls: [...calls, planRetryCall(row, call, 'schema')], stageOutputs, ...CLEARED_WAIT, ...RELEASED_LEASE });
     return updateJob(actor, row, { calls, stageOutputs: { ...stageOutputs, __planFallback: true }, ...CLEARED_WAIT, ...RELEASED_LEASE });
   }
   /**
-   * Settles the outline planner before any admin gate: processes a completed planner call,
-   * then dispatches a pending one. Returns a step only while planner work remains.
+   * Settles planner work (the outline plan P and supplement S calls) before any admin gate:
+   * processes a completed planner call, applies settled supplement requests, then dispatches
+   * the next pending planner call in order. Returns a step only while planner work remains.
    */
   async function nextPlanStep(actor: OnboardingActor, initial: AiJobDbRecord, workerId: string): Promise<{ readonly row: AiJobDbRecord; readonly step?: AiJobNextStep }> {
     let row = initial;
-    const completed = row.calls.find((call) => isPlanCall(call) && call.status === 'completed' && rawOutput(row.stageOutputs, call.callId) !== undefined && row.stageOutputs['processed:' + call.callId] !== true);
+    const completed = unprocessedPlanCall(row);
     if (completed) row = await processCompleted(actor, row, completed);
+    // Normally applied while processing; this retries an apply whose write was lost.
+    if (settledSupplements(row).length) row = await settleSupplements(actor, row);
     const call = row.calls.find((item) => isPlanCall(item) && (item.status === 'pending' || item.status === 'dispatched'));
     if (!call) return { row };
     const waiting = await providerWaitStep(actor, row);
@@ -1603,15 +1800,17 @@ export function createAiJobService(
     let request: AiPromptRequest;
     try { request = await promptFor(actor, row, call); }
     catch (error) {
-      // Only an unbuildable plan prompt (too large, or invalid job input) keeps the deterministic
-      // outline; store and transport failures are rethrown so the planner can be retried.
+      // Only an unbuildable planner prompt (too large, or invalid job input) gives up: the plan
+      // keeps the deterministic outline, a supplement batch is skipped. Store and transport
+      // failures are rethrown so the call can be retried.
       if (!(error instanceof PromptError) && !(error instanceof AiJobServiceError)) throw error;
       row = await updateJob(actor, row, {
         calls: row.calls.map((item): AiCallRecord => item.callId === call.callId ? { ...item, status: 'failed', errors: validationMessages(error), finishedAt: now(), ...(aiCallMayBeLive(item) ? { cleanupState: 'pending', cleanupUpdatedAt: now() } as const : {}) } : item),
-        stageOutputs: { ...row.stageOutputs, __planFallback: true }, ...CLEARED_WAIT, ...RELEASED_LEASE,
+        ...planGiveUp(row, call), ...CLEARED_WAIT, ...RELEASED_LEASE,
       });
       if (!aiCallMayBeLive(call)) await releaseCallLease(actor, row, call);
-      return { row };
+      // Later supplement batches still run; with none left this settles and returns the row.
+      return nextPlanStep(actor, row, workerId);
     }
     return { row, step: await callStep(actor, row, call, workerId, request) };
   }
@@ -1844,11 +2043,63 @@ export function createAiJobService(
       const authorized = await Promise.all(sourceIds.map((id) => sourceById(actor.roomId, id)));
       const usableSections = authorized.filter((source): source is SourceRecord => !!source && source.status === 'ready' && !source.deletedAt).flatMap((source) => source.sections ?? []);
       const retained = run.outline.sourceSectionIds.filter((id) => usableSections.filter((section) => section.id === id && section.text.trim()).length === 1);
-      const outline = applyTemplateOutlineEdits(row.outline!, [{ type: 'update', moduleLocalId: input.moduleLocalId, patch: { sourceSectionIds: [...new Set([...retained, ...input.sectionIds])] } }], () => 'unused');
-      validateOutline(row, outline);
-      const runs = reconcileModuleRuns(row.moduleRuns!, outline).map((run): AiModuleDraftRun => ({ ...run, ...(run.lessonState === 'drafting' ? { lessonState: 'queued' } : {}), ...(run.questionState === 'drafting' ? { questionState: 'queued' } : {}) }));
-      const calls = obsoleteCalls(row, new Set(row.moduleRuns!.map((item) => item.outline.moduleLocalId)));
-      return jobFrom(await updateJob(actor, row, { sourceIds, outline, outlineApprovedRevision: 0, moduleRuns: runs, calls, status: 'running', result: null, ...leaseAfterChanges(calls) }), actor.roomId);
+      // The Admin picked these sections, so the module counts as sufficient.
+      return jobFrom(await applyOutlineEdits(actor, row, {
+        sourceIds,
+        edits: [{ type: 'update', moduleLocalId: input.moduleLocalId, patch: { sourceSectionIds: [...new Set([...retained, ...input.sectionIds])], coverage: 'sufficient' } }],
+      }), actor.roomId);
+    },
+    async supplementModuleDocument(actor, input) {
+      const row = await requireOutlineEdit(actor, input);
+      const module = requireActiveModule(row, input.moduleLocalId);
+      const sourceId = required(typeof input.sourceId === 'string' ? input.sourceId : '', 'Source ID');
+      if ((row.sourceIds ?? []).includes(sourceId)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Tài liệu này đã có trong lộ trình. Hãy dùng "Chọn đoạn từ tài liệu đã có".');
+      const sourceIds = [...(row.sourceIds ?? []), sourceId];
+      if (sourceIds.length > AI_GENERATION_LIMITS.maxSourcesPerRoom) throw new AiJobServiceError('SOURCE_NOT_FOUND', 'Too many selected sources.');
+      // Room-scoped lookup: a source from another room, or one not ready, is not found.
+      const [source] = await loadSources(actor.roomId, [sourceId]);
+      const batches = planBatches([source]);
+      const request = nextSupplementNumber(row);
+      const supplementCalls = batches.map((_batch, index) => supplementCall(row, request, index + 1, module.moduleLocalId, sourceId));
+      // Queued module work is superseded so the S calls are the job's current calls.
+      const calls = [...obsoleteCalls(row, new Set(row.moduleRuns!.map((item) => item.outline.moduleLocalId))), ...supplementCalls];
+      const supplement: SupplementRequest = { moduleLocalId: module.moduleLocalId, sourceId, batches };
+      return jobFrom(await updateJob(actor, row, {
+        sourceIds, calls, moduleRuns: row.moduleRuns!.map(requeueDrafting), outlineApprovedRevision: 0, status: 'running', result: null,
+        stageOutputs: { ...row.stageOutputs, ['supplement:' + String(request)]: supplement },
+      }), actor.roomId);
+    },
+    async addOutlineModule(actor, input) {
+      const row = await requireOutlineEdit(actor, input);
+      const title = typeof input.title === 'string' ? input.title.trim() : '';
+      const description = typeof input.description === 'string' ? input.description.trim() : '';
+      if (!title || title.length > 80 || description.length > 500) throw new AiJobServiceError('OPERATION_CONFLICT', 'Tên module cần từ 1 đến 80 ký tự, mô tả tối đa 500 ký tự.');
+      const active = row.outline!.modules.filter((module) => !module.tombstoned);
+      const frames: readonly string[] = row.templateKind === 'advanced' ? ADVANCED_FRAMES : NORMAL_FRAMES;
+      const frameKey = frames.find((frame) => !active.some((module) => module.frameKey === frame));
+      if (active.length >= planRange(row).max || !frameKey) throw new AiJobServiceError('OPERATION_CONFLICT', 'Lộ trình đã có số module tối đa.');
+      const newId = (frame: string) => 'outline-' + stableHash([row.jobId, row.outline!.revision + 1, frame]);
+      const moduleLocalId = newId(frameKey);
+      const request = nextSupplementNumber(row);
+      // With no usable section in the job there is nothing for AI to pick.
+      const hasCatalog = usableSectionIds(await liveJobSources(actor, row)).size > 0;
+      const supplement: SupplementRequest = { moduleLocalId };
+      return jobFrom(await applyOutlineEdits(actor, row, {
+        newId,
+        edits: [{ type: 'add', module: { order: active.length, frameKey, title, description, estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [], coverage: 'insufficient', gapNote: GAP_NOTE } }],
+        ...(hasCatalog ? { extraCalls: [supplementCall(row, request, 1, moduleLocalId)], stageOutputs: { ...row.stageOutputs, ['supplement:' + String(request)]: supplement } } : {}),
+      }), actor.roomId);
+    },
+    async setCoverageOverride(actor, input) {
+      const row = await requireOutlineEdit(actor, input);
+      const module = requireActiveModule(row, input.moduleLocalId);
+      if (typeof input.override !== 'boolean') throw new AiJobServiceError('OPERATION_CONFLICT', 'override must be a boolean.');
+      if (input.override && !moduleHasUsableSources(module, usableSectionIds(await liveJobSources(actor, row)))) {
+        throw new AiJobServiceError('COVERAGE_INCOMPLETE', 'Module chưa có đoạn tài liệu dùng được.');
+      }
+      return jobFrom(await applyOutlineEdits(actor, row, {
+        edits: [{ type: 'update', moduleLocalId: module.moduleLocalId, patch: { coverageOverride: input.override } }],
+      }), actor.roomId);
     },
     async approveOutline(actor, input) {
       const row = await requireModuleJob(actor, input.jobId);
@@ -2179,15 +2430,16 @@ export function createAiJobService(
       const busyCount = (row.providerWaitAttempts ?? 0) + 1;
       const nextRetryAt = new Date(Math.min(Date.parse(waitStartedAt) + MAX_PROVIDER_WAIT_MS, Date.parse(now()) + Math.min(30_000, PROVIDER_RETRY_MS * (2 ** Math.min(busyCount - 1, 4))))).toISOString();
       if (row.pipelineVersion === 'module_v2' && row.kind === 'template' && isPlanCall(current)) {
-        const transient = !isBusy && input.kind === 'failed' && !planRetryUsed(row, 'transient') && TRANSIENT_PROVIDER_ERROR.test(providerErrorCode ?? '');
+        const transient = !isBusy && input.kind === 'failed' && !planRetryUsed(row, current, 'transient') && TRANSIENT_PROVIDER_ERROR.test(providerErrorCode ?? '');
         const retry = canWait ? planRetryCall(row, current, 'project_busy') : transient ? planRetryCall(row, current, 'transient') : undefined;
-        const updated = await updateJob(actor, row, {
-          calls: retry ? [...calls, retry] : calls, ...RELEASED_LEASE,
+        let updated = await updateJob(actor, row, {
+          calls: retry ? enqueuePlanRetry(calls, retry) : calls, ...RELEASED_LEASE,
           ...(canWait ? { providerWaitStartedAt: waitStartedAt, nextRetryAt, providerWaitAttempts: busyCount } : { ...CLEARED_WAIT, ...(transient ? { nextRetryAt: new Date(Date.parse(now()) + PROVIDER_RETRY_MS).toISOString() } : {}) }),
-          // Out of retries: keep the deterministic outline for the admin.
-          ...(retry ? {} : { stageOutputs: { ...row.stageOutputs, __planFallback: true } }),
+          // Out of retries: keep the deterministic outline (P) or skip the supplement batch (S).
+          ...(retry ? {} : planGiveUp(row, current)),
         });
         if (!aiCallMayBeLive(calls.find((call) => call.callId === current.callId)!)) await releaseCallLease(actor, row, current);
+        if (!retry && current.stage === 'S') updated = await settleSupplements(actor, updated);
         return jobFrom(updated, actor.roomId);
       }
       if (row.pipelineVersion === 'module_v2' && row.kind === 'template') {

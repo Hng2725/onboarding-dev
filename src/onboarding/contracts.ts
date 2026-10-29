@@ -202,8 +202,11 @@ export interface AiCallRecord {
   readonly stage: 'A' | 'B' | 'C' | 'D' | 'P' | 'S';
   /** Outline planner calls only: the whole-outline plan or a per-source supplement. */
   readonly planTarget?: 'plan' | 'supplement';
+  /** Supplement (S) calls only: the new source to read; absent for a catalog call (added module). */
   readonly supplementSourceId?: string;
+  /** Supplement (S) calls only: the module that lacks material. Never `moduleLocalId`, which marks module calls. */
   readonly supplementModuleLocalId?: string;
+  /** Supplement (S) calls only: the 1-based batch number, matching `-b<k>` in the call ID. */
   readonly supplementBatch?: number;
   readonly repairOf?: string;
   readonly operationId: string;

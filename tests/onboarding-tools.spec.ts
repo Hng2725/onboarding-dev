@@ -72,6 +72,9 @@ function services(): OnboardingServiceBundle {
       approveOutline: vi.fn().mockResolvedValue({ jobId: 'job-1', outlineApprovedRevision: 1 }),
       listModuleSources: vi.fn().mockResolvedValue([]),
       supplementModuleSources: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
+      supplementModuleDocument: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
+      addOutlineModule: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
+      setCoverageOverride: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
       useSourceFallback: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
       useQuestionFallback: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
       updateModuleLesson: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
@@ -155,6 +158,26 @@ describe('onboarding tool dispatcher', () => {
     expect(bundle.aiJobs.retryModule).toHaveBeenCalledWith(expect.objectContaining({ roomId: 'room-a', userId: 'admin-1' }), { jobId: 'job-1', moduleLocalId: 'm1', target: 'lesson', expectedVersion: 1 });
     expect(bundle.aiJobs.useQuestionFallback).toHaveBeenCalledWith(expect.objectContaining({ roomId: 'room-a', userId: 'admin-1' }), { jobId: 'job-1', moduleLocalId: 'm1', expectedVersion: 1 });
     expect(bundle.aiJobs.updateOutline).toHaveBeenCalledWith(expect.objectContaining({ roomId: 'room-a', userId: 'admin-1' }), { jobId: 'job-1', expectedRevision: 1, edits: [] });
+  });
+  it('routes the supplement, add-module and coverage-override actions to the job service', async () => {
+    const bundle = services();
+    const handle = createOnboardingToolHandler(() => bundle);
+    const actor = verified({ room_roles: ['owner'] }, 'admin-1');
+    const base = { jobId: 'job-1', expectedRevision: 2, roomId: 'forged' };
+    await expect(handle('onboarding_admin_ai', { ...base, action: 'supplement_module_document', moduleLocalId: 'm1', sourceId: 'source-2' }, actor)).resolves.toMatchObject({ job: { jobId: 'job-1' } });
+    await expect(handle('onboarding_admin_ai', { ...base, action: 'add_outline_module', title: 'Mẹo', description: 'Mô tả' }, actor)).resolves.toMatchObject({ job: { jobId: 'job-1' } });
+    await expect(handle('onboarding_admin_ai', { ...base, action: 'set_coverage_override', moduleLocalId: 'm1', override: true }, actor)).resolves.toMatchObject({ job: { jobId: 'job-1' } });
+    const owner = expect.objectContaining({ roomId: 'room-a', userId: 'admin-1' });
+    expect(bundle.aiJobs.supplementModuleDocument).toHaveBeenCalledWith(owner, { jobId: 'job-1', expectedRevision: 2, moduleLocalId: 'm1', sourceId: 'source-2' });
+    expect(bundle.aiJobs.addOutlineModule).toHaveBeenCalledWith(owner, { jobId: 'job-1', expectedRevision: 2, title: 'Mẹo', description: 'Mô tả' });
+    expect(bundle.aiJobs.setCoverageOverride).toHaveBeenCalledWith(owner, { jobId: 'job-1', expectedRevision: 2, moduleLocalId: 'm1', override: true });
+    await expect(handle('onboarding_admin_ai', { ...base, action: 'add_outline_module', title: 'Mẹo' }, actor)).resolves.toMatchObject({ job: { jobId: 'job-1' } });
+    expect(bundle.aiJobs.addOutlineModule).toHaveBeenLastCalledWith(owner, { jobId: 'job-1', expectedRevision: 2, title: 'Mẹo', description: '' });
+    await expect(handle('onboarding_admin_ai', { ...base, action: 'set_coverage_override', moduleLocalId: 'm1', override: 'yes' }, actor)).rejects.toThrow();
+    await expect(handle('onboarding_admin_ai', { ...base, action: 'supplement_module_document', moduleLocalId: 'm1' }, actor)).rejects.toThrow();
+    for (const action of ['supplement_module_document', 'add_outline_module', 'set_coverage_override']) {
+      await expect(handle('onboarding_admin_ai', { ...base, action, moduleLocalId: 'm1', sourceId: 'source-2', title: 'Mẹo', override: true }, verified())).rejects.toThrow();
+    }
   });
   it('normalizes only matching room-file metadata for AI source verification', () => {
     expect(sourceFileMetadataFrom({

@@ -58,7 +58,7 @@ const ACTIONS: Readonly<Record<OnboardingDataToolName, readonly string[]>> = {
   onboarding_bootstrap: ['load'],
   onboarding_admin_templates: ['list', 'get', 'update', 'publish', 'archive', 'delete'],
   onboarding_admin_ai: [
-    'update_outline', 'approve_outline', 'list_module_sources', 'supplement_module_sources', 'update_module_lesson', 'approve_module_lesson', 'use_source_fallback', 'use_question_fallback', 'update_module_questions', 'approve_module_questions', 'retry_module',
+    'update_outline', 'approve_outline', 'list_module_sources', 'supplement_module_sources', 'supplement_module_document', 'add_outline_module', 'set_coverage_override', 'update_module_lesson', 'approve_module_lesson', 'use_source_fallback', 'use_question_fallback', 'update_module_questions', 'approve_module_questions', 'retry_module',
     'list_sources', 'ingest_source', 'add_admin_note', 'delete_source', 'get_source_section',
     'start_job', 'list_jobs', 'get_job', 'next_step', 'record_dispatch', 'submit_ai_output',
     'report_ai_failure', 'retry_job', 'cancel_job', 'record_attempt_cleanup',
@@ -184,6 +184,12 @@ function requiredNumber(args: Record<string, unknown>, key: string): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     throw toolError('ARGUMENT_REQUIRED', `${key} is required and must be a number.`);
   }
+  return value;
+}
+
+function requiredBoolean(args: Record<string, unknown>, key: string): boolean {
+  const value = args[key];
+  if (typeof value !== 'boolean') throw toolError('ARGUMENT_REQUIRED', `${key} is required and must be a boolean.`);
   return value;
 }
 
@@ -501,6 +507,15 @@ async function dispatchAdminAi(
     case 'list_module_sources': return { sources: await services.aiJobs.listModuleSources(actor, requiredString(args, 'jobId')) };
     case 'supplement_module_sources': return { job: await services.aiJobs.supplementModuleSources(actor, {
       jobId: requiredString(args, 'jobId'), expectedRevision: requiredNumber(args, 'expectedRevision'), moduleLocalId: requiredString(args, 'moduleLocalId'), sourceIds: requiredArray<string>(args, 'sourceIds'), sectionIds: requiredArray<string>(args, 'sectionIds'),
+    }) };
+    case 'supplement_module_document': return { job: await services.aiJobs.supplementModuleDocument(actor, {
+      jobId: requiredString(args, 'jobId'), expectedRevision: requiredNumber(args, 'expectedRevision'), moduleLocalId: requiredString(args, 'moduleLocalId'), sourceId: requiredString(args, 'sourceId'),
+    }) };
+    case 'add_outline_module': return { job: await services.aiJobs.addOutlineModule(actor, {
+      jobId: requiredString(args, 'jobId'), expectedRevision: requiredNumber(args, 'expectedRevision'), title: requiredString(args, 'title'), description: optionalString(args, 'description') ?? '',
+    }) };
+    case 'set_coverage_override': return { job: await services.aiJobs.setCoverageOverride(actor, {
+      jobId: requiredString(args, 'jobId'), expectedRevision: requiredNumber(args, 'expectedRevision'), moduleLocalId: requiredString(args, 'moduleLocalId'), override: requiredBoolean(args, 'override'),
     }) };
     case 'approve_outline': return { job: await services.aiJobs.approveOutline(actor, {
       jobId: requiredString(args, 'jobId'), expectedRevision: requiredNumber(args, 'expectedRevision'),
