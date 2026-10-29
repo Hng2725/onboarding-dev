@@ -1,121 +1,199 @@
-﻿import { createElement } from 'react';
+import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { expect, it } from 'vitest';
+import TestRenderer, { act } from 'react-test-renderer';
+import { expect, it, vi } from 'vitest';
+
+import type { AiModuleDraftRun } from '../src/onboarding/contracts';
 import { AiModuleWorkspace } from '../src/ui/onboarding/ai/ai-module-workspace';
 import { approvedModuleJob } from './helpers/approved-module-fixture';
 
-it('keeps a new question open while its prompt is typed', () => {
-  const original = approvedModuleJob().moduleRuns![0];
-  const run = { ...original, questionDraft: [{ ...original.questionDraft![0], prompt: '' }] };
-  let view!: TestRenderer.ReactTestRenderer;
-  act(() => { view = TestRenderer.create(createElement(AiModuleWorkspace, { runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false, onSelect: () => {}, onAction: () => {}, onSources: () => {} })); });
-  const card = () => view.root.findAllByType('details').filter((node) => node.props.className === 'ai-content-card').at(-1)!;
-  expect(card().props.open).toBe(true);
-  act(() => card().findAllByType('textarea').find((node) => node.props.value === '')!.props.onChange({ target: { value: 'Which source?' } }));
-  expect(card().props.open).toBe(true);
+function approvedRuns() {
+  return approvedModuleJob().moduleRuns!;
+}
+
+function renderWorkspace(
+  runs: readonly AiModuleDraftRun[],
+  overrides: Record<string, unknown> = {},
+) {
+  return TestRenderer.create(createElement(AiModuleWorkspace, {
+    runs,
+    calls: [],
+    selectedId: runs[0]?.outline.moduleLocalId ?? '',
+    busy: false,
+    onSelect: () => {},
+    onAction: () => {},
+    onSources: () => {},
+    ...overrides,
+  }));
+}
+
+function button(view: TestRenderer.ReactTestRenderer, label: string) {
+  return view.root.findAllByType('button').find((item) => item.children.join('') === label)!;
+}
+
+it('opens an approved draft in reading mode without form fields', () => {
+  const run = { ...approvedRuns()[0], lessonState: 'review_ready' as const, questionState: 'blocked' as const };
+  const html = renderToStaticMarkup(createElement(AiModuleWorkspace, {
+    runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false,
+    onSelect: () => {}, onAction: () => {}, onSources: () => {},
+  }));
+
+  expect(html).toContain('Use **Orders** to start the documented workflow.');
+  expect(html).toContain('Review the order workflow.');
+  expect(html).not.toContain('<input');
+  expect(html).not.toContain('<textarea');
+  expect(html).not.toContain('<select');
 });
 
-it('collapses long lesson/question cards and citations while keeping versioned actions outside scroll regions', () => {
-  const original = approvedModuleJob().moduleRuns![0];
-  const lesson = original.lessonDraft!;
-  const run = { ...original, lessonState: 'review_ready' as const, lessonDraft: { ...lesson, blocks: Array.from({ length: 20 }, (_, index) => ({ ...lesson.blocks[0], localId: `block-${index}`, title: `Section ${index + 1}` })) } };
+it('reveals lesson fields only after Chỉnh sửa is selected', () => {
+  const run = { ...approvedRuns()[0], lessonState: 'review_ready' as const, questionState: 'blocked' as const };
+  const view = renderWorkspace([run]);
+  expect(view.root.findAllByProps({ 'aria-label': 'Tiêu đề bài học' })).toHaveLength(0);
+
+  act(() => button(view, 'Chỉnh sửa').props.onClick());
+
+  expect(view.root.findByProps({ 'aria-label': 'Tiêu đề bài học' }).props.value).toBe(run.lessonDraft!.title);
+  expect(button(view, 'Lưu bài học')).toBeDefined();
+});
+
+it('keeps question review hidden until every lesson is approved', () => {
+  const [first, second] = approvedRuns();
+  const pending = { ...second, lessonState: 'review_ready' as const, questionState: 'blocked' as const };
+  const props = {
+    runs: [first, pending], calls: [], selectedId: first.outline.moduleLocalId, busy: false,
+    onSelect: () => {}, onAction: () => {}, onSources: () => {},
+  };
+  const view = TestRenderer.create(createElement(AiModuleWorkspace, props));
+
+  expect(view.root.findAllByProps({ 'data-phase': 'lessons' }).some((node) => node.children.join('').includes('Bài học'))).toBe(true);
+  expect(JSON.stringify(view.toJSON())).not.toContain('What should you do in case 1?');
+
+  act(() => view.update(createElement(AiModuleWorkspace, { ...props, runs: [first, second] })));
+  expect(view.root.findAllByProps({ 'data-phase': 'questions' }).some((node) => node.children.join('').includes('Câu hỏi'))).toBe(true);
+  expect(JSON.stringify(view.toJSON())).toContain('What should you do in case 1?');
+});
+
+it('labels question progress explicitly as questions', () => {
+  const run = approvedRuns()[0];
+  const html = renderToStaticMarkup(createElement(AiModuleWorkspace, {
+    runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false,
+    onSelect: () => {}, onAction: () => {}, onSources: () => {},
+  }));
+
+  expect(html).toContain('3/3 câu hỏi đã duyệt');
+  expect(html).not.toContain('nhiệm vụ');
+});
+
+it('approves the current lesson and selects the next module after success', async () => {
+  const [first, second] = approvedRuns().slice(0, 2).map((run) => ({
+    ...run, lessonState: 'review_ready' as const, questionState: 'blocked' as const,
+  }));
+  const onAction = vi.fn(async () => true);
+  const onSelect = vi.fn();
+  const view = renderWorkspace([first, second], { onAction, onSelect });
+
+  await act(async () => { await button(view, 'Duyệt và sang module tiếp theo').props.onClick(); });
+
+  expect(onAction).toHaveBeenCalledWith('approve_module_lesson', {
+    moduleLocalId: first.outline.moduleLocalId,
+    expectedVersion: first.lessonVersion,
+  });
+  expect(onSelect).toHaveBeenCalledWith(second.outline.moduleLocalId);
+});
+
+it('does not advance when approve-and-next reports failure', async () => {
+  const [first, second] = approvedRuns().slice(0, 2).map((run) => ({
+    ...run, lessonState: 'review_ready' as const, questionState: 'blocked' as const,
+  }));
+  const onSelect = vi.fn();
+  const view = renderWorkspace([first, second], { onAction: async () => false, onSelect });
+
+  await act(async () => { await button(view, 'Duyệt và sang module tiếp theo').props.onClick(); });
+
+  expect(onSelect).not.toHaveBeenCalled();
+});
+
+it('puts retry and source fallback inside Thao tác khác with current versions', () => {
+  const run = approvedRuns()[0];
   const onAction = vi.fn();
-  const view = TestRenderer.create(createElement(AiModuleWorkspace, { runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false, onSelect: () => {}, onAction, onSources: () => {} }));
-  const disclosures = view.root.findAllByType('details');
-  expect(disclosures.filter((node) => node.props.className === 'ai-content-card')).toHaveLength(23);
-  expect(disclosures.every((node) => !node.props.open)).toBe(true);
-  expect(disclosures.filter((node) => node.props.className === 'ai-source-details')).toHaveLength(23);
-  const summaries = view.root.findAllByType('summary');
-  expect(summaries.flatMap((node) => node.findAllByType('strong')).map((node) => node.children.join(''))).toContain('20. Section 20');
-  const regions = view.root.findAll((node) => node.props.role === 'region' && node.props.className === 'ai-review-scroll');
-  expect(regions.map((node) => node.props['aria-label'])).toEqual(['Nội dung bài học', 'Nội dung câu hỏi']);
-  expect(regions.every((node) => node.props.tabIndex === 0)).toBe(true);
-  expect(regions.flatMap((node) => node.findAllByType('button')).some((button) => button.children.join('') === 'Duyệt bài học')).toBe(false);
-  act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Duyệt bài học')!.props.onClick());
-  expect(onAction).toHaveBeenCalledWith('approve_module_lesson', { moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion });
+  const view = renderWorkspace([run], {
+    history: [{ moduleLocalId: run.outline.moduleLocalId, target: 'questions', version: 1 }],
+    onAction,
+  });
+  const overflow = view.root.findAllByType('details').find((node) => node.props.className === 'ai-module-more-actions')!;
+
+  expect(overflow.findByType('summary').children.join('')).toBe('Thao tác khác');
+  expect(overflow.findAllByType('button').map((item) => item.children.join(''))).toEqual([
+    'Viết lại bài học', 'Dùng bản từ nguồn', 'Tạo lại câu hỏi',
+  ]);
+  expect(overflow.findAllByType('strong').some((item) => item.children.join('') === 'Lịch sử phê duyệt')).toBe(true);
+
+  act(() => overflow.findAllByType('button')[0].props.onClick());
+  expect(onAction).toHaveBeenCalledWith('retry_module', {
+    moduleLocalId: run.outline.moduleLocalId, target: 'lesson', expectedVersion: run.lessonVersion,
+  });
+  act(() => overflow.findAllByType('button')[1].props.onClick());
+  expect(onAction).toHaveBeenCalledWith('use_source_fallback', {
+    moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion,
+  });
+  act(() => overflow.findAllByType('button')[2].props.onClick());
+  expect(onAction).toHaveBeenCalledWith('retry_module', {
+    moduleLocalId: run.outline.moduleLocalId, target: 'questions', expectedVersion: run.questionVersion,
+  });
 });
 
-it('shows manual source requirement and blocks approval without content', () => {
-  const run = { outline: { moduleLocalId: 'm', frameKey: 't1-core', order: 0, title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [] }, outlineRevision: 1, lessonState: 'manual_required' as const, lessonVersion: 0, questionState: 'blocked' as const, questionVersion: 0 };
-  const html = renderToStaticMarkup(createElement(AiModuleWorkspace, { runs: [run], calls: [], selectedId: 'm', busy: false, onSelect: () => {}, onAction: () => {}, onSources: () => {} }));
-  expect(html).toContain('Cần bổ sung nguồn hoặc tự soạn');
-  expect(html).toMatch(/disabled=""[^>]*>Duyệt bài học/);
+it('routes a source-less module through Bổ sung tài liệu', () => {
+  const original = approvedRuns()[0];
+  const run = {
+    ...original,
+    outline: { ...original.outline, sourceSectionIds: [] },
+    lessonDraft: undefined,
+    lessonState: 'manual_required' as const,
+    questionDraft: undefined,
+    questionState: 'blocked' as const,
+  };
+  const onSources = vi.fn();
+  const view = renderWorkspace([run], { onSources });
+
+  expect(JSON.stringify(view.toJSON())).toContain('Cần bổ sung tài liệu hoặc tự soạn');
+  act(() => button(view, 'Bổ sung tài liệu').props.onClick());
+  expect(onSources).toHaveBeenCalledOnce();
+  expect(button(view, 'Duyệt và sang module tiếp theo').props.disabled).toBe(true);
 });
 
-it('presents structured lesson fields instead of requiring JSON', () => {
-  const run = { outline: { moduleLocalId: 'm', frameKey: 't1-core', order: 0, title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [] }, outlineRevision: 1, lessonState: 'manual_required' as const, lessonVersion: 0, questionState: 'blocked' as const, questionVersion: 0 };
-  const html = renderToStaticMarkup(createElement(AiModuleWorkspace, { runs: [run], calls: [], selectedId: 'm', busy: false, onSelect: () => {}, onAction: () => {}, onSources: () => {} }));
-  expect(html).toContain('Tiêu đề bài học');
-  expect(html).toContain('Thêm nội dung');
-  expect(html).not.toContain('Bài học (JSON)');
-});
-import TestRenderer, { act } from 'react-test-renderer';
-import { vi } from 'vitest';
-
-it('sends the selected module version for lesson approval and exposes stale history', () => {
-  const outline = { moduleLocalId: 'm', frameKey: 't1-core', order: 0, title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] };
-  const lesson = { localId: 'm', frameKey: 't1-core', title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], blocks: [], questions: [] };
-  const run = { outline, outlineRevision: 1, lessonState: 'review_ready' as const, lessonVersion: 4, lessonDraft: lesson, questionState: 'stale' as const, questionVersion: 2 };
+it('keeps unsaved lesson text on status refresh and saves the current version', () => {
+  const original = approvedRuns()[0];
+  const run = { ...original, lessonState: 'review_ready' as const, questionState: 'blocked' as const };
   const onAction = vi.fn();
-  const view = TestRenderer.create(createElement(AiModuleWorkspace, { runs: [run], calls: [], history: [{ moduleLocalId: 'm', target: 'questions', version: 1 }], selectedId: 'm', busy: false, onSelect: () => {}, onAction, onSources: () => {} }));
-  expect(JSON.stringify(view.toJSON())).toContain('Câu hỏi đã cũ');
-  expect(JSON.stringify(view.toJSON())).toContain('Lịch sử phê duyệt');
-  const approve = view.root.findAllByType('button').find((button) => button.children.join('') === 'Duyệt bài học')!;
-  act(() => approve.props.onClick());
-  expect(onAction).toHaveBeenCalledWith('approve_module_lesson', { moduleLocalId: 'm', expectedVersion: 4 });
+  const props = {
+    runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false,
+    onSelect: () => {}, onAction, onSources: () => {},
+  };
+  const view = TestRenderer.create(createElement(AiModuleWorkspace, props));
+  act(() => button(view, 'Chỉnh sửa').props.onClick());
+  const title = () => view.root.findByProps({ 'aria-label': 'Tiêu đề bài học' });
+  act(() => title().props.onChange({ target: { value: 'Bản chưa lưu' } }));
+  act(() => view.update(createElement(AiModuleWorkspace, {
+    ...props, runs: [{ ...run, nextRetryAt: '2026-10-29T08:00:00Z' }],
+  })));
+
+  expect(title().props.value).toBe('Bản chưa lưu');
+  act(() => button(view, 'Lưu bài học').props.onClick());
+  expect(onAction).toHaveBeenCalledWith('update_module_lesson', expect.objectContaining({
+    moduleLocalId: run.outline.moduleLocalId,
+    expectedVersion: run.lessonVersion,
+    module: expect.objectContaining({ title: 'Bản chưa lưu' }),
+  }));
 });
 
-it('keeps unsaved text on a server status refresh and sends the current retry version', () => {
-  const outline = { moduleLocalId: 'm', frameKey: 't1-core', order: 0, title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] };
-  const run = { outline, outlineRevision: 1, lessonState: 'failed' as const, lessonVersion: 4, questionState: 'blocked' as const, questionVersion: 2 };
-  const onAction = vi.fn();
-  const props = { runs: [run], calls: [], selectedId: 'm', busy: false, onSelect: () => {}, onAction, onSources: () => {} };
-  let view!: TestRenderer.ReactTestRenderer;
-  act(() => { view = TestRenderer.create(createElement(AiModuleWorkspace, props)); });
-  const title = () => view.root.findAllByType('input').find((item) => item.props.value === 'Core' || item.props.value === 'Unsaved')!;
-  act(() => title().props.onChange({ target: { value: 'Unsaved' } }));
-  act(() => view.update(createElement(AiModuleWorkspace, { ...props, runs: [{ ...run, nextRetryAt: '2026-10-28T00:00:00Z' }] })));
-  expect(title().props.value).toBe('Unsaved');
-  act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Viết lại module')!.props.onClick());
-  expect(onAction).toHaveBeenCalledWith('retry_module', { moduleLocalId: 'm', target: 'lesson', expectedVersion: 4 });
-});
-
-it('exposes versioned fallback and regeneration choices for approved content', () => {
-  const run = approvedModuleJob().moduleRuns![0];
-  const onAction = vi.fn();
-  const view = TestRenderer.create(createElement(AiModuleWorkspace, { runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false, onSelect: () => {}, onAction, onSources: () => {} }));
-  for (const [label, action, args] of [
-    ['Dùng bản từ nguồn', 'use_source_fallback', { moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion }],
-    ['Viết lại module', 'retry_module', { moduleLocalId: run.outline.moduleLocalId, target: 'lesson', expectedVersion: run.lessonVersion }],
-    ['Tạo lại câu hỏi', 'retry_module', { moduleLocalId: run.outline.moduleLocalId, target: 'questions', expectedVersion: run.questionVersion }],
-  ] as const) {
-    const button = view.root.findAllByType('button').find((item) => item.children.join('') === label)!;
-    expect(button.props.disabled).toBe(false);
-    act(() => button.props.onClick());
-    expect(onAction).toHaveBeenCalledWith(action, args);
-  }
-});
-
-it.each(['queued', 'stale'] as const)('offers versioned source fallback for %s lessons', (state) => {
-  const run = { ...approvedModuleJob().moduleRuns![0], lessonState: state, questionState: 'stale' as const };
-  const onAction = vi.fn();
-  const view = TestRenderer.create(createElement(AiModuleWorkspace, { runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false, onSelect: () => {}, onAction, onSources: () => {} }));
-  const fallback = view.root.findAllByType('button').find((button) => button.children.join('') === 'Dùng bản từ nguồn')!;
-  expect(fallback.props.disabled).toBe(false);
-  act(() => fallback.props.onClick());
-  expect(onAction).toHaveBeenCalledWith('use_source_fallback', { moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion });
-});
-
-it.each(['drafting', 'validating'] as const)('does not offer fallback during %s', (state) => {
-  const run = { ...approvedModuleJob().moduleRuns![0], lessonState: state };
-  const view = TestRenderer.create(createElement(AiModuleWorkspace, { runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false, onSelect: () => {}, onAction: () => {}, onSources: () => {} }));
-  expect(view.root.findAllByType('button').some((button) => button.children.join('') === 'Dùng bản từ nguồn')).toBe(false);
-});
-
-it('disables fallback while busy or questions are drafting', () => {
+it('keeps source fallback disabled while questions are drafting or the workspace is busy', () => {
   for (const busy of [false, true]) {
-    const run = { ...approvedModuleJob().moduleRuns![0], lessonState: 'queued' as const, questionState: busy ? 'stale' as const : 'drafting' as const };
-    const view = TestRenderer.create(createElement(AiModuleWorkspace, { runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy, onSelect: () => {}, onAction: () => {}, onSources: () => {} }));
-    expect(view.root.findAllByType('button').find((button) => button.children.join('') === 'Dùng bản từ nguồn')!.props.disabled).toBe(true);
+    const run = {
+      ...approvedRuns()[0],
+      lessonState: 'queued' as const,
+      questionState: busy ? 'stale' as const : 'drafting' as const,
+    };
+    const view = renderWorkspace([run], { busy });
+    expect(button(view, 'Dùng bản từ nguồn').props.disabled).toBe(true);
   }
 });
