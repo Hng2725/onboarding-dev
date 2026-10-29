@@ -385,6 +385,33 @@ it('restores an approved running module job directly in Rà soát', async () => 
   view.unmount(); vi.unstubAllGlobals();
 });
 
+it('routes an unapproved Template 2 back to Tạo lộ trình when switching from Template 1 review', async () => {
+  const storage = new Map<string, string>([
+    ['onboarding:ai:template:room-1:normal', 'template-1'],
+    ['onboarding:ai:template:room-1:advanced', 'template-2'],
+    ['onboarding:ai:selection:room-1', 'both'],
+  ]);
+  vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+  const normal = { ...approvedModuleJob('normal'), jobId: 'template-1', roomId: 'room-1', status: 'running' as const };
+  const advanced = { ...approvedModuleJob('advanced'), jobId: 'template-2', roomId: 'room-1', status: 'running' as const, outlineApprovedRevision: 0 };
+  const api = { adminAi: vi.fn(async (action: string) => {
+    if (action === 'list_sources') return { sources: [] };
+    if (action === 'list_jobs') return { jobs: [inventoryJob, normal, advanced] };
+    if (action === 'list_module_sources') return { sources: [] };
+    throw new Error('Unexpected action: ' + action);
+  }) };
+  let view!: TestRenderer.ReactTestRenderer;
+  await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+
+  expect(activeStepLabel(view)).toBe('Rà soát');
+  const template2 = view.root.findAllByType('button').find((button) => button.children.join('') === 'Xem Template 2')!;
+  await act(async () => { template2.props.onClick(); await Promise.resolve(); });
+
+  expect(activeStepLabel(view)).toBe('Tạo lộ trình');
+  expect(JSON.stringify(view.toJSON())).toContain('Kiểm tra lộ trình đề xuất');
+  view.unmount(); vi.unstubAllGlobals();
+});
+
 it('moves to Rà soát immediately after outline approval and starts the module pump', async () => {
   const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
   vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
