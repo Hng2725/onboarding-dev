@@ -6,6 +6,7 @@ import {
   aiCallRuntimeText,
   aiJobCurrentCall,
 } from './ai-generator';
+import { isSandboxWorkerCrash } from './inventory-recovery';
 
 export type AiMilestoneStatus = 'pending' | 'active' | 'completed' | 'failed';
 
@@ -60,6 +61,24 @@ function callDetail(
     : undefined;
 }
 
+function inventoryAnalysisDetail(
+  job: AiJobRecord | null | undefined,
+  call: AiCallRecord | undefined,
+  matches: (rootId: string) => boolean,
+): string | undefined {
+  const detail = callDetail(job, call, matches);
+  if (!detail || !job || !call) return detail;
+  const nativeRetry = call.provider === 'native_chat'
+    || call.attemptRef?.startsWith('native-chat:') === true;
+  const sandboxCrashed = job.calls.some((candidate) =>
+    candidate.callId !== call.callId
+    && matches(rootCallId(candidate.callId))
+    && isSandboxWorkerCrash(candidate, job.errorMessage));
+  return nativeRetry && sandboxCrashed
+    ? detail + ' · Sandbox lỗi, đang chuyển sang Native AI Chat'
+    : detail;
+}
+
 export function inventoryMilestones(
   job: AiJobRecord | null | undefined,
   sourceCount: number,
@@ -94,7 +113,7 @@ export function inventoryMilestones(
       id: 'analysis',
       label: 'Phân tích từng lô nguồn',
       status: analysisStatus,
-      ...(currentAnalysisStatus ? { detail: callDetail(job, current, isAnalysis) } : {}),
+      ...(currentAnalysisStatus ? { detail: inventoryAnalysisDetail(job, current, isAnalysis) } : {}),
     },
     { id: 'merge', label: 'Hợp nhất kho kiến thức', status: mergeStatus },
     { id: 'ready', label: 'Sẵn sàng tạo lộ trình', status: 'pending' },

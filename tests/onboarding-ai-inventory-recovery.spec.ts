@@ -220,4 +220,47 @@ describe('bounded inventory Native recovery', () => {
 
     expect(events).toEqual(['pump:native']);
   });
+
+  it('adapts get_job and retry_job responses without replacing call history', async () => {
+    const actions: Array<{ action: string; jobId: string }> = [];
+    const completedRetry = inventoryJob({
+      status: 'completed',
+      errorCode: undefined,
+      errorMessage: undefined,
+      calls: [
+        failedCall(),
+        failedCall({
+          callId: 'A1-retry1',
+          status: 'completed',
+          provider: 'native_chat',
+          attemptRef: 'native-chat:session-1:message-1',
+          providerErrorCode: undefined,
+          errors: undefined,
+        }),
+      ],
+    });
+    const adminAi = async (action: 'get_job' | 'retry_job', jobId: string) => {
+      actions.push({ action, jobId });
+      return { job: action === 'get_job' ? failed : retried };
+    };
+
+    const result = await pumpWithInventoryRecovery({
+      initialJob: running,
+      initialPreferNative: false,
+      nativeAvailable: true,
+      pumpOnce: async (_job, preferNative) => {
+        if (!preferNative) throw new Error('Worker exited with code 1');
+        return completedRetry;
+      },
+      reloadJob: async (jobId) => (await adminAi('get_job', jobId)).job,
+      retryJob: async (jobId) => (await adminAi('retry_job', jobId)).job,
+    });
+
+    expect(actions).toEqual([
+      { action: 'get_job', jobId: 'job-inventory' },
+      { action: 'retry_job', jobId: 'job-inventory' },
+    ]);
+    expect(result.calls.map((call) => call.callId)).toEqual(['A1', 'A1-retry1']);
+    expect(result.calls.map((call) => call.provider)).toEqual(['sandbox', 'native_chat']);
+  });
 });

@@ -9,9 +9,13 @@ function isSandboxCall(call: AiCallRecord): boolean {
     || (Boolean(call.attemptRef) && !isNativeCall(call));
 }
 
-function isWorkerCrash(call: AiCallRecord, job: AiJobRecord): boolean {
+export function isSandboxWorkerCrash(
+  call: AiCallRecord,
+  jobErrorMessage?: string,
+): boolean {
+  if (!isSandboxCall(call) || call.status !== 'failed') return false;
   if (call.providerErrorCode) return /^worker_failed$/iu.test(call.providerErrorCode);
-  return [...(call.errors ?? []), job.errorMessage ?? ''].some((message) =>
+  return [...(call.errors ?? []), jobErrorMessage ?? ''].some((message) =>
     /worker[_ ]failed|worker exited with code\s+-?\d+/iu.test(message));
 }
 
@@ -19,7 +23,7 @@ export function isInventoryNativeFallbackCandidate(job: AiJobRecord): boolean {
   if (job.kind !== 'inventory' || job.status !== 'failed') return false;
   if (job.calls.some(isNativeCall)) return false;
   const failed = [...job.calls].reverse().find((call) => call.status === 'failed');
-  return Boolean(failed && isSandboxCall(failed) && isWorkerCrash(failed, job));
+  return Boolean(failed && isSandboxWorkerCrash(failed, job.errorMessage));
 }
 
 export interface InventoryRecoveryOptions {

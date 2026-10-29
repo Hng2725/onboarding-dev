@@ -931,6 +931,27 @@ describe('AI job milestones', () => {
       detail: 'Phân tích tài liệu (lô 1/1)',
     });
 
+    const fallingBack = milestoneJob({
+      kind: 'inventory',
+      status: 'running',
+      calls: [
+        milestoneCall('A1', 'failed', {
+          provider: 'sandbox',
+          attemptRef: 'sandbox-attempt-1',
+          providerErrorCode: 'worker_failed',
+          errors: ['Worker exited with code 1'],
+        }),
+        milestoneCall('A1-retry1', 'dispatched', {
+          provider: 'native_chat',
+          attemptRef: 'native-chat:session-1:message-1',
+        }),
+      ],
+    });
+    expect(inventoryMilestones(fallingBack, 2)[1]).toMatchObject({
+      status: 'active',
+      detail: 'Phân tích tài liệu (lô 1/1) (thử lại lần 1) · Sandbox lỗi, đang chuyển sang Native AI Chat',
+    });
+
     expect(milestoneStatuses(inventoryMilestones(milestoneJob({
       kind: 'inventory', status: 'completed', calls: [milestoneCall('A1', 'completed')],
     }), 2))).toEqual(['completed', 'completed', 'completed', 'completed']);

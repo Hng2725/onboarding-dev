@@ -39,6 +39,7 @@ import {
   isNativeChatAttempt,
 } from './ai-gateway-native-chat';
 import { pumpAiJob } from './ai-pump';
+import { pumpWithInventoryRecovery } from './inventory-recovery';
 import {
   pumpWithQuestionRecovery,
   shouldBoundNativeQuestionPoll,
@@ -1425,7 +1426,14 @@ export function AiGeneratorPage({
         })).job;
       setInventoryJob(job);
       if (roomId) writeAiResumeKey('onboarding:ai:inventory:' + roomId, job.jobId);
-      job = await pump(job, preferNative);
+      job = await pumpWithInventoryRecovery({
+        initialJob: job,
+        initialPreferNative: preferNative,
+        nativeAvailable: nativeFallbackAvailable && !nativeCleanupBlock,
+        pumpOnce: pump,
+        reloadJob: async (jobId) => (await api.adminAi<{ job: AiJobRecord }>('get_job', { jobId })).job,
+        retryJob: async (jobId) => (await api.adminAi<{ job: AiJobRecord }>('retry_job', { jobId })).job,
+      });
       setInventoryJob(job);
       setStep(2);
       setNotice({ message: 'Đã phân tích xong tài liệu nguồn.', tone: 'success' });
