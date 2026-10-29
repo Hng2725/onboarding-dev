@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AiJobRecord, AiModuleDraftRun, AiProvider, TemplateOutlineModule } from '../src/onboarding/contracts';
-import { planQuestionRecovery, pumpWithQuestionRecovery } from '../src/ui/onboarding/ai/question-recovery';
+import {
+  planQuestionRecovery,
+  pumpWithQuestionRecovery,
+  shouldBoundNativeQuestionPoll,
+  shouldUseNativeForPump,
+} from '../src/ui/onboarding/ai/question-recovery';
 
 const outline: TemplateOutlineModule = {
   moduleLocalId: 'module-access', frameKey: 't1-access', order: 1,
@@ -54,6 +59,22 @@ function job(input: {
 }
 
 describe('question recovery planning', () => {
+  it('does not carry a previous module Native preference into a new module question', () => {
+    const moduleJob = job({ provider: 'native_chat' });
+    expect(shouldUseNativeForPump(moduleJob, false, true)).toBe(false);
+    expect(shouldUseNativeForPump(moduleJob, true, true)).toBe(true);
+    expect(shouldUseNativeForPump({ ...moduleJob, kind: 'inventory' }, false, true)).toBe(true);
+  });
+
+  it('bounds explicit and adopted Native question attempts', () => {
+    const queued = { ...job(), moduleRuns: [run('queued', 2)] };
+    expect(shouldBoundNativeQuestionPoll(queued, true, true)).toBe(true);
+    const native = job({ provider: 'native_chat', state: 'drafting' });
+    const adopted = { ...native, calls: native.calls.map((call) => ({ ...call, status: 'dispatched' as const })) };
+    expect(shouldBoundNativeQuestionPoll(adopted, false, false)).toBe(true);
+    expect(shouldBoundNativeQuestionPoll(job({ provider: 'sandbox', state: 'drafting' }), false, false)).toBe(false);
+  });
+
   it('retries a failed Sandbox question once with Native when available', () => {
     expect(planQuestionRecovery(job({ provider: 'sandbox' }), true)).toEqual({
       kind: 'retry_native', moduleLocalId: outline.moduleLocalId, expectedVersion: 1,

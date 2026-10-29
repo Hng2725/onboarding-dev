@@ -100,6 +100,51 @@ it('labels question progress explicitly as questions', () => {
   expect(html).not.toContain('nhiệm vụ');
 });
 
+it('labels grounded fallback questions as requiring Admin review', () => {
+  const original = approvedRuns()[0];
+  const run = {
+    ...original,
+    questionState: 'review_ready' as const,
+    approvedQuestionVersion: undefined,
+    questionProvenance: 'fallback' as const,
+  };
+  const html = renderToStaticMarkup(createElement(AiModuleWorkspace, {
+    runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false,
+    onSelect: () => {}, onAction: () => {}, onSources: () => {},
+  }));
+
+  expect(html).toContain('Bản câu hỏi dự phòng — cần rà soát');
+});
+
+it('enables question approval only for a non-dirty review-ready draft', () => {
+  const original = approvedRuns()[0];
+  for (const state of ['queued', 'drafting', 'failed', 'stale'] as const) {
+    const view = renderWorkspace([{
+      ...original,
+      questionState: state,
+      approvedQuestionVersion: undefined,
+    }]);
+    expect(button(view, 'Duyệt câu hỏi và tiếp tục').props.disabled).toBe(true);
+  }
+
+  const ready = {
+    ...original,
+    questionState: 'review_ready' as const,
+    approvedQuestionVersion: undefined,
+  };
+  const readyView = renderWorkspace([ready]);
+  expect(button(readyView, 'Duyệt câu hỏi và tiếp tục').props.disabled).toBe(false);
+
+  const emptyView = renderWorkspace([{ ...ready, questionDraft: [] }]);
+  expect(button(emptyView, 'Duyệt câu hỏi và tiếp tục').props.disabled).toBe(true);
+
+  act(() => button(readyView, 'Chỉnh sửa').props.onClick());
+  const prompt = readyView.root.findAllByType('textarea')[0];
+  act(() => prompt.props.onChange({ target: { value: 'Bản chỉnh sửa chưa lưu' } }));
+  act(() => button(readyView, 'Đóng chỉnh sửa').props.onClick());
+  expect(button(readyView, 'Duyệt câu hỏi và tiếp tục').props.disabled).toBe(true);
+});
+
 it('approves the current lesson and selects the next module after success', async () => {
   const [first, second] = approvedRuns().slice(0, 2).map((run) => ({
     ...run, lessonState: 'review_ready' as const, questionState: 'blocked' as const,

@@ -120,7 +120,10 @@ export function AiModuleWorkspace({
 
   const canApprove = phase === 'lessons'
     ? !busy && !lessonDirty && Boolean(run.lessonDraft) && run.lessonState !== 'approved'
-    : !busy && !questionsDirty && run.lessonState === 'approved' && Boolean(run.questionDraft?.length) && run.questionState !== 'approved';
+    : !busy && !questionsDirty && run.lessonState === 'approved' && Boolean(run.questionDraft?.length) && run.questionState === 'review_ready';
+  const questionReviewStatus = run.questionState === 'review_ready' && run.questionProvenance === 'fallback'
+    ? 'Bản câu hỏi dự phòng — cần rà soát'
+    : questionStatus[run.questionState];
 
   return (
     <section className="ai-module-workspace">
@@ -160,7 +163,7 @@ export function AiModuleWorkspace({
           <div>
             <span data-phase={phase}>{phase === 'lessons' ? 'Bài học' : 'Câu hỏi'}</span>
             <h3>{outlineModuleDisplayTitle(run.outline)}</h3>
-            <p>{phase === 'lessons' ? lessonStatus[run.lessonState] : questionStatus[run.questionState]}</p>
+            <p>{phase === 'lessons' ? lessonStatus[run.lessonState] : questionReviewStatus}</p>
           </div>
           {phase === 'questions' && <strong>{approvedQuestions}/{draftQuestions.length} câu hỏi đã duyệt</strong>}
         </header>

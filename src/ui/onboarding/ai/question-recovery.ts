@@ -18,6 +18,34 @@ interface QuestionRecoveryOptions {
   ) => Promise<{ readonly job: AiJobRecord }>;
 }
 
+export function shouldUseNativeForPump(
+  job: AiJobRecord,
+  explicitlyPreferred: boolean,
+  persistedPreference: boolean,
+): boolean {
+  if (explicitlyPreferred) return true;
+  return !(job.kind === 'template' && job.pipelineVersion === 'module_v2')
+    && persistedPreference;
+}
+
+export function shouldBoundNativeQuestionPoll(
+  job: AiJobRecord,
+  useNative: boolean,
+  explicitlyPreferred: boolean,
+): boolean {
+  const activeQuestions = (job.moduleRuns ?? []).filter(
+    (run) => run.questionState === 'queued' || run.questionState === 'drafting',
+  );
+  if (activeQuestions.length === 0) return false;
+  if (useNative && explicitlyPreferred) return true;
+  return activeQuestions.some((run) => job.calls.some((call) =>
+    call.provider === 'native_chat'
+    && call.moduleTarget === 'questions'
+    && call.moduleLocalId === run.outline.moduleLocalId
+    && call.moduleVersion === run.questionVersion
+    && (call.status === 'pending' || call.status === 'dispatched')));
+}
+
 function hasGroundedLesson(run: AiModuleDraftRun): boolean {
   return run.lessonDraft?.blocks.some(
     (block) => block.kind !== 'summary' && block.sourceRefs.length > 0,

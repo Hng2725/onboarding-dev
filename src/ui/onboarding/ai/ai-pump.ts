@@ -38,6 +38,7 @@ export interface PumpAiJobOptions {
   readonly onProgress?: (job: AiJobRecord) => void;
   readonly sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   readonly nowMs?: () => number;
+  readonly maxPollMs?: number;
 }
 
 function abortReason(signal?: AbortSignal): unknown {
@@ -72,6 +73,7 @@ function retryAfter(error: unknown, fallback: number): number {
 export async function pumpAiJob(options: PumpAiJobOptions): Promise<AiJobRecord> {
   const sleep = options.sleep ?? defaultSleep;
   const nowMs = options.nowMs ?? Date.now;
+  const maxPollMs = options.maxPollMs ?? AI_GENERATION_LIMITS.maxPollMs;
   const startedAt = nowMs();
   const leaseRefreshMs = Math.max(
     AI_GENERATION_LIMITS.pollIntervalMs,
@@ -217,7 +219,7 @@ export async function pumpAiJob(options: PumpAiJobOptions): Promise<AiJobRecord>
         }
         leaseRefreshedAt = nowMs();
       }
-      if (nowMs() - attemptStartedAt > AI_GENERATION_LIMITS.maxPollMs) {
+      if (nowMs() - attemptStartedAt > maxPollMs) {
         // Refresh first after a suspended tab resumes, then observe the final boundary tick.
         // A valid terminal result must not be replaced by a local timeout.
         const finalStatus = await gateway.status(attemptRef, options.signal).catch(() => undefined);

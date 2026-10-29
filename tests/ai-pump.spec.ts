@@ -268,6 +268,33 @@ describe('AI browser pump', () => {
     expect(gateway.cancel).not.toHaveBeenCalled();
   });
 
+  it('honors a shorter polling deadline for bounded Native question recovery', async () => {
+    const startedAt = '2026-10-24T05:00:00.000Z';
+    const now = Date.parse(startedAt) + 90_001;
+    const adminAi = vi.fn(async (action: string) => {
+      if (action === 'next_step') {
+        return {
+          kind: 'ai_call', callId: 'B-questions', operationId: 'job-1:B-questions', prompt: 'p',
+          attemptRef: 'native-chat:s:m', provider: 'native_chat', startedAt,
+        };
+      }
+      return { jobId: 'job-1', status: 'failed' };
+    });
+    const gateway: AiGateway = {
+      dispatch: vi.fn(),
+      status: vi.fn().mockResolvedValue({ state: 'running' }),
+    };
+
+    await expect(pumpAiJob({
+      api: { adminAi }, gateway, provider: 'native_chat', jobId: 'job-1', workerId: 'tab-new',
+      maxPollMs: 90_000, nowMs: () => now, sleep: vi.fn().mockResolvedValue(undefined),
+    })).rejects.toThrow('AI polling timed out.');
+    expect(adminAi).toHaveBeenCalledWith('report_ai_failure', expect.objectContaining({
+      callId: 'B-questions', kind: 'timeout',
+    }));
+    expect(gateway.status).toHaveBeenCalledOnce();
+  });
+
   it('submits a completion found by the final deadline check instead of cancelling it', async () => {
     const startedAt = '2026-10-24T05:00:00.000Z';
     const now = Date.parse(startedAt) + 15 * 60_000 + 1;

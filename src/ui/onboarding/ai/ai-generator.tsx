@@ -38,7 +38,11 @@ import {
   isNativeChatAttempt,
 } from './ai-gateway-native-chat';
 import { pumpAiJob } from './ai-pump';
-import { pumpWithQuestionRecovery } from './question-recovery';
+import {
+  pumpWithQuestionRecovery,
+  shouldBoundNativeQuestionPoll,
+  shouldUseNativeForPump,
+} from './question-recovery';
 import { AiReview } from './ai-review';
 import { AiOutlineReview, type ModuleSourceCatalog } from './ai-outline-review';
 import { AiModuleWorkspace } from './ai-module-workspace';
@@ -76,6 +80,8 @@ import { resolveUploadSystemName, SourcePanel, validateSourceFile } from './sour
 import type { FlagResolutionAction } from './flag-panel';
 
 class ModuleReviewPending extends Error {}
+
+const QUESTION_RECOVERY_NATIVE_TIMEOUT_MS = 90_000;
 
 export const AI_GENERATOR_STEPS = [
   'Tài liệu nguồn',
@@ -1176,8 +1182,16 @@ export function AiGeneratorPage({
         abortRef.current?.abort();
         const controller = new AbortController();
         abortRef.current = controller;
-        const useNative = nativeFallbackAvailable
-          && (usePreferredNative || aiJobPrefersNative(current));
+        const useNative = nativeFallbackAvailable && shouldUseNativeForPump(
+          current,
+          usePreferredNative,
+          aiJobPrefersNative(current),
+        );
+        const boundedQuestionRecovery = shouldBoundNativeQuestionPoll(
+          current,
+          useNative,
+          usePreferredNative,
+        );
         if (useNative && nativeCleanupBlock) throw new Error(NATIVE_CLEANUP_BLOCKED);
         const provider: AiProvider = useNative ? 'native_chat' : 'sandbox';
         return pumpAiJob({
@@ -1189,6 +1203,7 @@ export function AiGeneratorPage({
           workerId: 'onboarding-ai-' + crypto.randomUUID(),
           signal: controller.signal,
           onProgress: recordProgress,
+          ...(boundedQuestionRecovery ? { maxPollMs: QUESTION_RECOVERY_NATIVE_TIMEOUT_MS } : {}),
         });
       },
       runAction: async (action, args) => {

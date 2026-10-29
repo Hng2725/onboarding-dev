@@ -1,6 +1,7 @@
 import { approvedModuleJob } from './helpers/approved-module-fixture';
 import { createElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import TestRenderer, { act } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AiCallRecord, AiJobRecord, VerificationFlag } from '../src/onboarding/contracts';
@@ -774,6 +775,32 @@ describe('Admin AI template UI model', () => {
     expect(markup).toContain('Chọn phương án');
     expect(markup).toContain('Thêm ghi chú');
     expect(markup).toContain('Loại bỏ nội dung');
+  });
+
+  it('collects a flag resolution note inline without browser modal APIs', () => {
+    const onResolve = vi.fn();
+    const view = TestRenderer.create(createElement(FlagPanel, {
+      flags: [blockingFlag],
+      busy: false,
+      onResolve,
+    }));
+
+    const addNote = view.root.findAllByType('button').find((button) => button.children.join('').includes('Thêm ghi chú'));
+    expect(addNote).toBeDefined();
+    act(() => addNote?.props.onClick());
+
+    const input = view.root.findByProps({ 'aria-label': 'Ghi chú xác minh' });
+    act(() => input.props.onChange({ target: { value: 'Đã xác minh từ tài liệu nguồn.' } }));
+    const save = view.root.findAllByType('button').find((button) => button.children.join('').includes('Lưu ghi chú'));
+    act(() => save?.props.onClick());
+
+    expect(onResolve).toHaveBeenCalledWith(
+      blockingFlag,
+      'add_note',
+      'Đã xác minh từ tài liệu nguồn.',
+    );
+    expect(view.root.findByProps({ 'aria-label': 'Ghi chú xác minh' }).props.value)
+      .toBe('Đã xác minh từ tài liệu nguồn.');
   });
 
   it('labels AI-generated templates and never offers manual system cloning', () => {

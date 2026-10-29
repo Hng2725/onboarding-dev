@@ -5,6 +5,7 @@ import {
   ExclamationCircleFilled,
   WarningFilled,
 } from '@ant-design/icons';
+import { useState } from 'react';
 
 import type { VerificationFlag } from '../../../onboarding/contracts';
 
@@ -38,6 +39,8 @@ export function FlagPanel({
     chosenEvidenceIndex?: number,
   ) => void;
 }) {
+  const [noteFlagId, setNoteFlagId] = useState<string | null>(null);
+  const [noteText, setNoteText] = useState('');
   const ordered = [...flags].sort((left, right) => {
     if (left.status !== right.status) return left.status === 'open' ? -1 : 1;
     if (left.severity !== right.severity) return left.severity === 'blocking' ? -1 : 1;
@@ -64,16 +67,50 @@ export function FlagPanel({
               {flag.type === 'conflict' && flag.evidence.length > 0 && (
                 <button type="button" disabled={busy} onClick={() => onResolve(flag, 'choose_option', undefined, 0)}><CheckOutlined /> Chọn phương án</button>
               )}
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => {
-                  const note = window.prompt('Nhập ghi chú xác minh');
-                  if (note?.trim()) onResolve(flag, 'add_note', note.trim());
-                }}
-              ><EditOutlined /> Thêm ghi chú</button>
+              {noteFlagId !== flag.id && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setNoteFlagId(flag.id);
+                    setNoteText('');
+                  }}
+                ><EditOutlined /> Thêm ghi chú</button>
+              )}
               <button type="button" disabled={busy} onClick={() => onResolve(flag, 'remove')}><DeleteOutlined /> Loại bỏ nội dung</button>
               {flag.severity === 'warning' && <button type="button" disabled={busy} onClick={() => onResolve(flag, 'accept')}><CheckOutlined /> Chấp nhận cảnh báo</button>}
+              {noteFlagId === flag.id && (
+                <div className="ai-flag-note-editor">
+                  <textarea
+                    aria-label="Ghi chú xác minh"
+                    autoFocus
+                    disabled={busy}
+                    onChange={(event) => setNoteText(event.target.value)}
+                    placeholder="Nhập căn cứ hoặc kết quả xác minh của Admin"
+                    rows={3}
+                    value={noteText}
+                  />
+                  <div>
+                    <button
+                      type="button"
+                      disabled={busy || noteText.trim().length === 0}
+                      onClick={() => {
+                        const note = noteText.trim();
+                        if (!note) return;
+                        onResolve(flag, 'add_note', note);
+                      }}
+                    ><CheckOutlined /> Lưu ghi chú</button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => {
+                        setNoteFlagId(null);
+                        setNoteText('');
+                      }}
+                    >Hủy</button>
+                  </div>
+                </div>
+              )}
             </div>
           ) : <span className="ai-flag-resolved"><CheckOutlined /> Đã xử lý</span>}
         </article>

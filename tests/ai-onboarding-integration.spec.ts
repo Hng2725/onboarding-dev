@@ -176,6 +176,82 @@ describe('AI onboarding integration', () => {
     expect(catalog.filter((t) => t.source === 'ai_generated')).toEqual([expect.objectContaining({ status: 'draft' })]);
     expect(await store.count(admin.roomId, 'onboarding_resources')).toBe(0);
   });
+  it('recovers Sandbox and Native question failures with grounded fallback before materialization', async () => {
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    const fixture = approvedModuleJob();
+    const target = fixture.moduleRuns![0];
+    const recovering = {
+      ...fixture,
+      status: 'running' as const,
+      result: undefined,
+      calls: [],
+      moduleRuns: [{
+        ...target,
+        questionState: 'queued' as const,
+        approvedQuestionVersion: undefined,
+        questionDraft: undefined,
+        questionProvenance: undefined,
+      }, ...fixture.moduleRuns!.slice(1)],
+    };
+    await store.create(admin.roomId, 'onboarding_ai_jobs', recovering);
+    const jobs = createAiJobService(store);
+    const workerId = 'recovery-worker';
+
+    const sandboxStep = await jobs.nextStep(admin, { jobId: fixture.jobId, workerId });
+    if (sandboxStep.kind !== 'ai_call') throw new Error('Expected Sandbox question call');
+    await jobs.recordDispatch(admin, {
+      jobId: fixture.jobId, workerId, callId: sandboxStep.callId,
+      attemptRef: 'sandbox-attempt', provider: 'sandbox',
+    });
+    let job = await jobs.reportAiFailure(admin, {
+      jobId: fixture.jobId, workerId, callId: sandboxStep.callId, kind: 'failed',
+    });
+    expect(job.moduleRuns![0]).toMatchObject({ questionState: 'failed', questionVersion: 3 });
+
+    job = await jobs.retryModule(admin, {
+      jobId: fixture.jobId,
+      moduleLocalId: target.outline.moduleLocalId,
+      target: 'questions',
+      expectedVersion: 3,
+    });
+    const nativeStep = await jobs.nextStep(admin, { jobId: fixture.jobId, workerId });
+    if (nativeStep.kind !== 'ai_call') throw new Error('Expected Native question call');
+    await jobs.recordDispatch(admin, {
+      jobId: fixture.jobId, workerId, callId: nativeStep.callId,
+      attemptRef: 'native-chat:session:message', provider: 'native_chat',
+    });
+    job = await jobs.reportAiFailure(admin, {
+      jobId: fixture.jobId, workerId, callId: nativeStep.callId, kind: 'failed',
+    });
+    expect(job.moduleRuns![0]).toMatchObject({ questionState: 'failed', questionVersion: 4 });
+
+    job = await jobs.useQuestionFallback(admin, {
+      jobId: fixture.jobId,
+      moduleLocalId: target.outline.moduleLocalId,
+      expectedVersion: 4,
+    });
+    expect(job.moduleRuns![0]).toMatchObject({
+      questionState: 'review_ready',
+      questionVersion: 5,
+      questionProvenance: 'fallback',
+      questionDraft: expect.arrayContaining([expect.objectContaining({
+        sourceRefs: expect.arrayContaining([expect.objectContaining({ sectionId: 'source-1#s1' })]),
+      })]),
+    });
+    expect(await jobs.nextStep(admin, { jobId: fixture.jobId, workerId })).toMatchObject({ kind: 'awaiting_admin' });
+    expect((await createTemplateService(store).list(admin)).filter((template) => template.source === 'ai_generated')).toHaveLength(0);
+
+    job = await jobs.approveModuleQuestions(admin, {
+      jobId: fixture.jobId,
+      moduleLocalId: target.outline.moduleLocalId,
+      expectedVersion: 5,
+    });
+    expect(job.moduleRuns![0]).toMatchObject({ questionState: 'approved', approvedQuestionVersion: 5 });
+    const completed = await jobs.nextStep(admin, { jobId: fixture.jobId, workerId });
+    expect(completed).toMatchObject({ kind: 'done', job: { status: 'completed' } });
+    expect((await createTemplateService(store).list(admin)).filter((template) => template.source === 'ai_generated')).toHaveLength(1);
+  });
   it('runs document ingestion through generation, review, publish, assignment, retry, and completion', async () => {
     const store = new MemoryOnboardingStore();
     let tick = 0;

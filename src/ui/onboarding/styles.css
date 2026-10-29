@@ -598,6 +598,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .ai-flag small { color: var(--on-text-soft); line-height: 1.45; }
 .ai-flag-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
 .ai-flag-actions button { padding: 5px 7px; border: 1px solid var(--on-border); border-radius: 7px; color: var(--on-text); background: var(--on-bg); cursor: pointer; font-size: 12px; }
+.ai-flag-note-editor { display: grid; flex: 1 0 100%; gap: 7px; }
+.ai-flag-note-editor textarea { width: 100%; min-height: 64px; resize: vertical; padding: 8px 9px; border: 1px solid var(--on-border); border-radius: 8px; color: var(--on-text); background: var(--on-bg); font: inherit; font-size: 12px; line-height: 1.45; }
+.ai-flag-note-editor > div { display: flex; gap: 6px; }
 .ai-flag-empty,.ai-flag-resolved { display: flex; align-items: center; gap: 7px; padding: 11px; border-radius: 9px; color: var(--on-success); background: color-mix(in srgb,var(--on-success) 8%,transparent); font-size: 12px; font-weight: 700; }
 .ai-source-popover { position: absolute; z-index: 3; right: 315px; bottom: 18px; width: min(520px,calc(100% - 360px)); max-height: 55%; padding: 15px; overflow: auto; border: 1px solid var(--on-border); border-radius: 13px; background: var(--on-surface); box-shadow: var(--on-shadow); }
 .ai-source-popover > header { display: flex; align-items: center; justify-content: space-between; }
