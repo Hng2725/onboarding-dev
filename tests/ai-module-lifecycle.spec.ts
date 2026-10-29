@@ -7,6 +7,7 @@ import { buildFallbackLesson } from '../src/onboarding/ai/fallback-lessons';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
 import { completePlan } from './helpers/complete-plan';
+import { useManualReview } from './helpers/manual-review';
 
 const admin = { userId: 'admin-1', roomId: 'room-a', access: 'admin' as const };
 const outline: TemplateOutline = { revision: 1, flags: [], taskCoverage: [], modules: generatedTemplate.modules.map((m, order) => ({ moduleLocalId: m.localId, frameKey: m.frameKey, order, title: m.title, description: m.description, estimatedMinutes: m.estimatedMinutes, objectives: m.objectives, featureIds: m.featureIds, sourceSectionIds: ['source-1#s1'], responsibilityIndexes: [] })) };
@@ -26,7 +27,9 @@ async function setup(kind: 'normal' | 'advanced' = 'normal') {
     operationId: 'inventory', createdBy: 'admin-1', createdAt: '2026-10-28T00:00:00.000Z', updatedAt: '2026-10-28T00:00:00.000Z',
   });
   const service = createAiJobService(store, { now: () => '2026-10-28T01:00:00.000Z' });
-  const job = await completePlan(service, admin, await service.startJob(admin, { kind: 'template', inventoryJobId: 'inventory', templateKind: kind, operationId: 'template', ...(kind === 'advanced' ? { roleProfile: { department: 'Sales', role: 'Agent', responsibilities: ['Create orders', 'Review orders'] } } : {}) }));
+  const started = await service.startJob(admin, { kind: 'template', inventoryJobId: 'inventory', templateKind: kind, operationId: 'template', ...(kind === 'advanced' ? { roleProfile: { department: 'Sales', role: 'Agent', responsibilities: ['Create orders', 'Review orders'] } } : {}) });
+  await useManualReview(store, started);
+  const job = await completePlan(service, admin, started);
   return { store, service, job };
 }
 function active(job: AiJobRecord) { return job.moduleRuns![0]; }

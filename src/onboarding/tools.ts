@@ -58,7 +58,7 @@ const ACTIONS: Readonly<Record<OnboardingDataToolName, readonly string[]>> = {
   onboarding_bootstrap: ['load'],
   onboarding_admin_templates: ['list', 'get', 'update', 'publish', 'archive', 'delete'],
   onboarding_admin_ai: [
-    'update_outline', 'approve_outline', 'list_module_sources', 'supplement_module_sources', 'supplement_module_document', 'add_outline_module', 'set_coverage_override', 'update_module_lesson', 'approve_module_lesson', 'use_source_fallback', 'use_question_fallback', 'update_module_questions', 'approve_module_questions', 'retry_module',
+    'update_outline', 'approve_outline', 'list_module_sources', 'supplement_module_sources', 'supplement_module_document', 'add_outline_module', 'set_coverage_override', 'update_module_lesson', 'approve_module_lesson', 'use_source_fallback', 'use_question_fallback', 'update_module_questions', 'approve_module_questions', 'retry_module', 'pause_autopilot', 'enable_autopilot',
     'list_sources', 'ingest_source', 'add_admin_note', 'delete_source', 'get_source_section',
     'start_job', 'list_jobs', 'get_job', 'next_step', 'record_dispatch', 'submit_ai_output',
     'report_ai_failure', 'retry_job', 'cancel_job', 'record_attempt_cleanup',
@@ -543,6 +543,8 @@ async function dispatchAdminAi(
       if (target !== 'lesson' && target !== 'questions') throw toolError('ARGUMENT_INVALID', 'target must be lesson or questions.');
       return { job: await services.aiJobs.retryModule(actor, { jobId: requiredString(args, 'jobId'), moduleLocalId: requiredString(args, 'moduleLocalId'), target, expectedVersion: requiredNumber(args, 'expectedVersion') }) };
     }
+    case 'pause_autopilot': return { job: await services.aiJobs.pauseAutopilot(actor, { jobId: requiredString(args, 'jobId') }) };
+    case 'enable_autopilot': return { job: await services.aiJobs.enableAutopilot(actor, { jobId: requiredString(args, 'jobId') }) };
     case 'get_job': return { job: await services.aiJobs.getJob(actor, requiredString(args, 'jobId')) };
     case 'next_step': return services.aiJobs.nextStep(actor, {
       jobId: requiredString(args, 'jobId'),

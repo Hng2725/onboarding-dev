@@ -14,6 +14,7 @@ import { createTemplateService } from '../src/onboarding/templates';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
 import { completePlan } from './helpers/complete-plan';
+import { useManualReview } from './helpers/manual-review';
 import { isModuleCovered } from '../src/onboarding/ai/outline-coverage';
 
 const admin: OnboardingActor = { userId: 'admin-1', roomId: 'room-a', access: 'admin' };
@@ -114,6 +115,7 @@ describe('AI job service', () => {
     const job = await service.startJob(admin, {
       kind: 'template', inventoryJobId: 'inventory-fallback-questions', templateKind: 'normal', operationId: 'fallback-questions',
     });
+    await useManualReview(store, job);
     await completePlan(service, admin, job);
     await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 });
     const run = job.moduleRuns![0];
@@ -149,6 +151,7 @@ describe('AI job service', () => {
     let job = await service.startJob(admin, {
       kind: 'template', inventoryJobId: 'inventory-related', templateKind: 'normal', operationId: 'related',
     });
+    await useManualReview(store, job);
     await completePlan(service, admin, job);
     const modules = job.outline!.modules;
     expect(modules.length).toBeGreaterThanOrEqual(3);
@@ -197,6 +200,7 @@ describe('AI job service', () => {
     let job = await service.startJob(admin, {
       kind: 'template', inventoryJobId: 'inventory-source-free-questions', templateKind: 'normal', operationId: 'source-free-questions',
     });
+    await useManualReview(store, job);
     await completePlan(service, admin, job);
     const moduleLocalId = job.moduleRuns![0].outline.moduleLocalId;
     job = await service.updateOutline(admin, { jobId: job.jobId, expectedRevision: 1, edits: [{ type: 'update', moduleLocalId, patch: { sourceSectionIds: [] } }] });
@@ -231,6 +235,7 @@ describe('AI job service', () => {
     const job = await service.startJob(admin, {
       kind: 'template', inventoryJobId: 'inventory-question-version', templateKind: 'normal', operationId: 'question-version',
     });
+    await useManualReview(store, job);
     await completePlan(service, admin, job);
     await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 });
     const outline = job.moduleRuns![0].outline;
@@ -1308,6 +1313,7 @@ describe('AI job service', () => {
         kind: 'template', inventoryJobId: inventory.jobId, templateKind, operationId,
         ...(templateKind === 'advanced' ? { roleProfile: { responsibilities: ['Tạo đơn hàng', 'Duyệt đơn hàng'] } } : {}),
       });
+      await useManualReview(context.store, job);
       return { ...context, job, featureId };
     }
     const plan = (featureId: string) => ({ modules: [
@@ -1478,7 +1484,8 @@ describe('AI job service', () => {
     it('leaves a persisted module_v2 job without a planner call unchanged', async () => {
       const { service, store, job } = await templateStart('plan-legacy');
       const legacyId = 'legacy-v2';
-      const { id: _id, roomId: _room, planPending: _pending, ...persisted } = job;
+      // Persisted before the planner existed, so also before autopilot: no autoApprove flag.
+      const { id: _id, roomId: _room, planPending: _pending, autoApprove: _auto, ...persisted } = job;
       await store.create(admin.roomId, 'onboarding_ai_jobs', { ...persisted, jobId: legacyId, operationId: 'legacy-v2-op', calls: [] });
       const legacy = await service.getJob(admin, legacyId);
       expect(legacy.planPending).toBe(false);

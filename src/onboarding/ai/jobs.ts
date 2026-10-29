@@ -30,14 +30,14 @@ import { AI_GENERATION_LIMITS } from './limits';
 import { sanitizeAiDiagnosticText } from './diagnostics';
 import { materializeAiTemplate, materializeModuleTemplate } from './materialize';
 import { buildTemplateOutline, applyTemplateOutlineEdits, GAP_NOTE } from './outline';
-import { moduleHasUsableSources, usableSectionIds } from './outline-coverage';
+import { moduleHasUsableSources, outlineReadiness, usableSectionIds } from './outline-coverage';
 import { buildOutlinePlanPrompt, buildOutlinePlanRepairPrompt, validateOutlinePlanOutput, type OutlinePlanValidationInput } from './outline-plan';
 import { buildSupplementPrompt, buildSupplementRepairPrompt, SUPPLEMENT_EXCERPT_CHARS, validateSupplementOutput, type SupplementCoverageUpdate, type SupplementOutput, type SupplementPromptInput } from './outline-supplement';
 import { batchSources, planBatches as planSourceBatches, SourceBatchError } from './source-batches';
 import { buildFallbackLesson } from './fallback-lessons';
 import { buildFallbackQuestions } from './fallback-questions';
 import { buildModuleLessonPrompt, buildModuleLessonRepairPrompt, buildModuleQuestionRepairPrompt, buildModuleQuestionPrompt, validateModuleLessonOutput, validateModuleQuestionOutput, validApprovedLesson, type ModuleLessonPromptInput } from './module-draft';
-import { createModuleRuns, reconcileModuleRuns, invalidateModule, updateLesson, approveLesson, updateQuestions, approveQuestions, retryModuleRun, lessonApproved, modulesComplete } from './module-lifecycle';
+import { createModuleRuns, reconcileModuleRuns, invalidateModule, updateLesson, approveLesson, updateQuestions, approveQuestions, retryModuleRun, lessonApproved, modulesComplete, moduleRunComplete, ModuleLifecycleError } from './module-lifecycle';
 import { parseAiJsonObject } from './parse';
 import { acquireRoomAiLease, refreshRoomAiLease, releaseRoomAiLease, isAiLeaseConflict, aiCallMayBeLive } from './room-ai-lease';
 import {
@@ -58,6 +58,7 @@ import {
   removeQuestionsBlockedByFlags,
   validateGeneratedTemplate,
   type GeneratedTemplate,
+  type GeneratedFlag,
   type GeneratedModule,
   type GeneratedQuestion,
   type GeneratedTemplateValidation,
@@ -343,6 +344,14 @@ const PLAN_PENDING_MESSAGE = 'AI đang lập lộ trình, vui lòng chờ.';
 const SUPPLEMENT_FAILED_NOTE = 'AI chưa đọc được tài liệu bổ sung. Hãy thử lại hoặc chọn đoạn thủ công.';
 const CATALOG_FAILED_NOTE = 'AI chưa tìm được đoạn phù hợp. Hãy tải tài liệu bổ sung hoặc chọn đoạn thủ công.';
 const SUPPLEMENT_CALL = /^supplement-(\d+)-b(\d+)/;
+const AUTOPILOT_APPROVER = 'autopilot';
+const PAUSED_ERROR = 'Tạm dừng bởi Admin.';
+const FALLBACK_LESSON_WARNING = 'Bài học được dựng trực tiếp từ tài liệu nguồn, nên rà soát cách diễn đạt.';
+
+/** Added once to a fallback lesson that autopilot approves, so the Admin rereads its wording. */
+function fallbackLessonFlag(moduleLocalId: string): GeneratedFlag {
+  return { type: 'low_quality_source', severity: 'warning', message: FALLBACK_LESSON_WARNING, questionForAdmin: 'Kiểm tra và chỉnh câu chữ nếu cần.', location: { moduleLocalId }, evidence: [] };
+}
 
 /**
  * Outline planner (P) and supplement (S) calls carry no module, so they must never reach a
@@ -404,6 +413,10 @@ export interface AiJobService {
   updateModuleQuestions(actor: OnboardingActor, input: ModuleVersionInput & { readonly questions: readonly GeneratedQuestion[] }): Promise<AiJobRecord>;
   approveModuleQuestions(actor: OnboardingActor, input: ModuleVersionInput): Promise<AiJobRecord>;
   retryModule(actor: OnboardingActor, input: ModuleInput & { readonly target: 'lesson' | 'questions'; readonly expectedVersion: number }): Promise<AiJobRecord>;
+  /** Stops autopilot: the outline returns to review, live module calls are stopped, approved runs are kept. */
+  pauseAutopilot(actor: OnboardingActor, input: { readonly jobId: string }): Promise<AiJobRecord>;
+  /** Switches an owned module_v2 template job, including one started before autopilot, to autopilot. */
+  enableAutopilot(actor: OnboardingActor, input: { readonly jobId: string }): Promise<AiJobRecord>;
   startJob(actor: OnboardingActor, input: StartAiJobInput): Promise<AiJobRecord>;
   listJobs(actor: OnboardingActor): Promise<readonly AiJobRecord[]>;
   getJob(actor: OnboardingActor, jobId: string): Promise<AiJobRecord>;
@@ -431,6 +444,7 @@ interface AiJobDbData extends StoreRecord {
   readonly outline?: TemplateOutline;
   readonly outlineApprovedRevision?: number;
   readonly moduleRuns?: readonly AiModuleDraftRun[];
+  readonly autoApprove?: boolean;
   readonly jobId: string;
   readonly kind: 'inventory' | 'template';
   readonly status: 'running' | 'completed' | 'failed' | 'cancelled';
@@ -534,6 +548,7 @@ function jobFrom(row: AiJobDbRecord, roomId: string): AiJobRecord {
     ...(row.outline ? { outline: row.outline } : {}),
     ...(row.outlineApprovedRevision === undefined ? {} : { outlineApprovedRevision: row.outlineApprovedRevision }),
     ...(row.moduleRuns ? { moduleRuns: row.moduleRuns } : {}),
+    ...(row.autoApprove === undefined ? {} : { autoApprove: row.autoApprove }),
     planPending: row.status === 'running' && planPending(row.calls),
     id: row.id,
     roomId,
@@ -1469,11 +1484,21 @@ export function createAiJobService(
     if (row.outlineApprovedRevision !== row.outline!.revision) throw new AiJobServiceError('OPERATION_CONFLICT', 'Approve the current outline first.');
     return run;
   }
+  /** One `__moduleAudit` entry; `approvedBy` is the Admin's user ID or `autopilot`. */
+  function moduleAuditEntry(run: AiModuleDraftRun, audit: StoreRecord, approvedBy: string): StoreRecord {
+    return { ...audit, moduleLocalId: run.outline.moduleLocalId, outlineRevision: run.outlineRevision, sourceFingerprint: run.sourceFingerprint, approvedBy, approvedAt: now() };
+  }
+  function lessonAudit(run: AiModuleDraftRun): StoreRecord {
+    return { target: 'lesson', version: run.lessonVersion, module: run.lessonDraft, provenance: run.lessonProvenance, flags: run.lessonFlags ?? [] };
+  }
+  function questionAudit(run: AiModuleDraftRun): StoreRecord {
+    return { target: 'questions', version: run.questionVersion, lessonVersion: run.lessonVersion, questions: run.questionDraft, provenance: run.questionProvenance, flags: run.questionFlags ?? [] };
+  }
   async function saveRun(actor: OnboardingActor, row: AiJobDbRecord, run: AiModuleDraftRun, audit?: StoreRecord): Promise<AiJobRecord> {
     const history = (row.stageOutputs.__moduleAudit ?? []) as readonly StoreRecord[];
     const calls = obsoleteCalls(row, new Set([run.outline.moduleLocalId]));
     return jobFrom(await updateJob(actor, row, { moduleRuns: replaceRun(row, run), calls, status: 'running', result: null,
-      ...(audit ? { stageOutputs: { ...row.stageOutputs, __moduleAudit: [...history, { ...audit, moduleLocalId: run.outline.moduleLocalId, outlineRevision: run.outlineRevision, sourceFingerprint: run.sourceFingerprint, approvedBy: actor.userId, approvedAt: now() }] } } : {}), ...leaseAfterChanges(calls) }), actor.roomId);
+      ...(audit ? { stageOutputs: { ...row.stageOutputs, __moduleAudit: [...history, moduleAuditEntry(run, audit, actor.userId)] } } : {}), ...leaseAfterChanges(calls) }), actor.roomId);
   }
   /**
    * The planner may still replace the outline, so neither edits nor approval may race it. A
@@ -1847,6 +1872,7 @@ export function createAiJobService(
     if (row.outlineApprovedRevision !== row.outline!.revision) return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
     const completed = row.calls.find((call) => call.status === 'completed' && rawOutput(row.stageOutputs, call.callId) !== undefined && row.stageOutputs['processed:' + call.callId] !== true);
     if (completed) row = await processCompleted(actor, row, completed);
+    if (row.autoApprove === true) return autopilotModuleStep(actor, row, workerId);
     // A pending, unclaimed question may have been queued while the room was
     // busy. Preserve it while approvals are renewed; never disturb a claim or
     // recorded attempt whose dispatch may already be live.
@@ -1880,15 +1906,104 @@ export function createAiJobService(
           row = await updateJob(actor, row, { moduleRuns: replaceRun(row, await fallbackRun(actor, row, run)) });
           continue;
         }
-        const callId = 'module-' + String(row.calls.length + 1);
-        call = { callId, stage: row.templateKind === 'advanced' ? 'C' : 'B', status: 'pending', operationId: row.jobId + ':' + callId, moduleLocalId: run.outline.moduleLocalId, moduleTarget: target, moduleVersion: target === 'lesson' ? run.lessonVersion : run.questionVersion, lessonVersion: run.lessonVersion, outlineRevision: row.outline!.revision };
-        const next: AiModuleDraftRun = target === 'lesson' ? { ...run, lessonState: 'drafting', lessonAttempts: (run.lessonAttempts ?? 0) + 1 } : { ...run, questionState: 'drafting', questionAttempts: (run.questionAttempts ?? 0) + 1 };
+        call = newModuleCall(row, run, target);
         const queuedIndex = queuedQuestion && !lessonsApproved ? row.calls.findIndex((item) => item.callId === queuedQuestion.callId) : -1;
         const calls = queuedIndex < 0 ? [...row.calls, call] : [...row.calls.slice(0, queuedIndex), call, ...row.calls.slice(queuedIndex)];
-        row = await updateJob(actor, row, { calls, moduleRuns: replaceRun(row, next) });
+        row = await updateJob(actor, row, { calls, moduleRuns: replaceRun(row, draftingRun(run, target)) });
         break;
       }
     }
+    return dispatchModuleCall(actor, row, workerId, call);
+  }
+  function newModuleCall(row: AiJobDbRecord, run: AiModuleDraftRun, target: 'lesson' | 'questions'): AiCallRecord {
+    const callId = 'module-' + String(row.calls.length + 1);
+    return { callId, stage: row.templateKind === 'advanced' ? 'C' : 'B', status: 'pending', operationId: row.jobId + ':' + callId, moduleLocalId: run.outline.moduleLocalId, moduleTarget: target, moduleVersion: target === 'lesson' ? run.lessonVersion : run.questionVersion, lessonVersion: run.lessonVersion, outlineRevision: row.outline!.revision };
+  }
+  function draftingRun(run: AiModuleDraftRun, target: 'lesson' | 'questions'): AiModuleDraftRun {
+    return target === 'lesson' ? { ...run, lessonState: 'drafting', lessonAttempts: (run.lessonAttempts ?? 0) + 1 } : { ...run, questionState: 'drafting', questionAttempts: (run.questionAttempts ?? 0) + 1 };
+  }
+  /**
+   * Autopilot approves every ready draft with the same checks as the Admin's approve actions.
+   * Only `review_ready`/`fallback_review` lessons and `review_ready` questions qualify, so an
+   * approved run is never approved (or audited) twice.
+   */
+  async function autoApproveRuns(actor: OnboardingActor, row: AiJobDbRecord): Promise<AiJobDbRecord> {
+    const audits: StoreRecord[] = [];
+    const runs: AiModuleDraftRun[] = [];
+    for (const run of row.moduleRuns!) {
+      let next = run;
+      const lessonReady = !run.outline.tombstoned && !!run.lessonDraft && (run.lessonState === 'review_ready' || run.lessonState === 'fallback_review');
+      const questionsReady = !run.outline.tombstoned && lessonApproved(run) && run.questionState === 'review_ready' && run.questionLessonVersion === run.lessonVersion;
+      if (lessonReady || questionsReady) {
+        const { input } = await moduleContext(actor, row, run);
+        try {
+          if (lessonReady && validApprovedLesson(run.lessonDraft!, input, run.lessonProvenance!)) {
+            next = approveLesson(run, run.lessonVersion);
+            const flags = next.lessonFlags ?? [];
+            if (next.lessonProvenance === 'fallback' && !flags.some((flag) => flag.message === FALLBACK_LESSON_WARNING)) next = { ...next, lessonFlags: [...flags, fallbackLessonFlag(run.outline.moduleLocalId)] };
+            audits.push(moduleAuditEntry(next, lessonAudit(next), AUTOPILOT_APPROVER));
+          } else if (questionsReady) {
+            const approved = approveQuestions(run, run.questionVersion);
+            const validation = validateModuleQuestionOutput({ questions: approved.questionDraft, flags: approved.questionFlags ?? [] }, { ...input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance }, true);
+            if (validation.ok) {
+              next = approved;
+              audits.push(moduleAuditEntry(next, questionAudit(next), AUTOPILOT_APPROVER));
+            }
+          }
+        } catch (error) {
+          // A draft that is not approvable stays for the Admin, exactly as the manual action would refuse it.
+          if (!(error instanceof ModuleLifecycleError)) throw error;
+        }
+      }
+      runs.push(next);
+    }
+    if (!audits.length) return row;
+    const history = (row.stageOutputs.__moduleAudit ?? []) as readonly StoreRecord[];
+    return updateJob(actor, row, { moduleRuns: runs, stageOutputs: { ...row.stageOutputs, __moduleAudit: [...history, ...audits] } });
+  }
+  /** An unfinished active module that cannot be grounded: `manual_required`, or a source was deleted. */
+  async function autopilotLacksSources(actor: OnboardingActor, row: AiJobDbRecord): Promise<boolean> {
+    for (const run of row.moduleRuns!) {
+      if (run.outline.tombstoned || moduleRunComplete(run)) continue;
+      if (run.lessonState === 'manual_required' || !(await moduleContext(actor, row, run)).usable) return true;
+    }
+    return false;
+  }
+  /**
+   * Autopilot order: one call at a time, module by module in `order`; a module's questions are
+   * queued as soon as its own lesson is approved. Failed questions are left for the client's
+   * recovery (Native retry, then `use_question_fallback`), whose draft is approved on the next pass.
+   */
+  async function autopilotModuleStep(actor: OnboardingActor, initial: AiJobDbRecord, workerId: string): Promise<AiJobNextStep> {
+    let row = await autoApproveRuns(actor, initial);
+    const waiting = await providerWaitStep(actor, row);
+    // A provider that stayed busy leaves a fallback lesson or failed questions; keep going.
+    if (waiting?.kind === 'awaiting_admin') return nextModuleStep(actor, await requireOwnedJob(actor, row.jobId), workerId);
+    if (waiting) return waiting;
+    if (row.pumpLeaseUntil && Date.parse(row.pumpLeaseUntil) >= Date.parse(now()) && row.pumpedBy !== workerId) return { kind: 'wait', job: jobFrom(row, actor.roomId) };
+    let call = row.calls.find((item) => item.status === 'pending' || item.status === 'dispatched');
+    if (!call) {
+      const active = row.moduleRuns!.filter((item) => !item.outline.tombstoned).sort((a, b) => a.outline.order - b.outline.order);
+      if (active.some((run) => run.questionState === 'failed')) return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
+      if (await autopilotLacksSources(actor, row)) {
+        // Never draft a fallback from nothing: the Admin supplements or removes the module first.
+        row = await updateJob(actor, row, { outlineApprovedRevision: 0, ...leaseAfterChanges(row.calls) });
+        return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
+      }
+      for (const run of active) {
+        const target = ['queued', 'stale'].includes(run.lessonState) ? 'lesson'
+          : lessonApproved(run) && ['queued', 'stale'].includes(run.questionState) ? 'questions' : undefined;
+        if (!target) continue;
+        call = newModuleCall(row, run, target);
+        row = await updateJob(actor, row, { calls: [...row.calls, call], moduleRuns: replaceRun(row, draftingRun(run, target)) });
+        break;
+      }
+    }
+    return dispatchModuleCall(actor, row, workerId, call);
+  }
+  /** With a call: build its prompt and dispatch it. Without one: materialize when complete, else await the Admin. */
+  async function dispatchModuleCall(actor: OnboardingActor, initial: AiJobDbRecord, workerId: string, call: AiCallRecord | undefined): Promise<AiJobNextStep> {
+    let row = initial;
     if (!call) {
       if (modulesComplete(row.moduleRuns!)) {
         if (row.status !== 'completed') row = await updateJob(actor, row, { status: 'completed', ...RELEASED_LEASE });
@@ -1983,7 +2098,7 @@ export function createAiJobService(
         }
         const outline = buildTemplateOutline({ jobId, templateKind: input.templateKind, inventory: inventoryJob.result as FeatureInventory, responsibilities: input.roleProfile?.responsibilities ?? [] });
         data = {
-          pipelineVersion: 'module_v2', outline, moduleRuns: createModuleRuns(outline),
+          pipelineVersion: 'module_v2', outline, moduleRuns: createModuleRuns(outline), autoApprove: true,
           jobId,
           kind: 'template',
           status: 'running',
@@ -2136,6 +2251,10 @@ export function createAiJobService(
       const row = await requireModuleJob(actor, input.jobId);
       assertPlanSettled(row);
       assertOutlineRevision(row, input.expectedRevision);
+      // Autopilot writes every module without stopping, so each one must be groundable up front.
+      if (row.autoApprove === true && !outlineReadiness(row.outline!, usableSectionIds(await liveJobSources(actor, row)), { templateKind: row.templateKind ?? 'normal', responsibilities: row.roleProfile?.responsibilities ?? [] }).ready) {
+        throw new AiJobServiceError('COVERAGE_INCOMPLETE', 'Còn module chưa đủ tài liệu.');
+      }
       validateOutline(row, row.outline!);
       const history = (row.stageOutputs.__outlineAudit ?? []) as readonly unknown[];
       return jobFrom(await updateJob(actor, row, { outlineApprovedRevision: input.expectedRevision, stageOutputs: { ...row.stageOutputs, __outlineAudit: [...history, { outline: row.outline, approvedBy: actor.userId, approvedAt: now() }] } }), actor.roomId);
@@ -2152,7 +2271,7 @@ export function createAiJobService(
       const run = requireRun(row, input.moduleLocalId);
       const next = approveLesson(run, input.expectedVersion);
       if (!validApprovedLesson(next.lessonDraft!, (await moduleContext(actor, row, run)).input, next.lessonProvenance!)) throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Lesson is invalid or ungrounded.');
-      return saveRun(actor, row, next, { target: 'lesson', version: next.lessonVersion, module: next.lessonDraft, provenance: next.lessonProvenance, flags: next.lessonFlags ?? [] });
+      return saveRun(actor, row, next, lessonAudit(next));
     },
     async useSourceFallback(actor, input) {
       const row = await requireModuleJob(actor, input.jobId);
@@ -2189,7 +2308,7 @@ export function createAiJobService(
       const next = approveQuestions(run, input.expectedVersion);
       const validation = validateModuleQuestionOutput({ questions: next.questionDraft, flags: next.questionFlags ?? [] }, { ...(await moduleContext(actor, row, run)).input, lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance }, true);
       if (!validation.ok) throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Questions are invalid or ungrounded.');
-      return saveRun(actor, row, next, { target: 'questions', version: next.questionVersion, lessonVersion: next.lessonVersion, questions: next.questionDraft, provenance: next.questionProvenance, flags: next.questionFlags ?? [] });
+      return saveRun(actor, row, next, questionAudit(next));
     },
     async retryModule(actor, input) {
       const row = await requireModuleJob(actor, input.jobId);
@@ -2197,6 +2316,25 @@ export function createAiJobService(
       const run = requireRun(row, input.moduleLocalId);
       if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion !== (input.target === 'lesson' ? run.lessonVersion : run.questionVersion)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Module version conflict.');
       return saveRun(actor, row, retryModuleRun(run, input.target));
+    },
+    async pauseAutopilot(actor, input) {
+      const row = await requireModuleJob(actor, input.jobId);
+      if (row.status !== 'running') throw new AiJobServiceError('JOB_NOT_RUNNING', 'Chỉ tạm dừng được job đang chạy.');
+      if (!row.outlineApprovedRevision) return jobFrom(row, actor.roomId);
+      const timestamp = now();
+      // Like obsoleteCalls: a call that may be live keeps its room lease until cleanup is proven.
+      // A completed output not yet processed is kept and applied after the outline is re-approved.
+      const calls = row.calls.map((call): AiCallRecord => call.moduleLocalId && (call.status === 'pending' || call.status === 'dispatched')
+        ? { ...call, status: 'failed', errors: [PAUSED_ERROR], ...(aiCallMayBeLive(call) ? { cleanupState: 'pending', cleanupUpdatedAt: timestamp } as const : {}) }
+        : call);
+      const updated = await updateJob(actor, row, { outlineApprovedRevision: 0, calls, moduleRuns: row.moduleRuns!.map(requeueDrafting), ...RELEASED_LEASE, ...CLEARED_WAIT });
+      for (const call of calls) if (!aiCallMayBeLive(call)) await releaseCallLease(actor, row, call);
+      return jobFrom(updated, actor.roomId);
+    },
+    async enableAutopilot(actor, input) {
+      const row = await requireModuleJob(actor, input.jobId);
+      if (row.autoApprove === true) return jobFrom(row, actor.roomId);
+      return jobFrom(await updateJob(actor, row, { autoApprove: true }), actor.roomId);
     },
 
     async getJob(actor, jobId) {

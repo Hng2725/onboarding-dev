@@ -14,6 +14,7 @@ import { generatedTemplate } from './helpers/ai-template-fixture';
 import { seedAiSource } from './helpers/ai-template-fixture';
 import { approvedModuleJob } from './helpers/approved-module-fixture';
 import { completePlan } from './helpers/complete-plan';
+import { useManualReview } from './helpers/manual-review';
 import { generateValidatedTemplateRuns, moveReviewIndex, reviewAdvanceState } from '../src/ui/onboarding/ai/ai-template-batch';
 import { publishAiTemplateBatch } from '../src/ui/onboarding/ai/ai-publish-batch';
 
@@ -66,6 +67,7 @@ describe('AI onboarding integration', () => {
     let job = await jobs.startJob(admin, { kind: 'template', inventoryJobId: 'inventory-safe', templateKind: 'advanced', roleProfile: { responsibilities: ['Create orders', 'Review orders'] }, operationId: 'advanced-safe' });
     expect(job.roleProfile).toEqual({ responsibilities: ['Create orders', 'Review orders'] });
     expect(job.calls.map((call) => [call.callId, call.stage])).toEqual([['plan-1', 'P']]);
+    await useManualReview(store, job);
     job = await completePlan(jobs, admin, job, undefined, 'worker');
     expect(await jobs.nextStep(admin, { jobId: job.jobId, workerId: 'worker' })).toMatchObject({ kind: 'awaiting_admin' });
     expect(job.calls.filter((call) => call.stage !== 'P')).toEqual([]);

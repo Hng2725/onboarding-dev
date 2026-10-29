@@ -56,7 +56,11 @@ export function retryModuleRun(run: AiModuleDraftRun, target: 'lesson' | 'questi
   const { approvedQuestionVersion: _approved, questionProvenance: _questionProvenance, nextRetryAt: _retry, providerWaitStartedAt: _wait, ...rest } = run;
   return { ...rest, questionState: 'queued', questionVersion: run.questionVersion + 1, schemaRepairs: 0, transientRetries: 0 };
 }
+/** The run's current lesson and its current questions are both approved. */
+export function moduleRunComplete(run: AiModuleDraftRun): boolean {
+  return lessonApproved(run) && run.questionState === 'approved' && run.approvedQuestionVersion === run.questionVersion && run.questionLessonVersion === run.lessonVersion && !!run.questionDraft && run.questionDraft.length >= 3 && run.questionDraft.length <= 5;
+}
 export function modulesComplete(runs: readonly AiModuleDraftRun[]): boolean {
   const active = runs.filter((run) => !run.outline.tombstoned);
-  return active.length > 0 && active.every((run) => lessonApproved(run) && run.questionState === 'approved' && run.approvedQuestionVersion === run.questionVersion && run.questionLessonVersion === run.lessonVersion && !!run.questionDraft && run.questionDraft.length >= 3 && run.questionDraft.length <= 5);
+  return active.length > 0 && active.every(moduleRunComplete);
 }

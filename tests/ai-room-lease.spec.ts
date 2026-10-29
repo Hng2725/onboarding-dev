@@ -7,6 +7,7 @@ import { acquireRoomAiLease, refreshRoomAiLease, releaseRoomAiLease } from '../s
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
 import { completePlan } from './helpers/complete-plan';
+import { useManualReview } from './helpers/manual-review';
 import { pumpAiJob, type AiPumpApi } from '../src/ui/onboarding/ai/ai-pump';
 import type { AiGateway } from '../src/ui/onboarding/ai/ai-gateway-sandbox';
 import { createNativeChatAiGateway } from '../src/ui/onboarding/ai/ai-gateway-native-chat';
@@ -40,6 +41,7 @@ async function setup(maxPageSize?: number) {
       kind: 'template', inventoryJobId: 'inventory', templateKind, operationId,
       ...(templateKind === 'advanced' ? { roleProfile: { department: 'Sales', role: 'Agent', responsibilities: ['Create orders', 'Review orders'] } } : {}),
     });
+    await useManualReview(store, job);
     await completePlan(service, admin, job);
     await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: 1 });
     return service.getJob(admin, job.jobId);

@@ -235,6 +235,8 @@ export interface AiJobRecord {
   readonly outline?: TemplateOutline;
   readonly outlineApprovedRevision?: number;
   readonly moduleRuns?: readonly AiModuleDraftRun[];
+  /** Autopilot: the server writes and self-approves every module after the outline is approved. */
+  readonly autoApprove?: boolean;
   /** Computed, never persisted: an outline planner (P) or supplement (S) call is pending or dispatched. */
   readonly planPending: boolean;
   readonly id: string;

@@ -82,6 +82,8 @@ function services(): OnboardingServiceBundle {
       updateModuleQuestions: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
       approveModuleQuestions: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
       retryModule: vi.fn().mockResolvedValue({ jobId: 'job-1' }),
+      pauseAutopilot: vi.fn().mockResolvedValue({ jobId: 'job-1', outlineApprovedRevision: 0 }),
+      enableAutopilot: vi.fn().mockResolvedValue({ jobId: 'job-1', autoApprove: true }),
       startJob: vi.fn().mockResolvedValue({ jobId: 'job-1', status: 'running' }),
       listJobs: vi.fn().mockResolvedValue([{ jobId: 'job-1', status: 'running' }]),
       getJob: vi.fn().mockResolvedValue({ jobId: 'job-1', status: 'running' }),
@@ -177,6 +179,20 @@ describe('onboarding tool dispatcher', () => {
     await expect(handle('onboarding_admin_ai', { ...base, action: 'supplement_module_document', moduleLocalId: 'm1' }, actor)).rejects.toThrow();
     for (const action of ['supplement_module_document', 'add_outline_module', 'set_coverage_override']) {
       await expect(handle('onboarding_admin_ai', { ...base, action, moduleLocalId: 'm1', sourceId: 'source-2', title: 'Mẹo', override: true }, verified())).rejects.toThrow();
+    }
+  });
+  it('routes the pause and enable autopilot actions for the verified room admin only', async () => {
+    const bundle = services();
+    const handle = createOnboardingToolHandler(() => bundle);
+    const actor = verified({ room_roles: ['owner'] }, 'admin-1');
+    const owner = expect.objectContaining({ roomId: 'room-a', userId: 'admin-1' });
+    await expect(handle('onboarding_admin_ai', { action: 'pause_autopilot', jobId: 'job-1', roomId: 'forged' }, actor)).resolves.toMatchObject({ job: { jobId: 'job-1', outlineApprovedRevision: 0 } });
+    await expect(handle('onboarding_admin_ai', { action: 'enable_autopilot', jobId: 'job-1', roomId: 'forged' }, actor)).resolves.toMatchObject({ job: { jobId: 'job-1', autoApprove: true } });
+    expect(bundle.aiJobs.pauseAutopilot).toHaveBeenCalledWith(owner, { jobId: 'job-1' });
+    expect(bundle.aiJobs.enableAutopilot).toHaveBeenCalledWith(owner, { jobId: 'job-1' });
+    for (const action of ['pause_autopilot', 'enable_autopilot']) {
+      await expect(handle('onboarding_admin_ai', { action }, actor)).rejects.toThrow();
+      await expect(handle('onboarding_admin_ai', { action, jobId: 'job-1' }, verified())).rejects.toThrow();
     }
   });
   it('normalizes only matching room-file metadata for AI source verification', () => {
