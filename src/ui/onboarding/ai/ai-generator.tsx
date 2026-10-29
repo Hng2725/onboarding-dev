@@ -52,7 +52,7 @@ import {
 } from './ai-generator-reset';
 import { AiCoverageSkeleton, AiStepCoverage, type ModuleSourceCatalog } from './ai-step-coverage';
 import { outlineReadiness } from '../../../onboarding/ai/outline-coverage';
-import { AiModuleWorkspace } from './ai-module-workspace';
+import { AiStepGenerating } from './ai-step-generating';
 import {
   AiPublishBatchError,
   aiPublishTargetKey,
@@ -86,6 +86,26 @@ import type { FlagResolutionAction } from './flag-panel';
 class ModuleReviewPending extends Error {}
 
 const QUESTION_RECOVERY_NATIVE_TIMEOUT_MS = 90_000;
+
+/** Upper bound on pump passes in one generation run; a pass is only repeated after progress. */
+const MAX_GENERATION_PASSES = 12;
+
+export const OUTLINE_RECHECK_NOTICE = 'Lộ trình cần kiểm tra lại trước khi tạo tiếp.';
+
+/** Changes whenever a pump pass moved the job; an unchanged fingerprint means it stalled. */
+function generationFingerprint(job: AiJobRecord): string {
+  return JSON.stringify([
+    job.status,
+    job.outlineApprovedRevision,
+    job.calls.length,
+    (job.moduleRuns ?? []).map((run) => [run.lessonState, run.lessonVersion, run.questionState, run.questionVersion]),
+  ]);
+}
+
+/** The Vietnamese text of a job that ended in `failed`, from its recorded code and message. */
+function failedJobMessage(job: Pick<AiJobRecord, 'errorCode' | 'errorMessage'>): string {
+  return vietnameseErrorMessage(Object.assign(new Error(job.errorMessage ?? ''), job.errorCode ? { code: job.errorCode } : {}));
+}
 
 export const AI_GENERATOR_STEPS = ['Nguồn & loại', 'Kiểm tra độ phủ', 'AI tạo nội dung', 'Xem lại & xuất bản'] as const;
 
@@ -135,7 +155,7 @@ export function aiJobProgress(job: {
 }
 
 export function aiCallDisplayLabel(
-  call: { readonly callId: string },
+  call: { readonly callId: string; readonly moduleTarget?: 'lesson' | 'questions' },
   calls: readonly { readonly callId: string }[],
 ): string {
   const step = plannedStep(call.callId);
@@ -150,7 +170,11 @@ export function aiCallDisplayLabel(
   else if (/^supplement-/.test(step)) label = 'Đọc tài liệu bổ sung';
   else if (/-lessons$/.test(step)) label = 'Tạo bài học';
   else if (/-questions$/.test(step)) label = 'Tạo câu hỏi';
-  else label = step;
+  else if (/^module-\d+$/.test(step)) {
+    label = call.moduleTarget === 'lesson' ? 'Tạo bài học'
+      : call.moduleTarget === 'questions' ? 'Tạo câu hỏi'
+        : 'Tạo nội dung module';
+  } else label = step;
   const repair = /-r(\d+)$/.exec(call.callId);
   if (repair) return label + ' (tự sửa lần ' + repair[1] + '/' + String(AI_GENERATION_LIMITS.maxRepairAttempts) + ')';
   const retry = /-retry(\d+)$/.exec(call.callId);
@@ -789,8 +813,11 @@ export function AiGeneratorPage({
   /** `list_module_sources` of one job; null until it has loaded for the current job. */
   const [moduleSourceCatalog, setModuleSourceCatalog] = useState<{ readonly jobId: string; readonly sources: ModuleSourceCatalog } | null>(null);
   const [selectedTemplateKind, setSelectedTemplateKind] = useState<EmployeeType | null>(null);
-  const [selectedModuleId, setSelectedModuleId] = useState(() => roomId ? readAiResumeKey('onboarding:ai:module:' + roomId) ?? '' : '');
   const [notice, setNotice] = useState<InlineNoticeMessage | null>(null);
+  /** AI tạo nội dung: an unrecoverable failure (Vietnamese) and whether the pump stopped short. */
+  const [generationError, setGenerationError] = useState<string | null>(null);
+  const [stalled, setStalled] = useState(false);
+  const [pausing, setPausing] = useState(false);
   const [roomJobs, setRoomJobs] = useState<readonly AiJobRecord[]>([]);
   const [checkingCleanup, setCheckingCleanup] = useState(false);
   const [cancelling, setCancelling] = useState(false);
@@ -804,6 +831,12 @@ export function AiGeneratorPage({
   const cleanupAbortRef = useRef<AbortController | null>(null);
   /** Template jobs dropped by a kind change; the next analyse cancels the ones still running. */
   const supersededJobsRef = useRef<AiJobRecord[]>([]);
+  /** Bumped by each generation run and by a pause, so a superseded run stops without settling. */
+  const generationRunRef = useRef(0);
+  /** The job whose generation already resumed by itself on this mount. */
+  const autoPumpedJobRef = useRef<string | null>(null);
+  /** Jobs upgraded with `enable_autopilot` on this mount; the upgrade happens once. */
+  const autopilotEnabledRef = useRef<Set<string>>(new Set());
   const appRef = useRef(app);
   appRef.current = app;
   const { userId } = context;
@@ -985,6 +1018,20 @@ export function AiGeneratorPage({
           resumeJobIds,
           userId,
         });
+        // An older module job without the autopilot flag is upgraded once, so nothing waits for manual approval.
+        for (const run of restoredRuns) {
+          const job = run.job;
+          if (!job || job.pipelineVersion !== 'module_v2' || job.autoApprove === true || job.status !== 'running'
+            || !job.outline || autopilotEnabledRef.current.has(job.jobId)) continue;
+          autopilotEnabledRef.current.add(job.jobId);
+          try {
+            const upgraded = (await api.adminAi<{ job: AiJobRecord }>('enable_autopilot', { jobId: job.jobId })).job;
+            restoredRuns = restoredRuns.map((entry) => entry.job?.jobId === upgraded.jobId ? { ...entry, job: upgraded } : entry);
+          } catch (caught) {
+            if (active) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
+          }
+          if (!active) return;
+        }
         const restoredInventoryId = restoredRuns.find((run) => run.job?.inventoryJobId)?.job?.inventoryJobId;
         const restoredInventory = result.jobs.find((job) => job.kind === 'inventory' && job.jobId === restoredInventoryId);
         setInventoryJob(inventory ?? restoredInventory ?? null);
@@ -1096,8 +1143,12 @@ export function AiGeneratorPage({
     setOutlineFocusModuleId(null);
     setModuleSourceCatalog(null);
     setSelectedTemplateKind(null);
-    setSelectedModuleId('');
     setNotice(null);
+    generationRunRef.current += 1;
+    autoPumpedJobRef.current = null;
+    setGenerationError(null);
+    setStalled(false);
+    setPausing(false);
     setRoomJobs((current) => current.filter((job) => !sessionJobIds.has(job.jobId)));
     setCheckingCleanup(false);
     setCancelling(false);
@@ -1152,15 +1203,17 @@ export function AiGeneratorPage({
     }
   }
 
+  /** Puts a job the server returned on screen and in the room's job list. */
+  function recordJob(next: AiJobRecord) {
+    if (next.kind === 'inventory') setInventoryJob(next);
+    else setTemplateJob(next);
+    setRoomJobs((current) => current.some((candidate) => candidate.jobId === next.jobId)
+      ? current.map((candidate) => candidate.jobId === next.jobId ? next : candidate)
+      : [next, ...current]);
+  }
+
   async function pump(job: AiJobRecord, preferNative = false): Promise<AiJobRecord> {
     if (!roomId) throw new Error('Không xác định được room để chạy AI.');
-    const recordProgress = (next: AiJobRecord) => {
-      if (next.kind === 'inventory') setInventoryJob(next);
-      else setTemplateJob(next);
-      setRoomJobs((current) => current.some((candidate) => candidate.jobId === next.jobId)
-        ? current.map((candidate) => candidate.jobId === next.jobId ? next : candidate)
-        : [next, ...current]);
-    };
     return pumpWithQuestionRecovery({
       initialJob: job,
       initialPreferNative: preferNative,
@@ -1189,7 +1242,7 @@ export function AiGeneratorPage({
           jobId: current.jobId,
           workerId: 'onboarding-ai-' + crypto.randomUUID(),
           signal: controller.signal,
-          onProgress: recordProgress,
+          onProgress: recordJob,
           ...(boundedQuestionRecovery ? { maxPollMs: QUESTION_RECOVERY_NATIVE_TIMEOUT_MS } : {}),
         });
       },
@@ -1198,7 +1251,7 @@ export function AiGeneratorPage({
           jobId: job.jobId,
           ...args,
         });
-        recordProgress(result.job);
+        recordJob(result.job);
         return result;
       },
     });
@@ -1436,22 +1489,119 @@ export function AiGeneratorPage({
     finally { setOperation(null); }
   }
 
-  async function moduleAction(action: string, args: Record<string, unknown>, resume = false): Promise<boolean> {
+  async function moduleAction(action: string, args: Record<string, unknown>): Promise<boolean> {
     if (!templateJob) return false;
-    setOperation(resume ? 'analyze' : 'save'); setNotice(null);
+    setOperation('save'); setNotice(null);
     try {
-      let job = (await api.adminAi<{ job: AiJobRecord }>(action, { jobId: templateJob.jobId, ...args })).job;
+      const job = (await api.adminAi<{ job: AiJobRecord }>(action, { jobId: templateJob.jobId, ...args })).job;
       setTemplateJob(job);
-      if (resume) {
-        job = await pump(job); setTemplateJob(job);
-        await openCompletedModuleReview(job);
-      }
       return true;
     } catch (caught) {
       if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
       return false;
     }
     finally { setOperation(null); }
+  }
+
+  /**
+   * AI tạo nội dung: optionally prepares the job (retry), then pumps the autopilot until it is
+   * done, needs the outline checked again, or stops without progress. A pass is repeated only
+   * after progress, e.g. once question recovery handed the server a fallback to approve.
+   */
+  async function runGeneration(prepare?: () => Promise<AiJobRecord>): Promise<void> {
+    let latest = templateJob;
+    if (!latest) return;
+    const run = generationRunRef.current + 1;
+    generationRunRef.current = run;
+    setOperation('analyze');
+    setNotice(null);
+    setGenerationError(null);
+    setStalled(false);
+    try {
+      if (prepare) {
+        latest = await prepare();
+        recordJob(latest);
+      }
+      let seen = generationFingerprint(latest);
+      for (let pass = 0; pass < MAX_GENERATION_PASSES && generationRunRef.current === run; pass += 1) {
+        latest = await pump(latest);
+        if (latest.status !== 'running' || !outlineApprovedFor(latest)) break;
+        const next = generationFingerprint(latest);
+        if (next === seen) break;
+        seen = next;
+      }
+      // A pause or reset took over while the last call returned: it owns the screen now.
+      if (generationRunRef.current !== run) return;
+      recordJob(latest);
+      if (latest.status === 'completed') {
+        await openCompletedModuleReview(latest);
+      } else if (latest.status === 'running' && !outlineApprovedFor(latest)) {
+        // Autopilot paused itself (a source was lost or a module has none): back to coverage.
+        setOutlineFocusModuleId(null);
+        setEditingOutline(true);
+        setStep(1);
+        setNotice({ message: OUTLINE_RECHECK_NOTICE, tone: 'error' });
+      } else if (latest.status === 'running') {
+        setStalled(true);
+      }
+    } catch (caught) {
+      if (generationRunRef.current === run && !isAbortError(caught)) setGenerationError(generationErrorMessage(caught));
+    } finally {
+      setOperation((current) => current === 'analyze' ? null : current);
+    }
+  }
+
+  /** Inline Thử lại of a module autopilot could not finish. */
+  function retryStuckModule(moduleLocalId: string, target: 'lesson' | 'questions', expectedVersion: number) {
+    const current = templateJob;
+    if (!current) return;
+    void runGeneration(async () => (await api.adminAi<{ job: AiJobRecord }>('retry_module', {
+      jobId: current.jobId, moduleLocalId, target, expectedVersion,
+    })).job);
+  }
+
+  /** Banner Thử lại: a failed job is retried first; otherwise the pump simply resumes. */
+  function retryGeneration() {
+    const current = templateJob;
+    if (!current) return;
+    void runGeneration(current.status === 'failed'
+      ? async () => (await api.adminAi<{ job: AiJobRecord }>('retry_job', { jobId: current.jobId })).job
+      : undefined);
+  }
+
+  /** Asks the provider to stop each call the pause left possibly live, and records the outcome. */
+  async function confirmPausedAttempts(job: AiJobRecord) {
+    for (const call of job.calls.filter((item) => item.attemptRef && item.cleanupState === 'pending')) {
+      try {
+        const outcome = await confirmAttempt(call, undefined, 'cancel');
+        recordJob(await reportCleanup(api, job.jobId, call, outcome));
+      } catch {
+        // The background cleanup check retries it; resuming waits on the server until then.
+      }
+    }
+  }
+
+  /** Footer "Tạm dừng & sửa lộ trình": stop the pump, pause autopilot on the server, edit the outline. */
+  async function pauseAndEditOutline() {
+    const current = templateJob;
+    if (!current) return;
+    generationRunRef.current += 1;
+    abortRef.current?.abort();
+    setPausing(true);
+    setNotice(null);
+    setGenerationError(null);
+    setStalled(false);
+    try {
+      const job = (await api.adminAi<{ job: AiJobRecord }>('pause_autopilot', { jobId: current.jobId })).job;
+      recordJob(job);
+      backToOutline();
+      void confirmPausedAttempts(job);
+    } catch (caught) {
+      setNotice({ message: generationErrorMessage(caught), tone: 'error' });
+      setStalled(true);
+    } finally {
+      setPausing(false);
+    }
   }
 
   /**
@@ -1519,16 +1669,9 @@ export function AiGeneratorPage({
     setEditingOutline(false);
     setOutlineFocusModuleId(null);
     setStep(2);
-    setOperation('analyze');
-    try {
-      const job = await pump(approved);
-      setTemplateJob(job);
-      await openCompletedModuleReview(job);
-    } catch (caught) {
-      if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
-    } finally {
-      setOperation(null);
-    }
+    // This start already pumps; reopening the step must not start a second pump for the job.
+    autoPumpedJobRef.current = approved.jobId;
+    await runGeneration(async () => approved);
   }
 
   async function generateTemplate(inventory: AiJobRecord, kind: EmployeeType, existing: AiTemplateRun | undefined) {
@@ -1784,6 +1927,7 @@ export function AiGeneratorPage({
     || (inventoryJob?.status === 'running' && inventoryRecoveryAbortRef.current !== null)
     || Boolean(templateJob?.planPending)
     || (templateJob?.autoApprove === true && templateJob.status === 'running' && outlineApproved)
+    || pausing
     || publishing;
 
   function requestClose() {
@@ -1806,6 +1950,19 @@ export function AiGeneratorPage({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
+
+  // Reopen-resume: an approved, running module job continues by itself once AI tạo nội dung is open.
+  const autoResumeJobId = canGenerateWithAi && !restoring && !resetting && !pausing && operation === null && step === 2
+    && templateJob?.pipelineVersion === 'module_v2' && templateJob.status === 'running' && outlineApproved
+    ? templateJob.jobId
+    : null;
+  const runGenerationRef = useRef(runGeneration);
+  runGenerationRef.current = runGeneration;
+  useEffect(() => {
+    if (!autoResumeJobId || autoPumpedJobRef.current === autoResumeJobId) return;
+    autoPumpedJobRef.current = autoResumeJobId;
+    void runGenerationRef.current();
+  }, [autoResumeJobId]);
 
   const sourcesHint = !templateSelection
     ? 'Chọn loại template'
@@ -1859,6 +2016,14 @@ export function AiGeneratorPage({
     setStep(1);
   }
 
+  const generationReviewLoaded = Boolean(activeTemplateRun?.review);
+  const generationRunning = templateJob?.status === 'running' && outlineApproved;
+  /** A failed job always explains itself in the banner, also when it was restored that way. */
+  const generationBanner = templateJob?.status === 'failed' ? failedJobMessage(templateJob) : generationError;
+  /** Never silently stalled: a completed job whose review did not load can be pumped again. */
+  const generationStalled = stalled
+    || (templateJob?.status === 'completed' && !generationReviewLoaded && !busy && !restoring);
+
   let hint: string | null = null;
   let primary: { readonly label: string; readonly working?: boolean; readonly disabled: boolean; readonly onClick: () => void } | null = null;
   const analyzing = operation === 'analyze';
@@ -1892,9 +2057,11 @@ export function AiGeneratorPage({
       };
     }
   } else if (step === 2) {
-    primary = templateJob?.status === 'running' && !busy
-      ? { label: 'Tiếp tục xử lý', disabled: false, onClick: () => void resumeModuleJob() }
-      : { label: analyzing ? 'AI đang tạo nội dung…' : 'Xem lại template', working: analyzing, disabled: busy || templateJob?.status !== 'completed', onClick: () => void resumeModuleJob() };
+    primary = {
+      label: 'Xem lại template',
+      disabled: busy || pausing || templateJob?.status !== 'completed' || !generationReviewLoaded,
+      onClick: () => { setActiveReviewIndex(0); setStep(3); },
+    };
   } else if (templateRuns.length > 0) {
     if (publishReadiness.blockingCount > 0) hint = `Còn ${publishReadiness.blockingCount} cờ bắt buộc`;
     primary = {
@@ -2015,30 +2182,14 @@ export function AiGeneratorPage({
             </div>
           )}
           {canGenerateWithAi && step === 2 && templateJob?.pipelineVersion === 'module_v2' && (
-            <div className="ai-workspace ai-module-review-stage">
-              <section className="ai-workspace-card ai-workspace-progress-card">
-                <AiMilestoneProgress
-                  label="AI tạo nội dung"
-                  job={templateJob}
-                  milestones={templateMilestones(templateJob)}
-                />
-              </section>
-              <section className="ai-workspace-card ai-module-stage">
-                <div className="ai-module-stage-heading">
-                  <button type="button" onClick={backToOutline}>Chỉnh sửa lộ trình</button>
-                </div>
-                <AiModuleWorkspace
-                  runs={templateJob.moduleRuns ?? []}
-                  calls={templateJob.calls}
-                  history={templateJob.stageOutputs.__moduleAudit}
-                  selectedId={selectedModuleId}
-                  busy={busy}
-                  onSelect={(id) => { setSelectedModuleId(id); if (roomId) writeAiResumeKey('onboarding:ai:module:' + roomId, id); }}
-                  onAction={(action, args) => moduleAction(action, args, action === 'approve_module_lesson' || action === 'approve_module_questions' || action === 'retry_module')}
-                  onSources={() => { setOutlineFocusModuleId(selectedModuleId || templateJob.moduleRuns?.[0]?.outline.moduleLocalId || null); setEditingOutline(true); setStep(1); }}
-                />
-              </section>
-            </div>
+            <AiStepGenerating
+              job={templateJob}
+              stalled={generationStalled}
+              error={generationBanner}
+              busy={busy || pausing || restoring || resetting}
+              onRetryModule={retryStuckModule}
+              onRetry={retryGeneration}
+            />
           )}
           {canGenerateWithAi && step === 3 && (
             <div className="ai-step-review">
@@ -2135,7 +2286,16 @@ export function AiGeneratorPage({
                   Xóa phiên
                 </button>
               )}
-              {!initialTemplate && (step === 1 || step === 2) && (
+              {!initialTemplate && step === 2 && generationRunning && (
+                // Works while AI runs: it stops the pump; a pause, not a cancel.
+                <button
+                  className="button button-ghost"
+                  type="button"
+                  disabled={pausing || resetting || restoring}
+                  onClick={() => void pauseAndEditOutline()}
+                >Tạm dừng & sửa lộ trình</button>
+              )}
+              {!initialTemplate && (step === 1 || (step === 2 && !generationRunning)) && (
                 <button
                   className="button button-ghost"
                   type="button"

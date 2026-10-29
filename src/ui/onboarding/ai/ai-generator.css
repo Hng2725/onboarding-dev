@@ -1,6 +1,6 @@
 /*
- * AI template generator: modal shell (header stepper, body, footer), step 1 "Nguồn & loại" and
- * step 2 "Kiểm tra độ phủ".
+ * AI template generator: modal shell (header stepper, body, footer), step 1 "Nguồn & loại",
+ * step 2 "Kiểm tra độ phủ" and step 3 "AI tạo nội dung".
  * Colours come from the --on-* tokens so light and dark themes both work. Colour marks state only:
  * success = done, warning = needs action, primary = running/selected, danger = error.
  */
@@ -105,6 +105,8 @@
 .ai-chip.ok { color: var(--on-success); background: color-mix(in srgb, var(--on-success) 14%, transparent); }
 .ai-chip.warn { color: var(--on-warning); background: color-mix(in srgb, var(--on-warning) 14%, transparent); }
 .ai-chip.run { color: var(--on-primary); background: var(--on-primary-soft); }
+.ai-chip.wait { color: var(--on-text-soft); background: color-mix(in srgb, var(--on-text) 7%, transparent); }
+.ai-chip.error { color: var(--on-danger); background: color-mix(in srgb, var(--on-danger) 12%, transparent); }
 
 .ai-coverage-gap { display: flex; flex-wrap: wrap; grid-column: 2 / -1; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 12px; border-radius: 8px; color: var(--on-text-soft); background: color-mix(in srgb, var(--on-warning) 10%, transparent); font-size: 13px; }
 .ai-coverage-gap p { flex: 1 1 240px; margin: 0; }
@@ -135,6 +137,26 @@
 .ai-skeleton-bar.dot { width: 16px; }
 .ai-skeleton-bar.chip { width: 84px; height: 20px; border-radius: 999px; }
 .ai-coverage-skeleton .ai-coverage-stat { justify-items: center; width: 100%; }
+
+/* Step 3: AI tạo nội dung */
+.ai-generating { display: grid; gap: 20px; min-width: 0; }
+.ai-generating-hero { display: flex; align-items: center; gap: 20px; }
+.ai-generating-hero h3 { margin: 0 0 4px; font-size: 17px; }
+.ai-generating-hero p { margin: 0; color: var(--on-text-soft); font-size: 13px; }
+.ai-generating-ring { display: grid; flex: none; place-items: center; width: 72px; height: 72px; border-radius: 50%; background: conic-gradient(var(--on-primary) var(--ai-progress, 0%), color-mix(in srgb, var(--on-text) 10%, transparent) 0); }
+.ai-generating-ring span { display: grid; place-items: center; width: 58px; height: 58px; border-radius: 50%; background: var(--on-surface); font-size: 15px; font-weight: 700; }
+.ai-generating-modules { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.ai-generating-module { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto auto; align-items: center; gap: 8px 14px; padding: 14px 16px; border: 1px solid var(--on-border); border-radius: var(--on-radius-md); }
+.ai-generating-module.warn { border-color: color-mix(in srgb, var(--on-warning) 45%, var(--on-border)); }
+.ai-generating-module.error { border-color: color-mix(in srgb, var(--on-danger) 45%, var(--on-border)); }
+.ai-generating-title { min-width: 0; overflow-wrap: anywhere; }
+.ai-generating-attention { display: flex; flex-wrap: wrap; grid-column: 2 / -1; align-items: center; justify-content: space-between; gap: 8px 12px; color: var(--on-text-soft); font-size: 13px; }
+.ai-generating-attention p { flex: 1 1 200px; margin: 0; }
+.ai-generating-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 14px; border-radius: 10px; font-size: 13px; }
+.ai-generating-banner span { flex: 1 1 240px; }
+.ai-generating-banner.error { color: var(--on-danger); background: color-mix(in srgb, var(--on-danger) 10%, transparent); }
+.ai-generating-banner.warn { color: var(--on-warning); background: color-mix(in srgb, var(--on-warning) 10%, transparent); }
+
 @keyframes ai-coverage-pulse { 50% { opacity: .45; } }
 @media (prefers-reduced-motion: reduce) {
   .ai-coverage-pulse, .ai-skeleton-bar { animation: none; }
@@ -151,6 +173,8 @@
   .ai-coverage-module { grid-template-columns: 28px minmax(0, 1fr) auto; }
   .ai-coverage-actions { grid-column: 2 / -1; justify-content: flex-start; }
   .ai-coverage-fields { grid-template-columns: 1fr; }
+  .ai-generating-module { grid-template-columns: 28px minmax(0, 1fr) auto; }
+  .ai-generating-module .ai-chip:last-of-type { grid-column: 3; }
   .ai-generator-footer { flex-wrap: wrap; padding: 12px 16px; padding-right: 88px; }
 }
 

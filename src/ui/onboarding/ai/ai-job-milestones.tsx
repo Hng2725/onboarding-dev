@@ -124,18 +124,16 @@ export function templateMilestones(
   job: AiJobRecord | null | undefined,
 ): readonly AiMilestone[] {
   if (job?.pipelineVersion === 'module_v2') {
-    const runs = (job.moduleRuns ?? []).filter((run) => !run.outline.tombstoned);
-    const approved = job.outline?.revision === job.outlineApprovedRevision;
-    const documents = runs.filter((run) => Boolean(run.lessonDraft)).length;
-    const approvedQuestions = runs.filter((run) => run.questionState === 'approved').length;
-    const lessonDone = runs.length > 0 && runs.every((run) => run.lessonState === 'approved');
-    const questionDone = lessonDone && runs.every((run) => run.questionState === 'approved');
-    return [
-      { id: 'outline', label: 'Khung lộ trình', status: approved ? 'completed' : 'active' },
-      { id: 'lessons', label: 'Viết và duyệt tài liệu học', status: lessonDone ? 'completed' : approved ? 'active' : 'pending', detail: documents + '/' + runs.length + ' module có tài liệu' },
-      { id: 'questions', label: 'Tạo và duyệt câu hỏi', status: questionDone ? 'completed' : lessonDone ? 'active' : 'pending', detail: approvedQuestions + '/' + runs.length + ' module đã duyệt câu hỏi' },
-      { id: 'ready', label: 'Sẵn sàng xuất bản', status: job.status === 'completed' ? 'completed' : questionDone ? 'active' : 'pending' },
-    ];
+    // Module content has its own screen (AI tạo nội dung); this card only tracks the AI plan.
+    const isPlan = (root: string) => /^plan-/u.test(root);
+    const current = currentCall(job);
+    const planCall = callStatus(job, current, isPlan);
+    return [{
+      id: 'outline',
+      label: 'Lập lộ trình',
+      status: job.outline ? 'completed' : planCall ?? (job.status === 'failed' ? 'failed' : 'active'),
+      ...(planCall ? { detail: callDetail(job, current, isPlan) } : {}),
+    }];
   }
   const completed = job?.status === 'completed';
   if (completed) {

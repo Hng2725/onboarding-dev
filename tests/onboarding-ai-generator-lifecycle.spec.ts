@@ -285,7 +285,7 @@ describe('AI generator lifecycle', () => {
 
     await act(async () => { view.root.findAllByType('button').find((button) => button.children.join('') === 'Chỉnh sửa module')!.props.onClick(); });
     expect(activeStepLabel(view)).toBe('AI tạo nội dung');
-    expect(view.root.findByProps({ 'aria-label': 'Danh sách module' })).toBeDefined();
+    expect(view.root.findByProps({ 'aria-label': 'AI tạo nội dung' })).toBeDefined();
     expect(JSON.stringify(view.toJSON())).not.toContain('Kiểm tra lộ trình đề xuất');
     view.unmount();
   });
@@ -468,23 +468,25 @@ it('reopens a completed module job without routing to legacy review', async () =
   view.unmount(); vi.unstubAllGlobals();
 });
 
-it('restores an approved running module job directly in AI tạo nội dung', async () => {
+it('restores an approved running module job directly in AI tạo nội dung, one progress row per module', async () => {
   const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
   vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
-  const modules = ['First', 'Second'].map((title, order) => ({ moduleLocalId: `m${order}`, frameKey: order ? 't1-core' : 't1-overview', order, title, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [] }));
-  const job = { ...failedTemplateJob, templateKind: 'normal' as const, roleProfile: undefined, status: 'running' as const, pipelineVersion: 'module_v2' as const, outline: { revision: 1, modules, flags: [], taskCoverage: [] }, outlineApprovedRevision: 1, moduleRuns: modules.map((outline) => ({ outline, outlineRevision: 1, lessonState: 'manual_required' as const, lessonVersion: 0, questionState: 'blocked' as const, questionVersion: 0 })) };
-  const api = { adminAi: vi.fn(async (action: string) => { if (action === 'list_sources') return { sources: [] }; if (action === 'list_jobs') return { jobs: [inventoryJob, job] }; throw new Error('Unexpected action: ' + action); }) };
-  const page = () => createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined });
+  const modules = ['First', 'Second'].map((title, order) => ({ moduleLocalId: `m${order}`, frameKey: order ? 't1-core' : 't1-overview', order, title, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] }));
+  const job = { ...failedTemplateJob, templateKind: 'normal' as const, roleProfile: undefined, status: 'running' as const, pipelineVersion: 'module_v2' as const, outline: { revision: 1, modules, flags: [], taskCoverage: [] }, outlineApprovedRevision: 1, moduleRuns: modules.map((outline) => ({ outline, outlineRevision: 1, lessonState: 'queued' as const, lessonVersion: 0, questionState: 'blocked' as const, questionVersion: 0 })) };
+  const enabled = { ...job, autoApprove: true };
+  const api = { adminAi: vi.fn(async (action: string) => {
+    if (action === 'list_sources') return { sources: [] };
+    if (action === 'list_jobs') return { jobs: [inventoryJob, job] };
+    if (action === 'enable_autopilot') return { job: enabled };
+    if (action === 'next_step') return { kind: 'awaiting_admin', job: enabled };
+    throw new Error('Unexpected action: ' + action);
+  }) };
   let view!: TestRenderer.ReactTestRenderer;
-  await act(async () => { view = TestRenderer.create(page()); });
+  await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
   expect(activeStepLabel(view)).toBe('AI tạo nội dung');
-  const second = view.root.findByProps({ 'aria-label': 'Danh sách module' }).findAllByType('button')[1];
-  act(() => second.props.onClick());
-  expect(storage.get('onboarding:ai:module:room-1')).toBe('m1');
-  view.unmount();
-  await act(async () => { view = TestRenderer.create(page()); });
-  expect(view.root.findByType('article').findByType('h3').children.join('')).toBe('Second');
-  expect(api.adminAi.mock.calls.every(([action]) => action === 'list_sources' || action === 'list_jobs')).toBe(true);
+  const titles = view.root.findAll((node) => node.props.className === 'ai-generating-title').map((node) => node.children.join(''));
+  expect(titles).toEqual(['First', 'Second']);
+  expect(view.root.findAllByType('button').filter((button) => button.children.join('').includes('Duyệt'))).toHaveLength(0);
   view.unmount(); vi.unstubAllGlobals();
 });
 
@@ -537,40 +539,41 @@ it('stays on Kiểm tra độ phủ while approval is pending and after it fails
   view.unmount(); vi.unstubAllGlobals();
 });
 
-it('opens the selected outline source panel from a source-less review module', async () => {
+it('returns a source-less module to Kiểm tra độ phủ when autopilot pauses for it', async () => {
   const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
   vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
   const module = { moduleLocalId: 'm', frameKey: 't1-core', order: 0, title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [] };
-  const job = { ...failedTemplateJob, templateKind: 'normal' as const, roleProfile: undefined, status: 'running' as const, pipelineVersion: 'module_v2' as const, outline: { revision: 1, modules: [module], flags: [], taskCoverage: [] }, outlineApprovedRevision: 1, moduleRuns: [{ outline: module, outlineRevision: 1, lessonState: 'manual_required' as const, lessonVersion: 0, questionState: 'blocked' as const, questionVersion: 0 }] };
+  const job = { ...failedTemplateJob, templateKind: 'normal' as const, roleProfile: undefined, status: 'running' as const, pipelineVersion: 'module_v2' as const, autoApprove: true, outline: { revision: 1, modules: [module], flags: [], taskCoverage: [] }, outlineApprovedRevision: 1, moduleRuns: [{ outline: module, outlineRevision: 1, lessonState: 'manual_required' as const, lessonVersion: 0, questionState: 'blocked' as const, questionVersion: 0 }] };
+  // The server never drafts from nothing: it resets the approval so the Admin supplements the module.
+  const paused = { ...job, outlineApprovedRevision: 0 };
   const api = { adminAi: vi.fn(async (action: string) => {
     if (action === 'list_sources') return { sources: [] };
     if (action === 'list_jobs') return { jobs: [inventoryJob, job] };
-    if (action === 'list_module_sources') return { sources: [{ sourceId: 'policy', fileName: 'Policy.pdf', sections: [{ id: 'policy#1', headingPath: ['Quy định'] }] }] };
+    if (action === 'next_step') return { kind: 'awaiting_admin', job: paused };
+    if (action === 'list_module_sources') return { sources: [{ sourceId: 'policy', fileName: 'Policy.pdf', sections: [{ id: 'policy#1', headingPath: ['Quy định'], usable: true }] }] };
     throw new Error('Unexpected action: ' + action);
   }) };
   let view!: TestRenderer.ReactTestRenderer;
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
 
-  await act(async () => { view.root.findAllByType('button').find((item) => item.children.join('') === 'Bổ sung tài liệu')!.props.onClick(); await Promise.resolve(); });
   expect(activeStepLabel(view)).toBe('Kiểm tra độ phủ');
-  expect(view.root.findByProps({ 'aria-label': 'Chọn tài liệu bổ sung' })).toBeDefined();
+  expect(JSON.stringify(view.toJSON())).toContain('Lộ trình cần kiểm tra lại trước khi tạo tiếp.');
   view.unmount(); vi.unstubAllGlobals();
 });
 
-it('resumes an interrupted module job only on explicit action', async () => {
+it('resumes an interrupted autopilot module job by itself on reopen, exactly once', async () => {
   const storage = new Map([['onboarding:ai:template:room-1:normal', 'template-1']]);
   vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
   const module = { moduleLocalId: 'm', frameKey: 't1-core', order: 0, title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] };
-  const job = { ...failedTemplateJob, templateKind: 'normal' as const, roleProfile: undefined, status: 'running' as const, pipelineVersion: 'module_v2' as const, outline: { revision: 1, modules: [module], flags: [], taskCoverage: [] }, outlineApprovedRevision: 1, moduleRuns: [{ outline: module, outlineRevision: 1, lessonState: 'drafting' as const, lessonVersion: 1, questionState: 'blocked' as const, questionVersion: 0 }], calls: [] };
+  const job = { ...failedTemplateJob, templateKind: 'normal' as const, roleProfile: undefined, status: 'running' as const, pipelineVersion: 'module_v2' as const, autoApprove: true, outline: { revision: 1, modules: [module], flags: [], taskCoverage: [] }, outlineApprovedRevision: 1, moduleRuns: [{ outline: module, outlineRevision: 1, lessonState: 'drafting' as const, lessonVersion: 1, questionState: 'blocked' as const, questionVersion: 0 }], calls: [] };
   const api = { adminAi: vi.fn(async (action: string) => { if (action === 'list_sources') return { sources: [] }; if (action === 'list_jobs') return { jobs: [inventoryJob, job] }; if (action === 'next_step') return { kind: 'awaiting_admin', job }; throw new Error('Unexpected action: ' + action); }) };
   let view!: TestRenderer.ReactTestRenderer;
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-  expect(api.adminAi.mock.calls.some(([action]) => action === 'next_step')).toBe(false);
-  const button = view.root.findAllByType('button').find((item) => item.children.join('').includes('Tiếp tục xử lý'));
-  expect(button).toBeDefined();
-  await act(async () => { button!.props.onClick(); });
   expect(api.adminAi).toHaveBeenCalledWith('next_step', expect.objectContaining({ jobId: 'template-1' }));
-  expect(api.adminAi.mock.calls.some(([action]) => action === 'start_job' || action === 'cancel_job' || action === 'retry_module')).toBe(false);
+  // The pump stalled without progress: it is not restarted in a loop.
+  expect(api.adminAi.mock.calls.filter(([action]) => action === 'next_step')).toHaveLength(1);
+  expect(api.adminAi.mock.calls.some(([action]) => action === 'start_job' || action === 'cancel_job' || action === 'retry_module' || action === 'enable_autopilot')).toBe(false);
+  expect(view.root.findAllByType('button').some((item) => item.children.join('').includes('Tiếp tục xử lý'))).toBe(false);
   view.unmount(); vi.unstubAllGlobals();
 });
 
@@ -609,16 +612,16 @@ it('resumes a later module with Sandbox after an earlier module used Native', as
   const api = { adminAi: vi.fn(async (action: string) => {
     if (action === 'list_sources') return { sources: [] };
     if (action === 'list_jobs') return { jobs: [inventoryJob, job] };
+    if (action === 'enable_autopilot') return { job: { ...job, autoApprove: true } };
     if (action === 'next_step') return { kind: 'ai_call', callId: 'm2-questions', operationId: 'm2-questions', prompt: 'Create questions' };
     if (action === 'record_dispatch') throw new Error('Stop after provider selection');
     if (action === 'report_ai_failure') throw new Error('Stop after provider selection');
     throw new Error('Unexpected action: ' + action);
   }) };
   let view!: TestRenderer.ReactTestRenderer;
+  // Reopening resumes the approved job by itself; no click is needed.
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-
-  const resume = view.root.findAllByType('button').find((item) => item.children.join('').includes('Tiếp tục xử lý'))!;
-  await act(async () => { resume.props.onClick(); await Promise.resolve(); });
+  await act(async () => { await Promise.resolve(); });
 
   expect(host.apps[0].rest).toHaveBeenCalledWith(expect.objectContaining({ path: 'agents.sandbox.generate-async' }));
   expect(host.apps[0].uploadFile).not.toHaveBeenCalled();
@@ -635,20 +638,25 @@ it('automatically recovers a failed Sandbox question through Native and grounded
   const nativeQueued = { ...sandboxFailed, moduleRuns: [{ ...baseRun, questionState: 'queued' as const, questionVersion: 2 }] };
   const nativeFailed = { ...nativeQueued, moduleRuns: [{ ...baseRun, questionState: 'failed' as const, questionVersion: 2 }], calls: [...sandboxFailed.calls, { callId: 'q-native', stage: 'B' as const, operationId: 'q-native', status: 'failed' as const, provider: 'native_chat' as const, attemptRef: 'native-chat:s:m', moduleLocalId: 'm', moduleTarget: 'questions' as const, moduleVersion: 2 }] };
   const fallbackReady = { ...nativeFailed, moduleRuns: [{ ...baseRun, questionState: 'review_ready' as const, questionVersion: 3, questionLessonVersion: 1, questionProvenance: 'fallback' as const, questionDraft: [] }] };
+  // The next pass lets autopilot approve the fallback questions.
+  const fallbackApproved = { ...fallbackReady, moduleRuns: [{ ...fallbackReady.moduleRuns[0], questionState: 'approved' as const, approvedQuestionVersion: 3 }] };
   let nextStep = 0;
   const api = { adminAi: vi.fn(async (action: string) => {
     if (action === 'list_sources') return { sources: [] };
     if (action === 'list_jobs') return { jobs: [inventoryJob, sandboxFailed] };
-    if (action === 'next_step') return { kind: 'awaiting_admin', job: nextStep++ === 0 ? sandboxFailed : nativeFailed };
+    if (action === 'enable_autopilot') return { job: { ...sandboxFailed, autoApprove: true } };
+    if (action === 'next_step') {
+      const step = nextStep++;
+      return { kind: 'awaiting_admin', job: step === 0 ? sandboxFailed : step === 1 ? nativeFailed : fallbackApproved };
+    }
     if (action === 'retry_module') return { job: nativeQueued };
     if (action === 'use_question_fallback') return { job: fallbackReady };
     throw new Error('Unexpected action: ' + action);
   }) };
   let view!: TestRenderer.ReactTestRenderer;
+  // Reopening resumes the approved job by itself; no click is needed.
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-
-  const resume = view.root.findAllByType('button').find((item) => item.children.join('').includes('Tiếp tục xử lý'))!;
-  await act(async () => { resume.props.onClick(); await Promise.resolve(); });
+  await act(async () => { await Promise.resolve(); });
 
   expect(api.adminAi.mock.calls.map(([action]) => action)).toEqual(expect.arrayContaining(['retry_module', 'use_question_fallback']));
   expect(api.adminAi.mock.calls.filter(([action]) => action === 'retry_module')).toHaveLength(1);

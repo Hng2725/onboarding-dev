@@ -863,19 +863,18 @@ function milestoneStatuses(milestones: ReturnType<typeof templateMilestones>): r
 }
 
 describe('AI job milestones', () => {
-  it('keeps question generation pending until every lesson is approved', () => {
-    const job = approvedModuleJob();
-    const runs = job.moduleRuns!.map((run, index) => index === 0 ? { ...run, lessonState: 'review_ready' as const, approvedLessonVersion: undefined } : run);
-    const milestones = templateMilestones({ ...job, status: 'running', moduleRuns: runs });
-    expect(milestones.find((item) => item.id === 'questions')?.status).toBe('pending');
-  });
-  it('uses four guided milestones with module counts for module jobs', () => {
+  it('tracks only the AI plan for module jobs; module content has its own step', () => {
     const job = approvedModuleJob();
     const milestones = templateMilestones({ ...job, status: 'running' });
-
-    expect(milestones.map(({ id }) => id)).toEqual(['outline', 'lessons', 'questions', 'ready']);
-    expect(milestones.find((item) => item.id === 'lessons')?.detail).toBe('4/4 module có tài liệu');
-    expect(milestones.find((item) => item.id === 'questions')?.detail).toBe('4/4 module đã duyệt câu hỏi');
+    expect(milestones.map(({ id, status }) => ({ id, status }))).toEqual([{ id: 'outline', status: 'completed' }]);
+    expect(JSON.stringify(milestones)).not.toMatch(/duyệt/i);
+  });
+  it('shows the running plan call in Vietnamese and a failed plan as failed', () => {
+    const planning = { ...approvedModuleJob(), status: 'running' as const, outline: undefined, moduleRuns: undefined,
+      calls: [milestoneCall('plan-1', 'dispatched')] };
+    expect(templateMilestones(planning)).toEqual([{ id: 'outline', label: 'Lập lộ trình', status: 'active', detail: 'Lập lộ trình' }]);
+    const failed = { ...planning, status: 'failed' as const, calls: [milestoneCall('plan-1', 'failed')] };
+    expect(templateMilestones(failed)[0]).toMatchObject({ status: 'failed' });
   });
   it('maps inventory preparation, batches, repair, failure, and completion to stable milestones', () => {
     expect(inventoryMilestones(null, 2).map(({ id, status }) => ({ id, status }))).toEqual([
