@@ -1479,10 +1479,25 @@ export function createAiJobService(
     if (row.outlineApprovedRevision !== row.outline!.revision) return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
     const completed = row.calls.find((call) => call.status === 'completed' && rawOutput(row.stageOutputs, call.callId) !== undefined && row.stageOutputs['processed:' + call.callId] !== true);
     if (completed) row = await processCompleted(actor, row, completed);
+    // A pending, unclaimed question may have been queued while the room was
+    // busy. Preserve it while approvals are renewed; never disturb a claim or
+    // recorded attempt whose dispatch may already be live.
+    const activeRuns = row.moduleRuns!.filter((run) => !run.outline.tombstoned);
+    const queuedQuestion = row.calls.find((item) => item.status === 'pending' && item.moduleTarget === 'questions' && !item.attemptRef && !item.dispatchClaimedAt);
+    const lessonsApproved = activeRuns.every(lessonApproved);
+    const lessonWorkRemains = activeRuns.some((run) => ['queued', 'stale'].includes(run.lessonState));
+    const otherActiveCall = row.calls.some((item) => item.callId !== queuedQuestion?.callId && (item.status === 'pending' || item.status === 'dispatched'));
+    const deferredKey = queuedQuestion ? 'deferred-question:' + queuedQuestion.callId : '';
+    if (queuedQuestion && !lessonsApproved && !otherActiveCall) {
+      if (!lessonWorkRemains || row.stageOutputs[deferredKey] !== true) {
+        if (lessonWorkRemains) row = await updateJob(actor, row, { stageOutputs: { ...row.stageOutputs, [deferredKey]: true } });
+        return { kind: 'awaiting_admin', job: jobFrom(row, actor.roomId) };
+      }
+    }
     const waiting = await providerWaitStep(actor, row);
     if (waiting) return waiting;
     if (row.pumpLeaseUntil && Date.parse(row.pumpLeaseUntil) >= Date.parse(now()) && row.pumpedBy !== workerId) return { kind: 'wait', job: jobFrom(row, actor.roomId) };
-    let call = row.calls.find((item) => item.status === 'pending' || item.status === 'dispatched');
+    let call = row.calls.find((item) => (item.status === 'pending' || item.status === 'dispatched') && !(queuedQuestion && !lessonsApproved && item.callId === queuedQuestion.callId));
     if (!call) {
       const active = row.moduleRuns!.filter((item) => !item.outline.tombstoned).sort((a, b) => a.outline.order - b.outline.order);
       const lessonWork = active.filter((run) => ['queued', 'stale'].includes(run.lessonState));
@@ -1500,7 +1515,9 @@ export function createAiJobService(
         const callId = 'module-' + String(row.calls.length + 1);
         call = { callId, stage: row.templateKind === 'advanced' ? 'C' : 'B', status: 'pending', operationId: row.jobId + ':' + callId, moduleLocalId: run.outline.moduleLocalId, moduleTarget: target, moduleVersion: target === 'lesson' ? run.lessonVersion : run.questionVersion, lessonVersion: run.lessonVersion, outlineRevision: row.outline!.revision };
         const next: AiModuleDraftRun = target === 'lesson' ? { ...run, lessonState: 'drafting', lessonAttempts: (run.lessonAttempts ?? 0) + 1 } : { ...run, questionState: 'drafting', questionAttempts: (run.questionAttempts ?? 0) + 1 };
-        row = await updateJob(actor, row, { calls: [...row.calls, call], moduleRuns: replaceRun(row, next) });
+        const queuedIndex = queuedQuestion && !lessonsApproved ? row.calls.findIndex((item) => item.callId === queuedQuestion.callId) : -1;
+        const calls = queuedIndex < 0 ? [...row.calls, call] : [...row.calls.slice(0, queuedIndex), call, ...row.calls.slice(queuedIndex)];
+        row = await updateJob(actor, row, { calls, moduleRuns: replaceRun(row, next) });
         break;
       }
     }

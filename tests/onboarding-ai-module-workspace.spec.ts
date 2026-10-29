@@ -95,3 +95,27 @@ it('exposes versioned fallback and regeneration choices for approved content', (
     expect(onAction).toHaveBeenCalledWith(action, args);
   }
 });
+
+it.each(['queued', 'stale'] as const)('offers versioned source fallback for %s lessons', (state) => {
+  const run = { ...approvedModuleJob().moduleRuns![0], lessonState: state, questionState: 'stale' as const };
+  const onAction = vi.fn();
+  const view = TestRenderer.create(createElement(AiModuleWorkspace, { runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false, onSelect: () => {}, onAction, onSources: () => {} }));
+  const fallback = view.root.findAllByType('button').find((button) => button.children.join('') === 'Dùng bản từ nguồn')!;
+  expect(fallback.props.disabled).toBe(false);
+  act(() => fallback.props.onClick());
+  expect(onAction).toHaveBeenCalledWith('use_source_fallback', { moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion });
+});
+
+it.each(['drafting', 'validating'] as const)('does not offer fallback during %s', (state) => {
+  const run = { ...approvedModuleJob().moduleRuns![0], lessonState: state };
+  const view = TestRenderer.create(createElement(AiModuleWorkspace, { runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false, onSelect: () => {}, onAction: () => {}, onSources: () => {} }));
+  expect(view.root.findAllByType('button').some((button) => button.children.join('') === 'Dùng bản từ nguồn')).toBe(false);
+});
+
+it('disables fallback while busy or questions are drafting', () => {
+  for (const busy of [false, true]) {
+    const run = { ...approvedModuleJob().moduleRuns![0], lessonState: 'queued' as const, questionState: busy ? 'stale' as const : 'drafting' as const };
+    const view = TestRenderer.create(createElement(AiModuleWorkspace, { runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy, onSelect: () => {}, onAction: () => {}, onSources: () => {} }));
+    expect(view.root.findAllByType('button').find((button) => button.children.join('') === 'Dùng bản từ nguồn')!.props.disabled).toBe(true);
+  }
+});

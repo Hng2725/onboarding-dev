@@ -57,6 +57,111 @@ async function approveOtherLessons(service: ReturnType<typeof createAiJobService
 }
 
 describe('room AI serialization', () => {
+  it('adopts a recorded question attempt after another lesson is edited', async () => {
+    const { service, templateJob } = await setup();
+    const job = await templateJob();
+    const first = job.moduleRuns![0];
+    let current = await service.updateModuleLesson(admin, { jobId: job.jobId, moduleLocalId: first.outline.moduleLocalId, expectedVersion: first.lessonVersion, module: { ...generatedTemplate.modules[0], localId: first.outline.moduleLocalId, frameKey: first.outline.frameKey, featureIds: first.outline.featureIds, questions: [] } });
+    await service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId: first.outline.moduleLocalId, expectedVersion: current.moduleRuns![0].lessonVersion });
+    await approveOtherLessons(service, job.jobId);
+    const question = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    if (question.kind !== 'ai_call') throw new Error('Expected question');
+    await service.recordDispatch(admin, { jobId: job.jobId, workerId: 'tab-a', callId: question.callId, attemptRef: 'attempt-question', provider: 'sandbox' });
+    current = await service.getJob(admin, job.jobId);
+    const other = current.moduleRuns![1];
+    await service.updateModuleLesson(admin, { jobId: job.jobId, moduleLocalId: other.outline.moduleLocalId, expectedVersion: other.lessonVersion, module: { ...other.lessonDraft!, title: 'Edited during attempt' } });
+    await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'ai_call', callId: question.callId, attemptRef: 'attempt-question' });
+  });
+  it('does not grant a question if a lesson changes while its reservation is being written', async () => {
+    const { service, other, templateJob, inventoryJob, store } = await setup();
+    const job = await templateJob();
+    const first = job.moduleRuns![0];
+    let current = await service.updateModuleLesson(admin, { jobId: job.jobId, moduleLocalId: first.outline.moduleLocalId, expectedVersion: first.lessonVersion, module: { ...generatedTemplate.modules[0], localId: first.outline.moduleLocalId, frameKey: first.outline.frameKey, featureIds: first.outline.featureIds, questions: [] } });
+    await service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId: first.outline.moduleLocalId, expectedVersion: current.moduleRuns![0].lessonVersion });
+    await approveOtherLessons(service, job.jobId);
+    const blocker = await inventoryJob('blocker');
+    const blocked = await service.nextStep(admin, { jobId: blocker.jobId, workerId: 'blocker' });
+    if (blocked.kind !== 'ai_call') throw new Error('Expected blocker');
+    expect((await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).kind).toBe('wait');
+    await service.submitAiOutput(admin, { jobId: blocker.jobId, workerId: 'blocker', callId: blocked.callId, text: JSON.stringify(inventory) });
+    let entered!: () => void;
+    let resume!: () => void;
+    const suspended = new Promise<void>((resolve) => { entered = resolve; });
+    const resumed = new Promise<void>((resolve) => { resume = resolve; });
+    const update = store.update.bind(store);
+    vi.spyOn(store, 'update').mockImplementation(async (room, collection, id, data, options) => {
+      const result = await update(room, collection, id, data, options);
+      if (collection === 'onboarding_ai_room_leases' && data.jobId === job.jobId && data.dispatchReserved === true) { entered(); await resumed; }
+      return result;
+    });
+    const dispatch = service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    await suspended;
+    current = await other.getJob(admin, job.jobId);
+    const changed = current.moduleRuns![1];
+    await other.updateModuleLesson(admin, { jobId: job.jobId, moduleLocalId: changed.outline.moduleLocalId, expectedVersion: changed.lessonVersion, module: { ...changed.lessonDraft!, title: 'Concurrent revision' } });
+    resume();
+    expect((await dispatch).kind).toBe('wait');
+    expect((await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).kind).toBe('awaiting_admin');
+    const next = await inventoryJob('later');
+    expect((await other.nextStep(admin, { jobId: next.jobId, workerId: 'other' })).kind).toBe('ai_call');
+  });
+  it('resumes lesson regeneration while retaining a previously queued question', async () => {
+    const { service, inventoryJob, templateJob } = await setup();
+    const job = await templateJob();
+    const first = job.moduleRuns![0];
+    let current = await service.updateModuleLesson(admin, { jobId: job.jobId, moduleLocalId: first.outline.moduleLocalId, expectedVersion: first.lessonVersion, module: { ...generatedTemplate.modules[0], localId: first.outline.moduleLocalId, frameKey: first.outline.frameKey, featureIds: first.outline.featureIds, questions: [] } });
+    await service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId: first.outline.moduleLocalId, expectedVersion: current.moduleRuns![0].lessonVersion });
+    await approveOtherLessons(service, job.jobId);
+    const blocker = await inventoryJob('blocker');
+    const blockingCall = await service.nextStep(admin, { jobId: blocker.jobId, workerId: 'blocker' });
+    if (blockingCall.kind !== 'ai_call') throw new Error('Expected blocker');
+    expect((await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).kind).toBe('wait');
+    current = await service.getJob(admin, job.jobId);
+    const question = current.calls.find((call) => call.moduleTarget === 'questions' && call.status === 'pending')!;
+    const other = current.moduleRuns![1];
+    await service.retryModule(admin, { jobId: job.jobId, moduleLocalId: other.outline.moduleLocalId, target: 'lesson', expectedVersion: other.lessonVersion });
+    await service.submitAiOutput(admin, { jobId: blocker.jobId, workerId: 'blocker', callId: blockingCall.callId, text: JSON.stringify(inventory) });
+    expect((await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).kind).toBe('awaiting_admin');
+    const lessonCall = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    if (lessonCall.kind !== 'ai_call') throw new Error('Expected lesson regeneration');
+    current = await service.getJob(admin, job.jobId);
+    expect(current.calls.find((call) => call.callId === lessonCall.callId)).toMatchObject({ moduleLocalId: other.outline.moduleLocalId, moduleTarget: 'lesson' });
+    const { localId: _id, frameKey: _frame, featureIds: _features, questions: _questions, ...lesson } = generatedTemplate.modules[0];
+    current = await service.submitAiOutput(admin, { jobId: job.jobId, workerId: 'tab-a', callId: lessonCall.callId, text: JSON.stringify({ ...lesson, flags: [] }) });
+    await service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId: other.outline.moduleLocalId, expectedVersion: current.moduleRuns![1].lessonVersion });
+    const resumed = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    expect(resumed).toMatchObject({ kind: 'ai_call', callId: question.callId });
+    expect((await service.getJob(admin, job.jobId)).calls.filter((call) => call.moduleTarget === 'questions')).toHaveLength(1);
+  });
+  it('holds a queued question behind renewed lesson approval and resumes the same call', async () => {
+    const { service, inventoryJob, templateJob } = await setup();
+    const job = await templateJob();
+    const first = job.moduleRuns![0];
+    let current = await service.updateModuleLesson(admin, { jobId: job.jobId, moduleLocalId: first.outline.moduleLocalId, expectedVersion: first.lessonVersion, module: { ...generatedTemplate.modules[0], localId: first.outline.moduleLocalId, frameKey: first.outline.frameKey, featureIds: first.outline.featureIds, questions: [] } });
+    current = await service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId: first.outline.moduleLocalId, expectedVersion: current.moduleRuns![0].lessonVersion });
+    await approveOtherLessons(service, job.jobId);
+    current = await service.getJob(admin, job.jobId);
+    const blocker = await inventoryJob('blocker');
+    const blockingCall = await service.nextStep(admin, { jobId: blocker.jobId, workerId: 'blocker' });
+    if (blockingCall.kind !== 'ai_call') throw new Error('Expected blocker');
+    expect((await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).kind).toBe('wait');
+    const queued = await service.getJob(admin, job.jobId);
+    const question = queued.calls.find((call) => call.moduleTarget === 'questions' && call.status === 'pending')!;
+    expect(question.dispatchClaimedAt).toBeUndefined();
+    const other = queued.moduleRuns![1];
+    const edited = await service.updateModuleLesson(admin, { jobId: job.jobId, moduleLocalId: other.outline.moduleLocalId, expectedVersion: other.lessonVersion, module: { ...other.lessonDraft!, title: 'Revised lesson' } });
+    const history = edited.stageOutputs.__moduleAudit;
+    await service.submitAiOutput(admin, { jobId: blocker.jobId, workerId: 'blocker', callId: blockingCall.callId, text: JSON.stringify(inventory) });
+    const held = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    expect(held.kind).toBe('awaiting_admin');
+    current = await service.getJob(admin, job.jobId);
+    expect(current.calls.filter((call) => call.moduleTarget === 'questions')).toHaveLength(1);
+    expect(current.stageOutputs.__moduleAudit).toEqual(history);
+    await service.approveModuleLesson(admin, { jobId: job.jobId, moduleLocalId: other.outline.moduleLocalId, expectedVersion: current.moduleRuns![1].lessonVersion });
+    const resumed = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    expect(resumed).toMatchObject({ kind: 'ai_call', callId: question.callId });
+    expect((await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).kind).toBe('wait');
+  });
   it.each(['replay', 'cancel'] as const)('recovers non-dispatch evidence after failed release via %s', async (recovery) => {
     const { service, other, inventoryJob, store, advance } = await setup();
     const first = await inventoryJob('first');
