@@ -120,3 +120,46 @@ describe('module draft contracts', () => {
     expect(() => buildModuleLessonRepairPrompt({ ...input, previous: { ...lesson, flags: [{ ...flag, location: { blockLocalId: 'b1' } }] }, errors: ['invalid'] })).not.toThrow();
   });
 });
+
+describe('tolerant module validation', () => {
+  const mkFlag = (type: string, extra: Record<string, unknown> = {}) => ({ type, severity: type === 'conflict' ? 'blocking' : 'warning', message: 'Flag ' + type, questionForAdmin: 'Please confirm', evidence: [], ...extra });
+  const locationless = {
+    ...lesson,
+    blocks: [
+      { localId: 'b1', kind: 'concept', body: 'Body', sourceRefs: [ref] },
+      { localId: 'b2', kind: 'summary', body: 'Summary' },
+    ],
+    flags: [mkFlag('ambiguous'), mkFlag('outdated'), mkFlag('audience_unclear'), mkFlag('low_quality_source')],
+  };
+  it('accepts a grounded lesson whose flags omit location and whose summary omits sourceRefs', () => {
+    const result = validateModuleLessonOutput(locationless, input);
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.value.flags).toHaveLength(4);
+    expect(result.ok && result.value.flags.every((flag) => flag.location.moduleLocalId === input.module.moduleLocalId)).toBe(true);
+    expect(result.ok && result.value.module.blocks[1].sourceRefs).toEqual([]);
+  });
+  it('still rejects a non-summary block without sourceRefs', () => {
+    const ungrounded = { ...locationless, blocks: [{ localId: 'b1', kind: 'concept', body: 'Body' }, locationless.blocks[1]] };
+    expect(validateModuleLessonOutput(ungrounded, input).ok).toBe(false);
+  });
+  it('drops a flag with no type instead of rejecting the lesson', () => {
+    const { type: _type, ...noType } = mkFlag('ambiguous');
+    const result = validateModuleLessonOutput({ ...locationless, flags: [...locationless.flags.slice(0, 3), noType] }, input);
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.value.flags).toHaveLength(3);
+  });
+  it('rewrites a foreign moduleLocalId and drops flags pointing outside the module', () => {
+    const flags = [
+      mkFlag('ambiguous', { location: { moduleLocalId: 'other' } }),
+      mkFlag('outdated', { location: { blockLocalId: 'nope' } }),
+      mkFlag('audience_unclear', { location: { featureId: 'foreign' } }),
+      mkFlag('low_quality_source', { location: { blockLocalId: 'b1' } }),
+    ];
+    const result = validateModuleLessonOutput({ ...locationless, flags }, input);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.flags).toHaveLength(2);
+    expect(result.value.flags[0].location.moduleLocalId).toBe('m1');
+    expect(result.value.flags[1].location.blockLocalId).toBe('b1');
+  });
+});

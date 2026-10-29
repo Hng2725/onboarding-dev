@@ -288,3 +288,19 @@ describe('generated template validator', () => {
     expect(safe.template.modules[0].questions).toEqual([]);
   });
 });
+
+describe('parseFlags tolerance', () => {
+  it('defaults a missing location without an error and records dropped flags in notes', async () => {
+    const { parseFlags } = await import('../src/onboarding/ai/validate');
+    const errors: never[] = [];
+    const notes: string[] = [];
+    const flags = parseFlags([
+      { type: 'ambiguous', severity: 'warning', message: 'm', questionForAdmin: 'q', evidence: [] },
+      { severity: 'warning', message: 'm', questionForAdmin: 'q', evidence: [] },
+    ], errors, { defaultLocation: { moduleLocalId: 'm1' }, notes });
+    expect(errors).toEqual([]);
+    expect(flags).toHaveLength(1);
+    expect(flags[0].location).toEqual({ moduleLocalId: 'm1' });
+    expect(notes).toEqual(['Bỏ cờ không hợp lệ ở vị trí 1']);
+  });
+});

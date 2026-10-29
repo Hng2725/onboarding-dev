@@ -320,6 +320,7 @@ function normalizeTemplateShape(value: Record<string, unknown>): Record<string, 
 export function parseFlags(
   value: unknown,
   errors: ValidationError[],
+  options: { readonly defaultLocation?: GeneratedFlag['location']; readonly notes?: string[] } = {},
 ): readonly GeneratedFlag[] {
   if (!Array.isArray(value)) {
     add(errors, 'FIELD_INVALID', 'root.flags', 'flags must be an array.');
@@ -332,6 +333,13 @@ export function parseFlags(
       add(errors, 'FIELD_INVALID', path, 'A flag object is required.');
       return;
     }
+    // Lenient mode (notes supplied): an unusable flag is dropped and noted instead of failing validation.
+    if (options.notes
+      && (!FLAG_TYPES.includes(entry.type as FlagType)
+        || typeof entry.message !== 'string' || !entry.message.trim())) {
+      options.notes.push('Bỏ cờ không hợp lệ ở vị trí ' + String(index));
+      return;
+    }
     fields(entry, ['type', 'severity', 'message', 'questionForAdmin', 'location', 'evidence'], path, errors);
     const type = text(entry.type, path + '.type', errors) as FlagType;
     if (!FLAG_TYPES.includes(type)) add(errors, 'FLAG_TYPE', path + '.type', 'Unknown flag type.');
@@ -339,8 +347,7 @@ export function parseFlags(
     if (severity !== 'blocking' && severity !== 'warning') {
       add(errors, 'FLAG_SEVERITY', path + '.severity', 'Invalid flag severity.');
     }
-    const location = isRecord(entry.location) ? entry.location : {};
-    if (!isRecord(entry.location)) add(errors, 'FIELD_INVALID', path + '.location', 'Flag location is required.');
+    const location = isRecord(entry.location) ? entry.location : (options.defaultLocation ?? {});
     fields(location, ['moduleLocalId', 'blockLocalId', 'questionLocalId', 'featureId'], path + '.location', errors);
     const evidence = rawRefs(entry.evidence, path + '.evidence', errors);
     if (type === 'conflict' && evidence.length < 2) {
@@ -394,7 +401,7 @@ export function parseBlocks(
     ids.add(localId);
     const kind = text(entry.kind, path + '.kind', errors) as GeneratedBlock['kind'];
     if (!BLOCK_KINDS.includes(kind)) add(errors, 'BLOCK_KIND', path + '.kind', 'Unknown block kind.');
-    const refs = rawRefs(entry.sourceRefs, path + '.sourceRefs', errors);
+    const refs = entry.sourceRefs === undefined ? [] : rawRefs(entry.sourceRefs, path + '.sourceRefs', errors);
     if (!allowUnreferenced && kind !== 'summary' && refs.length === 0) {
       add(errors, 'SOURCE_REF_REQUIRED', path + '.sourceRefs', 'Non-summary blocks require a source.');
     }
