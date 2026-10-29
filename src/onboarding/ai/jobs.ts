@@ -340,6 +340,7 @@ export type AiJobNextStep =
     readonly attemptRef?: string;
     readonly provider?: AiProvider;
     readonly startedAt?: string;
+    readonly moduleTarget?: 'lesson' | 'questions';
   }
   | { readonly kind: 'wait'; readonly job: AiJobRecord }
   | { readonly kind: 'awaiting_admin'; readonly job: AiJobRecord }
@@ -1335,7 +1336,14 @@ export function createAiJobService(
       }
       throw error;
     }
-    return { kind: 'ai_call', callId: call.callId, operationId: call.operationId, ...request, ...(call.attemptRef ? { attemptRef: call.attemptRef, provider: callProvider(call), startedAt: call.startedAt } : {}) };
+    return {
+      kind: 'ai_call',
+      callId: call.callId,
+      operationId: call.operationId,
+      ...request,
+      ...(call.moduleTarget ? { moduleTarget: call.moduleTarget } : {}),
+      ...(call.attemptRef ? { attemptRef: call.attemptRef, provider: callProvider(call), startedAt: call.startedAt } : {}),
+    };
   }
 
   function retryCall(row: AiJobDbRecord, call: AiCallRecord, kind: NonNullable<AiCallRecord['retryKind']>): AiCallRecord {

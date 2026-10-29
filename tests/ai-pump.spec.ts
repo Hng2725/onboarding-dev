@@ -51,7 +51,7 @@ describe('AI browser pump', () => {
   ] as const)('persists %s on a terminal pre-dispatch %s failure and returns the recoverable job', async (provider, code) => {
     const recoverable = { jobId: 'job-1', status: 'running', calls: [{ callId: 'A1', status: 'failed', provider }] };
     const adminAi = vi.fn()
-      .mockResolvedValueOnce({ kind: 'ai_call', callId: 'A1', operationId: 'job-1:A1', prompt: 'p' })
+      .mockResolvedValueOnce({ kind: 'ai_call', callId: 'A1', operationId: 'job-1:A1', prompt: 'p', moduleTarget: 'questions' })
       .mockResolvedValueOnce(recoverable)
       .mockResolvedValueOnce({ kind: 'awaiting_admin', job: recoverable });
     const gateway: AiGateway = {
@@ -61,13 +61,29 @@ describe('AI browser pump', () => {
 
     await expect(pumpAiJob({
       api: { adminAi }, gateway, provider, jobId: 'job-1', workerId: 'tab-a',
-      ...(code === 'DISPATCH_NOT_STARTED' ? { recoverPreDispatchFailure: true } : {}),
     })).resolves.toEqual(recoverable);
     expect(adminAi).toHaveBeenCalledWith('report_ai_failure', expect.objectContaining({
       kind: 'failed',
       provider,
       providerErrorCode: code,
     }));
+  });
+
+  it('releases a proven no-dispatch lesson call even when the job also has active questions', async () => {
+    const released = { jobId: 'job-1', status: 'running' };
+    const adminAi = vi.fn()
+      .mockResolvedValueOnce({ kind: 'ai_call', callId: 'lesson-2', operationId: 'job-1:lesson-2', prompt: 'p', moduleTarget: 'lesson' })
+      .mockResolvedValueOnce(released)
+      .mockResolvedValueOnce({ kind: 'awaiting_admin', job: released });
+    const gateway: AiGateway = {
+      dispatch: vi.fn().mockRejectedValue(new AiGatewayError('DISPATCH_NOT_STARTED', 'Context upload failed')),
+      status: vi.fn(),
+    };
+
+    await expect(pumpAiJob({
+      api: { adminAi }, gateway, provider: 'native_chat', jobId: 'job-1', workerId: 'tab-a',
+    })).rejects.toThrow('Context upload failed');
+    expect(adminAi).toHaveBeenCalledWith('report_ai_failure', expect.not.objectContaining({ provider: 'native_chat' }));
   });
 
   it('returns awaiting_admin without dispatching or polling', async () => {

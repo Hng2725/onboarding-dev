@@ -39,7 +39,6 @@ import {
 } from './ai-gateway-native-chat';
 import { pumpAiJob } from './ai-pump';
 import {
-  hasActiveQuestionGeneration,
   pumpWithQuestionRecovery,
   shouldBoundNativeQuestionPoll,
   shouldUseNativeForPump,
@@ -1204,7 +1203,6 @@ export function AiGeneratorPage({
           workerId: 'onboarding-ai-' + crypto.randomUUID(),
           signal: controller.signal,
           onProgress: recordProgress,
-          ...(hasActiveQuestionGeneration(current) ? { recoverPreDispatchFailure: true } : {}),
           ...(boundedQuestionRecovery ? { maxPollMs: QUESTION_RECOVERY_NATIVE_TIMEOUT_MS } : {}),
         });
       },

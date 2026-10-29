@@ -46,12 +46,6 @@ export function shouldBoundNativeQuestionPoll(
     && (call.status === 'pending' || call.status === 'dispatched')));
 }
 
-export function hasActiveQuestionGeneration(job: AiJobRecord): boolean {
-  return (job.moduleRuns ?? []).some(
-    (run) => run.questionState === 'queued' || run.questionState === 'drafting',
-  );
-}
-
 function hasGroundedLesson(run: AiModuleDraftRun): boolean {
   return run.lessonDraft?.blocks.some(
     (block) => block.kind !== 'summary' && block.sourceRefs.length > 0,
