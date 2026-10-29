@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 
 import type { AiCallRecord, AiModuleDraftRun } from '../../../onboarding/contracts';
 import type { GeneratedBlock, GeneratedModule, GeneratedQuestion } from '../../../onboarding/ai/validate';
+import { outlineModuleDisplayTitle } from './ai-outline-review';
 
 export type ModuleWorkspaceAction =
   | 'update_module_lesson'
@@ -41,7 +42,7 @@ const questionStatus: Record<AiModuleDraftRun['questionState'], string> = {
 const blankLesson = (run: AiModuleDraftRun): GeneratedModule => ({
   localId: run.outline.moduleLocalId,
   frameKey: run.outline.frameKey,
-  title: run.outline.title,
+  title: outlineModuleDisplayTitle(run.outline),
   description: run.outline.description,
   estimatedMinutes: run.outline.estimatedMinutes,
   objectives: run.outline.objectives,
@@ -133,6 +134,7 @@ export function AiModuleWorkspace({
         {active.map((item) => {
           const questionCount = item.questionDraft?.length ?? 0;
           const approvedCount = item.questionState === 'approved' ? questionCount : 0;
+          const displayTitle = outlineModuleDisplayTitle(item.outline);
           return (
             <button
               type="button"
@@ -140,7 +142,7 @@ export function AiModuleWorkspace({
               key={item.outline.moduleLocalId}
               onClick={() => onSelect(item.outline.moduleLocalId)}
             >
-              <strong>{item.outline.order + 1}. {item.outline.title}</strong>
+              <strong>{item.outline.order + 1}. {displayTitle}</strong>
               <small>{phase === 'lessons'
                 ? lessonStatus[item.lessonState]
                 : `${approvedCount}/${questionCount} câu hỏi đã duyệt`}</small>
@@ -157,7 +159,7 @@ export function AiModuleWorkspace({
         <header className="ai-module-review-heading">
           <div>
             <span data-phase={phase}>{phase === 'lessons' ? 'Bài học' : 'Câu hỏi'}</span>
-            <h3>{run.outline.title}</h3>
+            <h3>{outlineModuleDisplayTitle(run.outline)}</h3>
             <p>{phase === 'lessons' ? lessonStatus[run.lessonState] : questionStatus[run.questionState]}</p>
           </div>
           {phase === 'questions' && <strong>{approvedQuestions}/{draftQuestions.length} câu hỏi đã duyệt</strong>}

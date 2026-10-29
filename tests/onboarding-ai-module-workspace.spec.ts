@@ -45,6 +45,22 @@ it('opens an approved draft in reading mode without form fields', () => {
   expect(html).not.toContain('<select');
 });
 
+it('uses human-readable module titles instead of internal frame IDs', () => {
+  const original = approvedRuns()[0];
+  const run = {
+    ...original,
+    outline: { ...original.outline, frameKey: 't1-overview', title: 't1-overview' },
+  };
+  const html = renderToStaticMarkup(createElement(AiModuleWorkspace, {
+    runs: [run], calls: [], selectedId: run.outline.moduleLocalId, busy: false,
+    onSelect: () => {}, onAction: () => {}, onSources: () => {},
+  }));
+
+  expect(html).toContain('1. Tổng quan');
+  expect(html).toContain('<h3>Tổng quan</h3>');
+  expect(html).not.toContain('t1-overview');
+});
+
 it('reveals lesson fields only after Chỉnh sửa is selected', () => {
   const run = { ...approvedRuns()[0], lessonState: 'review_ready' as const, questionState: 'blocked' as const };
   const view = renderWorkspace([run]);
