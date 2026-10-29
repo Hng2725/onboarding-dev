@@ -929,6 +929,7 @@ export function AiGeneratorPage({
   const [restoring, setRestoring] = useState(true);
   const [sourcePanelEpoch, setSourcePanelEpoch] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
+  const inventoryRecoveryAbortRef = useRef<AbortController | null>(null);
   const cleanupAbortRef = useRef<AbortController | null>(null);
   const appRef = useRef(app);
   appRef.current = app;
@@ -1176,6 +1177,7 @@ export function AiGeneratorPage({
 
   useEffect(() => () => {
     abortRef.current?.abort();
+    inventoryRecoveryAbortRef.current?.abort();
     cleanupAbortRef.current?.abort();
   }, []);
 
@@ -1199,8 +1201,10 @@ export function AiGeneratorPage({
     sessionJobIds: ReadonlySet<string> = new Set(),
   ) {
     abortRef.current?.abort();
+    inventoryRecoveryAbortRef.current?.abort();
     cleanupAbortRef.current?.abort();
     abortRef.current = null;
+    inventoryRecoveryAbortRef.current = null;
     cleanupAbortRef.current = null;
     setStep(0);
     setSources(nextSources);
@@ -1254,7 +1258,10 @@ export function AiGeneratorPage({
           const result = await cancelRunningAiJob(
             api,
             job.jobId,
-            () => abortRef.current?.abort(),
+            () => {
+              abortRef.current?.abort();
+              inventoryRecoveryAbortRef.current?.abort();
+            },
             (call) => confirmAttempt(call, undefined, 'cancel'),
           );
           return { unconfirmed: result.unconfirmed };
@@ -1411,6 +1418,9 @@ export function AiGeneratorPage({
   }
 
   async function analyze() {
+    inventoryRecoveryAbortRef.current?.abort();
+    const recoveryController = new AbortController();
+    inventoryRecoveryAbortRef.current = recoveryController;
     setBusy(true);
     setNotice(null);
     try {
@@ -1430,6 +1440,7 @@ export function AiGeneratorPage({
         initialJob: job,
         initialPreferNative: preferNative,
         nativeAvailable: nativeFallbackAvailable && !nativeCleanupBlock,
+        signal: recoveryController.signal,
         pumpOnce: pump,
         reloadJob: async (jobId) => (await api.adminAi<{ job: AiJobRecord }>('get_job', { jobId })).job,
         retryJob: async (jobId) => (await api.adminAi<{ job: AiJobRecord }>('retry_job', { jobId })).job,
@@ -1444,6 +1455,9 @@ export function AiGeneratorPage({
       // A timed-out or late-cancelled attempt may still run; reconcile it in the background.
       void refreshCleanups().catch(() => undefined);
     } finally {
+      if (inventoryRecoveryAbortRef.current === recoveryController) {
+        inventoryRecoveryAbortRef.current = null;
+      }
       setBusy(false);
     }
   }
@@ -1601,7 +1615,10 @@ export function AiGeneratorPage({
       const result = await cancelRunningAiJob(
         api,
         jobId,
-        () => abortRef.current?.abort(),
+        () => {
+          abortRef.current?.abort();
+          inventoryRecoveryAbortRef.current?.abort();
+        },
         (call) => confirmAttempt(call, undefined, 'cancel'),
         update,
       );

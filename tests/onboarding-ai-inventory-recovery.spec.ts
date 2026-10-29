@@ -60,6 +60,21 @@ describe('inventory Native fallback eligibility', () => {
     }))).toBe(false);
   });
 
+  it('uses the newest terminal call so invalid output cannot reuse an older worker crash', () => {
+    const invalid = failedCall({
+      callId: 'A1-retry1',
+      status: 'invalid',
+      providerErrorCode: undefined,
+      errors: ['inventory.items: expected an array'],
+    });
+
+    expect(isInventoryNativeFallbackCandidate(inventoryJob({
+      errorCode: 'AI_OUTPUT_INVALID',
+      errorMessage: 'inventory.items: expected an array',
+      calls: [failedCall(), invalid],
+    }))).toBe(false);
+  });
+
   it.each([
     inventoryJob({ kind: 'template' }),
     inventoryJob({ status: 'cancelled' }),
@@ -262,5 +277,60 @@ describe('bounded inventory Native recovery', () => {
     ]);
     expect(result.calls.map((call) => call.callId)).toEqual(['A1', 'A1-retry1']);
     expect(result.calls.map((call) => call.provider)).toEqual(['sandbox', 'native_chat']);
+  });
+
+  it('does not queue a retry when the modal closes during the recovery lookup', async () => {
+    const events: string[] = [];
+    const controller = new AbortController();
+    let markReloadStarted!: () => void;
+    let resolveReload!: (job: AiJobRecord) => void;
+    const reloadStarted = new Promise<void>((resolve) => { markReloadStarted = resolve; });
+    const reloadResult = new Promise<AiJobRecord>((resolve) => { resolveReload = resolve; });
+
+    const operation = pumpWithInventoryRecovery({
+      initialJob: running,
+      initialPreferNative: false,
+      nativeAvailable: true,
+      signal: controller.signal,
+      pumpOnce: async () => { events.push('pump:sandbox'); throw new Error('Worker exited with code 1'); },
+      reloadJob: async () => { events.push('reload'); markReloadStarted(); return reloadResult; },
+      retryJob: async () => { events.push('retry'); return retried; },
+    });
+
+    await reloadStarted;
+    controller.abort();
+    resolveReload(failed);
+
+    await expect(operation).rejects.toMatchObject({ name: 'AbortError' });
+    expect(events).toEqual(['pump:sandbox', 'reload']);
+  });
+
+  it('does not dispatch Native when the modal closes while the retry is queued', async () => {
+    const events: string[] = [];
+    const controller = new AbortController();
+    let markRetryStarted!: () => void;
+    let resolveRetry!: (job: AiJobRecord) => void;
+    const retryStarted = new Promise<void>((resolve) => { markRetryStarted = resolve; });
+    const retryResult = new Promise<AiJobRecord>((resolve) => { resolveRetry = resolve; });
+
+    const operation = pumpWithInventoryRecovery({
+      initialJob: running,
+      initialPreferNative: false,
+      nativeAvailable: true,
+      signal: controller.signal,
+      pumpOnce: async (_job, preferNative) => {
+        events.push(preferNative ? 'pump:native' : 'pump:sandbox');
+        throw new Error('Worker exited with code 1');
+      },
+      reloadJob: async () => { events.push('reload'); return failed; },
+      retryJob: async () => { events.push('retry'); markRetryStarted(); return retryResult; },
+    });
+
+    await retryStarted;
+    controller.abort();
+    resolveRetry(retried);
+
+    await expect(operation).rejects.toMatchObject({ name: 'AbortError' });
+    expect(events).toEqual(['pump:sandbox', 'reload', 'retry']);
   });
 });

@@ -365,6 +365,68 @@ describe('AI generator lifecycle', () => {
     expect(retryButton.props.disabled).toBe(false);
     renderer.unmount();
   });
+
+  it('does not queue Native fallback after unmount while the failed job reloads', async () => {
+    const pending: AiJobRecord = {
+      ...inventoryJob,
+      status: 'running',
+      result: undefined,
+      calls: [{
+        callId: 'A1', stage: 'A', operationId: 'inventory-1:A1', status: 'pending',
+      }],
+    };
+    const failed: AiJobRecord = {
+      ...pending,
+      status: 'failed',
+      errorCode: 'AI_FAILED',
+      errorMessage: 'Worker exited with code 1',
+      calls: [{
+        callId: 'A1', stage: 'A', operationId: 'inventory-1:A1', status: 'failed',
+        provider: 'sandbox', attemptRef: 'sandbox-attempt-1', providerErrorCode: 'worker_failed',
+        errors: ['Worker exited with code 1'],
+      }],
+    };
+    const reload = deferred<{ job: AiJobRecord }>();
+    const reloadStarted = deferred<void>();
+    const source = {
+      id: 'source-row', roomId: 'room-1', sourceId: 'source-1', kind: 'document',
+      fileName: 'guide.pdf', mimeType: 'application/pdf', checksum: 'checksum', systemName: 'Guide',
+      status: 'ready', textLength: 100, createdBy: 'admin-1',
+      createdAt: '2026-10-27T07:00:00.000Z', updatedAt: '2026-10-27T07:00:00.000Z',
+    };
+    const api = {
+      adminAi: vi.fn(async (action: string) => {
+        if (action === 'list_sources') return { sources: [source] };
+        if (action === 'list_jobs') return { jobs: [pending] };
+        if (action === 'next_step') return { kind: 'failed', job: failed };
+        if (action === 'get_job') { reloadStarted.resolve(); return reload.promise; }
+        if (action === 'retry_job') return { job: pending };
+        throw new Error('Unexpected action: ' + action);
+      }),
+    };
+
+    let renderer!: TestRenderer.ReactTestRenderer;
+    await act(async () => {
+      renderer = TestRenderer.create(createElement(AiGeneratorPage, {
+        api: api as never,
+        canGenerateWithAi: true,
+        onClose: () => undefined,
+        onComplete: () => undefined,
+      }));
+    });
+    const analyze = renderer.root.findAllByProps({ className: 'button button-primary' })[0];
+    act(() => analyze.props.onClick());
+    await reloadStarted.promise;
+
+    await act(async () => {
+      renderer.unmount();
+      reload.resolve({ job: failed });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(api.adminAi.mock.calls.some(([action]) => action === 'retry_job')).toBe(false);
+  });
 });
 
 it('reopens a completed module job without routing to legacy review', async () => {
