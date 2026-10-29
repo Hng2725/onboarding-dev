@@ -86,9 +86,13 @@ describe('AI Generator compact modal density', () => {
   });
 
   it('keeps long review content usable without widening the modal', () => {
+    const generatorWorkspace = rule('.ai-workspace');
     const workspace = rule('.ai-module-workspace');
     const review = rule('.ai-review-scroll');
 
+    expect(declarationValues(generatorWorkspace, 'width')).toEqual(['100%']);
+    expect(declarationValues(generatorWorkspace, 'max-width')).toEqual(['none']);
+    expect(declarationValues(rule('.ai-workspace-progress-card'), 'grid-column')).toEqual(['1 / -1']);
     expect(declarationValues(workspace, 'grid-template-columns')).toEqual(['200px minmax(0, 1fr)']);
     expect(declarationValues(workspace, 'gap')).toEqual(['12px']);
     expect(declarationValues(workspace, 'min-width')).toEqual(['0']);
@@ -107,6 +111,7 @@ describe('AI Generator compact modal density', () => {
 
   it('preserves the full-screen single-column mobile layout', () => {
     const mobile = mobileGeneratorBlock();
+    const mobileMilestones = mediaBlock('@media (max-width: 700px)', '.ai-milestone-list');
     const panel = rule('.ai-generator-panel', mobile);
 
     expect(declarationValues(rule('.ai-generator-backdrop', mobile), 'padding')).toEqual(['0']);
@@ -115,14 +120,26 @@ describe('AI Generator compact modal density', () => {
     expect(declarationValues(panel, 'height')).toEqual(['100vh', '100dvh']);
     expect(declarationValues(panel, 'font-size')).toEqual(['13px']);
     expect(declarationValues(rule('.ai-module-workspace', mobile), 'grid-template-columns')).toEqual(['1fr']);
+    expect(declarationValues(rule('.ai-milestone-list', mobileMilestones), 'grid-template-columns')).toEqual(['1fr']);
     expect(declarationValues(rule('.ai-generator-panel .button', mobile), 'min-height')).toEqual(['34px']);
   });
 
   it('keeps review focus and sticky actions intact', () => {
     const focusRule = rule('.ai-review-scroll:focus-visible, .ai-module-stage summary:focus-visible');
     const toolbar = rule('.ai-review-toolbar');
+    const roadmapActions = rule('.ai-roadmap-actions');
 
     expect(declarationValues(focusRule, 'outline')).toEqual(['2px solid var(--on-primary)']);
     expect(declarationValues(toolbar, 'position')).toEqual(['sticky']);
+    expect(declarationValues(roadmapActions, 'position')).toEqual(['sticky']);
+    expect(declarationValues(roadmapActions, 'bottom')).toEqual(['0']);
+  });
+
+  it('shows the four AI milestones horizontally on desktop', () => {
+    const milestones = rule('.ai-milestone-list');
+
+    expect(declarationValues(milestones, 'grid-template-columns')).toEqual([
+      'repeat(4, minmax(0, 1fr))',
+    ]);
   });
 });

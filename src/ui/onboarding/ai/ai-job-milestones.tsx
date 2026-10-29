@@ -108,23 +108,23 @@ export function templateMilestones(
     const runs = (job.moduleRuns ?? []).filter((run) => !run.outline.tombstoned);
     const approved = job.outline?.revision === job.outlineApprovedRevision;
     const documents = runs.filter((run) => Boolean(run.lessonDraft)).length;
+    const approvedQuestions = runs.filter((run) => run.questionState === 'approved').length;
     const lessonDone = runs.length > 0 && runs.every((run) => run.lessonState === 'approved');
     const questionDone = lessonDone && runs.every((run) => run.questionState === 'approved');
     return [
-      { id: 'prepare', label: 'Duyệt khung lộ trình', status: approved ? 'completed' : 'active' },
+      { id: 'outline', label: 'Khung lộ trình', status: approved ? 'completed' : 'active' },
       { id: 'lessons', label: 'Viết và duyệt tài liệu học', status: lessonDone ? 'completed' : approved ? 'active' : 'pending', detail: documents + '/' + runs.length + ' module có tài liệu' },
-      { id: 'questions', label: 'Tạo và duyệt câu hỏi', status: questionDone ? 'completed' : lessonDone ? 'active' : 'pending' },
-      { id: 'draft', label: 'Tạo bản nháp để rà soát', status: job.status === 'completed' ? 'completed' : 'pending' },
+      { id: 'questions', label: 'Tạo và duyệt câu hỏi', status: questionDone ? 'completed' : lessonDone ? 'active' : 'pending', detail: approvedQuestions + '/' + runs.length + ' module đã duyệt câu hỏi' },
+      { id: 'ready', label: 'Sẵn sàng xuất bản', status: job.status === 'completed' ? 'completed' : questionDone ? 'active' : 'pending' },
     ];
   }
   const completed = job?.status === 'completed';
   if (completed) {
     return [
-      { id: 'prepare', label: 'Chuẩn bị cấu trúc template', status: 'completed' },
+      { id: 'outline', label: 'Khung lộ trình', status: 'completed' },
       { id: 'lessons', label: 'Viết tài liệu học', status: 'completed' },
       { id: 'questions', label: 'Tạo câu hỏi kiểm tra', status: 'completed' },
-      { id: 'verification', label: 'Kiểm chứng với nguồn', status: 'completed' },
-      { id: 'draft', label: 'Tạo bản nháp để rà soát', status: 'completed' },
+      { id: 'ready', label: 'Sẵn sàng xuất bản', status: 'completed' },
     ];
   }
 
@@ -152,17 +152,16 @@ export function templateMilestones(
 
   const lessons = stage(isLessons, lessonComplete, Boolean(job));
   const questions = stage(isQuestions, questionComplete, lessonComplete);
-  const verification = stage(isVerification, verificationComplete, questionComplete);
-  const draftStatus: AiMilestoneStatus = verificationComplete
-    ? (job?.status === 'failed' ? 'failed' : 'active')
-    : 'pending';
+  const ready = stage(isVerification, false, questionComplete);
+  const readyStatus = verificationComplete
+    ? { status: job?.status === 'failed' ? 'failed' as const : 'active' as const }
+    : ready;
 
   return [
-    { id: 'prepare', label: 'Chuẩn bị cấu trúc template', status: job ? 'completed' : 'active' },
+    { id: 'outline', label: 'Khung lộ trình', status: job ? 'completed' : 'active' },
     { id: 'lessons', label: 'Viết tài liệu học', ...lessons },
     { id: 'questions', label: 'Tạo câu hỏi kiểm tra', ...questions },
-    { id: 'verification', label: 'Kiểm chứng với nguồn', ...verification },
-    { id: 'draft', label: 'Tạo bản nháp để rà soát', status: draftStatus },
+    { id: 'ready', label: 'Kiểm chứng và sẵn sàng xuất bản', ...readyStatus },
   ];
 }
 
@@ -200,8 +199,9 @@ export function AiMilestoneProgress({
   const failureMessage = failedCall?.errors?.find((message) => message.trim())
     ?? job?.errorMessage
     ?? 'PrivOS không trả về thông báo lỗi.';
+  const compact = job?.status !== 'failed' && milestones.length > 0 && milestones.every((milestone) => milestone.status === 'completed');
   return (
-    <section className="ai-milestone-progress" aria-label={label}>
+    <section className={`ai-milestone-progress${compact ? ' compact' : ''}`} aria-label={label}>
       <header className="ai-milestone-header">
         <strong>{label}</strong>
         {runtime && <small>{runtime}</small>}

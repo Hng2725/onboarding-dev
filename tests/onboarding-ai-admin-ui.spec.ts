@@ -847,6 +847,14 @@ describe('AI job milestones', () => {
     const milestones = templateMilestones({ ...job, status: 'running', moduleRuns: runs });
     expect(milestones.find((item) => item.id === 'questions')?.status).toBe('pending');
   });
+  it('uses four guided milestones with module counts for module jobs', () => {
+    const job = approvedModuleJob();
+    const milestones = templateMilestones({ ...job, status: 'running' });
+
+    expect(milestones.map(({ id }) => id)).toEqual(['outline', 'lessons', 'questions', 'ready']);
+    expect(milestones.find((item) => item.id === 'lessons')?.detail).toBe('4/4 module có tài liệu');
+    expect(milestones.find((item) => item.id === 'questions')?.detail).toBe('4/4 module đã duyệt câu hỏi');
+  });
   it('maps inventory preparation, batches, repair, failure, and completion to stable milestones', () => {
     expect(inventoryMilestones(null, 2).map(({ id, status }) => ({ id, status }))).toEqual([
       { id: 'prepare', status: 'completed' },
@@ -901,14 +909,14 @@ describe('AI job milestones', () => {
 
   it.each(['B', 'C'] as const)('maps %s lesson and question calls to the same fixed template stages', (prefix) => {
     expect(milestoneStatuses(templateMilestones(null))).toEqual([
-      'active', 'pending', 'pending', 'pending', 'pending',
+      'active', 'pending', 'pending', 'pending',
     ]);
 
     const lessons = milestoneJob({
       kind: 'template', status: 'running', calls: [milestoneCall(`${prefix}-lessons`, 'dispatched')],
     });
     expect(milestoneStatuses(templateMilestones(lessons))).toEqual([
-      'completed', 'active', 'pending', 'pending', 'pending',
+      'completed', 'active', 'pending', 'pending',
     ]);
 
     const questions = milestoneJob({
@@ -920,11 +928,11 @@ describe('AI job milestones', () => {
       ],
     });
     expect(milestoneStatuses(templateMilestones(questions))).toEqual([
-      'completed', 'completed', 'active', 'pending', 'pending',
+      'completed', 'completed', 'active', 'pending',
     ]);
   });
 
-  it('keeps five template milestone IDs while verification and repair calls are added', () => {
+  it('folds verification and repair into the ready milestone', () => {
     const baseCalls = [
       milestoneCall('B-lessons', 'completed'),
       milestoneCall('B-questions', 'completed'),
@@ -945,7 +953,7 @@ describe('AI job milestones', () => {
       ],
     }));
 
-    const ids = ['prepare', 'lessons', 'questions', 'verification', 'draft'];
+    const ids = ['outline', 'lessons', 'questions', 'ready'];
     expect(beforeVerification.map((item) => item.id)).toEqual(ids);
     expect(duringVerification.map((item) => item.id)).toEqual(ids);
     expect(duringRepair.map((item) => item.id)).toEqual(ids);
@@ -971,14 +979,14 @@ describe('AI job milestones', () => {
       ],
     }));
     expect(milestoneStatuses(failed)).toEqual([
-      'completed', 'completed', 'failed', 'pending', 'pending',
+      'completed', 'completed', 'failed', 'pending',
     ]);
     expect(failed[2].detail).toBe('Tạo câu hỏi (thử lại lần 1)');
     expect(failed.filter((item) => item.detail)).toHaveLength(1);
 
     expect(milestoneStatuses(templateMilestones(milestoneJob({
       kind: 'template', status: 'completed', calls: [],
-    })))).toEqual(['completed', 'completed', 'completed', 'completed', 'completed']);
+    })))).toEqual(['completed', 'completed', 'completed', 'completed']);
   });
 
   it('renders a semantic ordered milestone list with current provider runtime', () => {
@@ -1001,6 +1009,15 @@ describe('AI job milestones', () => {
     expect(html).toContain('aria-current="step"');
     expect(html).toContain('data-status="active"');
     expect(html).toContain('Native AI Chat');
+  });
+
+  it('renders completed progress in compact mode', () => {
+    const job = milestoneJob({ kind: 'template', status: 'completed', calls: [] });
+    const html = renderToStaticMarkup(createElement(AiMilestoneProgress, {
+      label: 'Template đã hoàn tất', job, milestones: templateMilestones(job),
+    }));
+
+    expect(html).toContain('class="ai-milestone-progress compact"');
   });
 
   it('renders an open technical failure log with provider and attempt diagnostics', () => {
