@@ -29,7 +29,7 @@ describe('AI template batch selection', () => {
     expect(validateTemplateRequest({
       selection: null,
       responsibilities: '',
-    })).toEqual({ selection: 'Chọn ít nhất một loại lộ trình.' });
+    })).toEqual({ selection: 'Chọn loại template.' });
   });
 
   it.each([
@@ -205,6 +205,13 @@ describe('AI template batch resume and request building', () => {
     expect(runs.map((item) => [item.kind, item.job?.jobId, item.job?.status])).toEqual([
       ['advanced', 'advanced-job', 'running'],
     ]);
+  });
+
+  it('prefers a saved job over a newer failed job', () => {
+    const saved = { ...resumableJob('normal', 'saved-job', 'completed'), createdAt: '2026-10-26T09:00:00.000Z' };
+    const newerFailed = { ...resumableJob('advanced', 'newer-failed', 'failed'), createdAt: '2026-10-28T09:00:00.000Z' };
+    const runs = selectResumableTemplateRuns({ jobs: [newerFailed, saved], resumeJobIds: ['saved-job'], userId: 'admin-1' });
+    expect(runs.map((item) => item.job?.jobId)).toEqual(['saved-job']);
   });
 
   it('restores a saved resume ID under its recorded kind', () => {

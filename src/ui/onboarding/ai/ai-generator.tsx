@@ -1064,21 +1064,21 @@ export function AiGeneratorPage({
         const restoredInventory = result.jobs.find((job) => job.kind === 'inventory' && job.jobId === restoredInventoryId);
         setInventoryJob(inventory ?? restoredInventory ?? null);
         setTemplateRuns(restoredRuns);
+        if (roomId) {
+          clearAiResumeKeys([
+            'onboarding:ai:template:' + roomId + ':normal',
+            'onboarding:ai:template:' + roomId + ':advanced',
+            'onboarding:ai:selection:' + roomId,
+          ]);
+        }
         if (restoredRuns.length > 0) {
           setTemplateSelection(restoredRuns[0].kind);
           const advancedProfile = restoredRuns.find((run) => run.kind === 'advanced')?.job?.roleProfile;
           if (advancedProfile) {
             setResponsibilities(advancedProfile.responsibilities.join('\n'));
           } else if (roomId) setResponsibilities(readAiResumeKey('onboarding:ai:responsibilities:' + roomId) ?? '');
-          if (roomId) {
-            const restoredJob = restoredRuns[0].job;
-            if (restoredJob) writeAiResumeKey('onboarding:ai:template:' + roomId, restoredJob.jobId);
-            clearAiResumeKeys([
-              'onboarding:ai:template:' + roomId + ':normal',
-              'onboarding:ai:template:' + roomId + ':advanced',
-              'onboarding:ai:selection:' + roomId,
-            ]);
-          }
+          const restoredJob = restoredRuns[0].job;
+          if (roomId && restoredJob) writeAiResumeKey('onboarding:ai:template:' + roomId, restoredJob.jobId);
           for (const run of restoredRuns) {
             const output = run.publicationTarget ?? (run.job?.status === 'completed' && run.job.result && typeof run.job.result === 'object'
               ? run.job.result as { templateId?: unknown; version?: unknown }

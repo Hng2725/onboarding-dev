@@ -1115,13 +1115,13 @@ describe('AI template request workspace', () => {
     const html = renderToStaticMarkup(createElement(AiTemplateSelection, {
       ...commonProps,
       selection: null,
-      errors: { selection: 'Chọn ít nhất một loại lộ trình.' },
+      errors: { selection: 'Chọn loại template.' },
     }));
 
     expect(html).toContain('Template 1');
     expect(html).toContain('Template 2');
     expect(html).not.toContain('Cả hai');
-    expect(html).toContain('Chọn ít nhất một loại lộ trình.');
+    expect(html).toContain('Chọn loại template.');
     expect(html).toContain('role="radiogroup"');
   });
 

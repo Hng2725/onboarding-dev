@@ -29,7 +29,7 @@ export function validateTemplateRequest(input: {
   readonly responsibilities: string;
 }): TemplateRequestErrors {
   if (!input.selection) {
-    return { selection: 'Chọn ít nhất một loại lộ trình.' };
+    return { selection: 'Chọn loại template.' };
   }
   if (input.selection === 'normal') return {};
 
@@ -117,7 +117,9 @@ export function selectResumableTemplateRuns(input: {
   }
   const saved = input.resumeJobIds.flatMap((jobId) => byId(jobId) ?? []);
   const recoverable = eligible.filter((job) => job.status === 'running' || job.status === 'failed');
-  const job = [...saved, ...recoverable].sort((left, right) => createdAt(right) - createdAt(left))[0];
+  const newest = (jobs: readonly AiJobRecord[]) => [...jobs].sort((left, right) => createdAt(right) - createdAt(left))[0];
+  // A saved id wins over any newer recoverable job; recovery is only the fallback.
+  const job = newest(saved) ?? newest(recoverable);
   return job?.templateKind ? [{ kind: job.templateKind, job, review: null }] : [];
 }
 

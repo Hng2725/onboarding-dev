@@ -253,6 +253,22 @@ describe('AI generator lifecycle', () => {
     expect(storage.has('onboarding:ai:selection:room-1')).toBe(false);
     view.unmount(); vi.unstubAllGlobals();
   });
+  it('clears old resume keys and writes no single key when the saved job is missing', async () => {
+    const storage = new Map([['onboarding:ai:template:room-1:normal', 'gone'], ['onboarding:ai:template:room-1:advanced', 'gone-2'], ['onboarding:ai:selection:room-1', 'both']]);
+    vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    const api = { adminAi: vi.fn(async (action: string) => {
+      if (action === 'list_sources') return { sources: [] };
+      if (action === 'list_jobs') return { jobs: [inventoryJob] };
+      throw new Error('Unexpected action: ' + action);
+    }) };
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+    expect(storage.has('onboarding:ai:template:room-1:normal')).toBe(false);
+    expect(storage.has('onboarding:ai:template:room-1:advanced')).toBe(false);
+    expect(storage.has('onboarding:ai:selection:room-1')).toBe(false);
+    expect(storage.has('onboarding:ai:template:room-1')).toBe(false);
+    view.unmount(); vi.unstubAllGlobals();
+  });
   it('edits materialized module content without returning to the outline by default', async () => {
     const review = materializedModuleReview();
     const job = { ...approvedModuleJob(), jobId: 'template-1', roomId: 'room-1', status: 'completed' as const, result: { templateId: review.id, version: review.version } };
