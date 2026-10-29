@@ -49,8 +49,13 @@ import { AiGeneratorPage, createAiPublishDependencies } from '../src/ui/onboardi
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+function activeStepLabel(view: TestRenderer.ReactTestRenderer): string {
+  return view.root.findAllByType('li').find((item) => item.props.className === 'active')!.findByType('small').children.join('');
 }
 
 const inventoryJob: AiJobRecord = {
@@ -69,6 +74,10 @@ const inventoryJob: AiJobRecord = {
   createdAt: '2026-10-27T08:00:00.000Z',
   updatedAt: '2026-10-27T08:01:00.000Z',
 };
+
+function materializedModuleReview(): AdminTemplateDetail {
+  return { id: 'draft-1', version: 1, employeeType: 'normal', title: 'Approved first', description: '', source: 'ai_generated', status: 'draft', locked: false, maxAttempts: 2, modules: [{ id: 'm1', key: 'core', title: 'Core', description: '', order: 0, resources: [], questions: [] }], flags: [], updatedAt: 'now', content: { assessmentMode: 'per_module', learningMode: 'sequential', maxAttemptsPerModule: 2, questionMeta: [], modules: [{ moduleId: 'm1', frameKey: 'core', objectives: ['Learn'], estimatedMinutes: 1, blocks: [{ id: 'b1', kind: 'summary', body: 'Approved lesson', sourceRefs: [], pendingVerification: false }] }], moduleApproval: { pipelineVersion: 'module_v2', outlineRevision: 1, fingerprint: 'approved', materializedFingerprint: 'snapshot', taskCoverage: [] } } };
+}
 
 const failedTemplateJob: AiJobRecord = {
   id: 'template-row',
@@ -204,11 +213,11 @@ describe('AI generator lifecycle', () => {
     expect(JSON.stringify(view.toJSON())).toContain('Đã hoàn tất');
     view.unmount(); vi.unstubAllGlobals();
   });
-  it('opens a materialized module review and requires explicit next before Template 2', async () => {
+  it('keeps final materialized review in Rà soát and requires explicit next before Template 2', async () => {
     const storage = new Map([['onboarding:ai:template:room-1:normal', 'template-1'], ['onboarding:ai:selection:room-1', 'both']]);
     vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
-    const review: AdminTemplateDetail = { id: 'draft-1', version: 1, employeeType: 'normal', title: 'Approved first', description: '', source: 'ai_generated', status: 'draft', locked: false, maxAttempts: 2, modules: [{ id: 'm1', key: 'core', title: 'Core', description: '', order: 0, resources: [], questions: [] }], flags: [], updatedAt: 'now', content: { assessmentMode: 'per_module', learningMode: 'sequential', maxAttemptsPerModule: 2, questionMeta: [], modules: [{ moduleId: 'm1', frameKey: 'core', objectives: ['Learn'], estimatedMinutes: 1, blocks: [{ id: 'b1', kind: 'summary', body: 'Approved lesson', sourceRefs: [], pendingVerification: false }] }], moduleApproval: { pipelineVersion: 'module_v2', outlineRevision: 1, fingerprint: 'approved', materializedFingerprint: 'snapshot', taskCoverage: [] } } };
-    const job = { ...failedTemplateJob, templateKind: 'normal', pipelineVersion: 'module_v2', status: 'completed', result: { templateId: review.id, version: 1 } };
+    const review = materializedModuleReview();
+    const job = { ...approvedModuleJob(), jobId: 'template-1', roomId: 'room-1', status: 'completed' as const, result: { templateId: review.id, version: 1 } };
     const api = { adminAi: vi.fn(async (action: string) => {
       if (action === 'list_sources') return { sources: [] };
       if (action === 'list_jobs') return { jobs: [inventoryJob, job] };
@@ -217,6 +226,7 @@ describe('AI generator lifecycle', () => {
     }) };
     let view!: TestRenderer.ReactTestRenderer;
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+    expect(activeStepLabel(view)).toBe('Rà soát');
     const next = view.root.findAllByType('button').find((button) => button.children.join('') === 'Tiếp: Template 2');
     expect(next).toBeDefined();
     expect(view.root.findByProps({ 'aria-label': 'Sửa khối nội dung' }).props.disabled).toBe(true);
@@ -225,6 +235,24 @@ describe('AI generator lifecycle', () => {
     await act(async () => { next!.props.onClick(); });
     expect(view.root.findAllByType('button').some((button) => button.children.join('').includes('Tạo lộ trình'))).toBe(true);
     view.unmount(); vi.unstubAllGlobals();
+  });
+  it('edits materialized module content without returning to the outline by default', async () => {
+    const review = materializedModuleReview();
+    const job = { ...approvedModuleJob(), jobId: 'template-1', roomId: 'room-1', status: 'completed' as const, result: { templateId: review.id, version: review.version } };
+    const api = { adminAi: vi.fn(async (action: string) => {
+      if (action === 'list_sources') return { sources: [] };
+      if (action === 'get_review') return { review };
+      if (action === 'get_job') return { job };
+      throw new Error('Unexpected action: ' + action);
+    }) };
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, initialTemplate: { id: review.id, version: review.version }, onClose: () => undefined, onComplete: () => undefined })); });
+
+    await act(async () => { view.root.findAllByType('button').find((button) => button.children.join('') === 'Chỉnh sửa module')!.props.onClick(); });
+    expect(activeStepLabel(view)).toBe('Rà soát');
+    expect(view.root.findByProps({ 'aria-label': 'Danh sách module' })).toBeDefined();
+    expect(JSON.stringify(view.toJSON())).not.toContain('Kiểm tra lộ trình đề xuất');
+    view.unmount();
   });
   it('restores and closes a timed-out job by observing the provider without cancelling it', async () => {
     host.appRevision = 0;
@@ -337,7 +365,7 @@ it('reopens a completed module job without routing to legacy review', async () =
   view.unmount(); vi.unstubAllGlobals();
 });
 
-it('restores the selected module on reopen without starting or cancelling work', async () => {
+it('restores an approved running module job directly in Rà soát', async () => {
   const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
   vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
   const modules = ['First', 'Second'].map((title, order) => ({ moduleLocalId: `m${order}`, frameKey: order ? 't1-core' : 't1-overview', order, title, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [] }));
@@ -346,6 +374,7 @@ it('restores the selected module on reopen without starting or cancelling work',
   const page = () => createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined });
   let view!: TestRenderer.ReactTestRenderer;
   await act(async () => { view = TestRenderer.create(page()); });
+  expect(activeStepLabel(view)).toBe('Rà soát');
   const second = view.root.findByProps({ 'aria-label': 'Danh sách module' }).findAllByType('button')[1];
   act(() => second.props.onClick());
   expect(storage.get('onboarding:ai:module:room-1')).toBe('m1');
@@ -356,7 +385,7 @@ it('restores the selected module on reopen without starting or cancelling work',
   view.unmount(); vi.unstubAllGlobals();
 });
 
-it('approves the persisted outline revision then resumes only that job', async () => {
+it('moves to Rà soát immediately after outline approval and starts the module pump', async () => {
   const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
   vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
   const modules = ['t1-overview', 't1-access', 't1-navigation', 't1-core'].map((frameKey, order) => ({ moduleLocalId: `m${order}`, frameKey, order, title: frameKey, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] }));
@@ -365,11 +394,55 @@ it('approves the persisted outline revision then resumes only that job', async (
   const api = { adminAi: vi.fn(async (action: string) => { if (action === 'list_sources') return { sources: [] }; if (action === 'list_jobs') return { jobs: [inventoryJob, job] }; if (action === 'approve_outline') return { job: approved }; if (action === 'next_step') return { kind: 'awaiting_admin', job: approved }; throw new Error('Unexpected action: ' + action); }) };
   let view!: TestRenderer.ReactTestRenderer;
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+  expect(activeStepLabel(view)).toBe('Tạo lộ trình');
   expect(api.adminAi.mock.calls.some(([action]) => action === 'next_step')).toBe(false);
   const button = view.root.findAllByType('button').find((item) => item.children.join('') === 'Duyệt lộ trình và tiếp tục')!;
   await act(async () => { button.props.onClick(); });
   expect(api.adminAi).toHaveBeenCalledWith('approve_outline', { jobId: 'template-1', expectedRevision: 4 });
   expect(api.adminAi).toHaveBeenCalledWith('next_step', expect.objectContaining({ jobId: 'template-1' }));
+  expect(activeStepLabel(view)).toBe('Rà soát');
+  view.unmount(); vi.unstubAllGlobals();
+});
+
+it('returns to Tạo lộ trình when outline approval fails', async () => {
+  const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
+  vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+  const modules = ['t1-overview', 't1-access', 't1-navigation', 't1-core'].map((frameKey, order) => ({ moduleLocalId: `m${order}`, frameKey, order, title: frameKey, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] }));
+  const job = { ...failedTemplateJob, templateKind: 'normal' as const, roleProfile: undefined, status: 'running' as const, pipelineVersion: 'module_v2' as const, outline: { revision: 4, modules, flags: [], taskCoverage: [] }, outlineApprovedRevision: 0, moduleRuns: modules.map((outline) => ({ outline, outlineRevision: 4, lessonState: 'queued' as const, lessonVersion: 0, questionState: 'blocked' as const, questionVersion: 0 })) };
+  const approval = deferred<{ job: AiJobRecord }>();
+  const api = { adminAi: vi.fn(async (action: string) => {
+    if (action === 'list_sources') return { sources: [] };
+    if (action === 'list_jobs') return { jobs: [inventoryJob, job] };
+    if (action === 'approve_outline') return approval.promise;
+    throw new Error('Unexpected action: ' + action);
+  }) };
+  let view!: TestRenderer.ReactTestRenderer;
+  await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+
+  act(() => { view.root.findAllByType('button').find((item) => item.children.join('') === 'Duyệt lộ trình và tiếp tục')!.props.onClick(); });
+  expect(activeStepLabel(view)).toBe('Rà soát');
+  await act(async () => { approval.reject(new Error('Approval failed')); await Promise.resolve(); await Promise.resolve(); });
+  expect(activeStepLabel(view)).toBe('Tạo lộ trình');
+  view.unmount(); vi.unstubAllGlobals();
+});
+
+it('opens the selected outline source panel from a source-less review module', async () => {
+  const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
+  vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+  const module = { moduleLocalId: 'm', frameKey: 't1-core', order: 0, title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [] };
+  const job = { ...failedTemplateJob, templateKind: 'normal' as const, roleProfile: undefined, status: 'running' as const, pipelineVersion: 'module_v2' as const, outline: { revision: 1, modules: [module], flags: [], taskCoverage: [] }, outlineApprovedRevision: 1, moduleRuns: [{ outline: module, outlineRevision: 1, lessonState: 'manual_required' as const, lessonVersion: 0, questionState: 'blocked' as const, questionVersion: 0 }] };
+  const api = { adminAi: vi.fn(async (action: string) => {
+    if (action === 'list_sources') return { sources: [] };
+    if (action === 'list_jobs') return { jobs: [inventoryJob, job] };
+    if (action === 'list_module_sources') return { sources: [{ sourceId: 'policy', fileName: 'Policy.pdf', sections: [{ id: 'policy#1', headingPath: ['Quy định'] }] }] };
+    throw new Error('Unexpected action: ' + action);
+  }) };
+  let view!: TestRenderer.ReactTestRenderer;
+  await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+
+  await act(async () => { view.root.findAllByType('button').find((item) => item.children.join('') === 'Bổ sung tài liệu')!.props.onClick(); await Promise.resolve(); });
+  expect(activeStepLabel(view)).toBe('Tạo lộ trình');
+  expect(view.root.findByProps({ 'aria-label': 'Chọn tài liệu bổ sung' })).toBeDefined();
   view.unmount(); vi.unstubAllGlobals();
 });
 

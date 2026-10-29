@@ -88,9 +88,11 @@ export function aiGeneratorStepFor(state: {
   readonly sourceCount: number;
   readonly inventoryStatus?: AiJobRecord['status'];
   readonly templateStatus?: AiJobRecord['status'];
+  readonly outlineApproved?: boolean;
   readonly reviewReady?: boolean;
 }): number {
   if (state.reviewReady) return 4;
+  if (state.outlineApproved) return 3;
   if (state.templateStatus === 'completed') return 3;
   if (state.inventoryStatus === 'completed') return 2;
   if (state.sourceCount > 0) return 1;
@@ -885,6 +887,7 @@ export function AiGeneratorPage({
   const [activeReviewIndex, setActiveReviewIndex] = useState(0);
   const [busy, setBusy] = useState(false);
   const [editingOutline, setEditingOutline] = useState(false);
+  const [outlineFocusModuleId, setOutlineFocusModuleId] = useState<string | null>(null);
   const [moduleSourceCatalog, setModuleSourceCatalog] = useState<ModuleSourceCatalog>([]);
   const [selectedTemplateKind, setSelectedTemplateKind] = useState<EmployeeType | null>(null);
   const [selectedModuleId, setSelectedModuleId] = useState(() => roomId ? readAiResumeKey('onboarding:ai:module:' + roomId) ?? '' : '');
@@ -1095,7 +1098,15 @@ export function AiGeneratorPage({
           setTemplateRuns(restoredRuns);
           const firstReview = restoredRuns.findIndex((run) => run.review);
           if (firstReview >= 0) { setActiveReviewIndex(firstReview); setStep(3); }
-          else setStep(2);
+          else {
+            const draftReviewIndex = restoredRuns.findIndex((run) => run.job?.pipelineVersion === 'module_v2'
+              && Boolean(run.job.outline)
+              && run.job.outlineApprovedRevision === run.job.outline?.revision);
+            if (draftReviewIndex >= 0) {
+              setSelectedTemplateKind(restoredRuns[draftReviewIndex].kind);
+              setStep(3);
+            } else setStep(2);
+          }
           if (restoredRuns.every((run) => run.review) && restoredRuns.some((run) => run.publicationBatchId || run.review?.content?.publication || run.review?.status === 'published')) {
             const targets = restoredRuns.map((run) => restoreAiPublishTarget(run.review!, run.publicationBatchId));
             checkpointTargets(targets); setStep(4);
@@ -1307,13 +1318,18 @@ export function AiGeneratorPage({
     setBusy(true); setNotice(null);
     try {
       const job = activeReviewRun.job ?? (await api.adminAi<{ job: AiJobRecord }>('get_job', { jobId: review.jobId })).job;
-      setTemplateJob(job); setSelectedTemplateKind(activeReviewRun.kind); setStep(2);
+      setTemplateRuns((current) => current.map((run) => run.kind === activeReviewRun.kind
+        ? { ...run, job, review: null }
+        : run));
+      setSelectedTemplateKind(activeReviewRun.kind);
+      setOutlineFocusModuleId(null);
+      setStep(3);
     } catch (caught) { setNotice({ message: generationErrorMessage(caught), tone: 'error' }); }
     finally { setBusy(false); }
   }
 
-  async function moduleAction(action: string, args: Record<string, unknown>, resume = false) {
-    if (!templateJob) return;
+  async function moduleAction(action: string, args: Record<string, unknown>, resume = false): Promise<boolean> {
+    if (!templateJob) return false;
     setBusy(true); setNotice(null);
     try {
       let job = (await api.adminAi<{ job: AiJobRecord }>(action, { jobId: templateJob.jobId, ...args })).job;
@@ -1322,8 +1338,21 @@ export function AiGeneratorPage({
         job = await pump(job); setTemplateJob(job);
         await openCompletedModuleReview(job);
       }
-    } catch (caught) { if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' }); }
+      return true;
+    } catch (caught) {
+      if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
+      return false;
+    }
     finally { setBusy(false); }
+  }
+
+  async function approveOutlineAndStartDrafting(): Promise<void> {
+    if (!templateJob?.outline) return;
+    setEditingOutline(false);
+    setOutlineFocusModuleId(null);
+    setStep(3);
+    const approved = await moduleAction('approve_outline', { expectedRevision: templateJob.outline.revision }, true);
+    if (!approved) setStep(2);
   }
 
   async function generateTemplate() {
@@ -1683,9 +1712,7 @@ export function AiGeneratorPage({
             {templateJob?.pipelineVersion === 'module_v2' && templateJob.outline ? (
               <section className="ai-workspace-card ai-module-stage">
                 {templateRuns.length > 1 && <nav className="ai-module-actions" aria-label="Chọn template">{templateRuns.map((run, index) => <button type="button" key={run.kind} aria-pressed={run.kind === activeTemplateRun?.kind} onClick={() => setSelectedTemplateKind(run.kind)}>{run.job?.status === 'completed' ? 'Xem' : 'Tiếp tục'} Template {index + 1}</button>)}</nav>}
-                {templateJob.status === 'running' && templateJob.outlineApprovedRevision === templateJob.outline.revision && <button className="button button-secondary" type="button" disabled={busy} onClick={() => void resumeModuleJob()}>Tiếp tục xử lý</button>}
-                {templateJob.status === 'completed' && <div role="status"><strong>Các module đã được duyệt</strong><button type="button" disabled={busy} onClick={() => void resumeModuleJob()}>Rà soát bản nháp</button></div>}
-                {editingOutline || templateJob.outlineApprovedRevision !== templateJob.outline.revision ? <AiOutlineReview key={templateJob.jobId} outline={templateJob.outline} templateKind={templateJob.templateKind ?? 'normal'} responsibilities={templateJob.roleProfile?.responsibilities ?? []} busy={busy} sourceCatalog={moduleSourceCatalog} onSupplement={(moduleLocalId, sourceIds, sectionIds) => void moduleAction('supplement_module_sources', { expectedRevision: templateJob.outline!.revision, moduleLocalId, sourceIds, sectionIds })} onEdit={(edits) => void moduleAction('update_outline', { expectedRevision: templateJob.outline!.revision, edits })} onApprove={() => { setEditingOutline(false); void moduleAction('approve_outline', { expectedRevision: templateJob.outline!.revision }, true); }} /> : <><button type="button" onClick={() => setEditingOutline(true)}>Chỉnh sửa khung và nguồn</button><AiModuleWorkspace runs={templateJob.moduleRuns ?? []} calls={templateJob.calls} history={templateJob.stageOutputs.__moduleAudit} selectedId={selectedModuleId} busy={busy} onSelect={(id) => { setSelectedModuleId(id); if (roomId) writeAiResumeKey('onboarding:ai:module:' + roomId, id); }} onAction={(action, args) => void moduleAction(action, args, action === 'approve_module_lesson' || action === 'approve_module_questions' || action === 'retry_module')} onSources={() => setStep(0)} /></>}
+                <AiOutlineReview key={templateJob.jobId} outline={templateJob.outline} templateKind={templateJob.templateKind ?? 'normal'} responsibilities={templateJob.roleProfile?.responsibilities ?? []} busy={busy} initialModuleId={outlineFocusModuleId ?? selectedModuleId} initialPanel={outlineFocusModuleId ? 'source' : 'closed'} sourceCatalog={moduleSourceCatalog} onSupplement={(moduleLocalId, sourceIds, sectionIds) => void moduleAction('supplement_module_sources', { expectedRevision: templateJob.outline!.revision, moduleLocalId, sourceIds, sectionIds })} onEdit={(edits) => void moduleAction('update_outline', { expectedRevision: templateJob.outline!.revision, edits })} onApprove={() => void approveOutlineAndStartDrafting()} />
               </section>
             ) : <section className="ai-workspace-card ai-workspace-input-card">
               {templateRuns.length > 1 && <nav className="ai-module-actions" aria-label="Chọn template">{templateRuns.map((run, index) => <button type="button" key={run.kind} aria-pressed={run.kind === activeTemplateRun?.kind} onClick={() => setSelectedTemplateKind(run.kind)}>{run.job?.status === 'completed' ? 'Xem' : 'Tiếp tục'} Template {index + 1}</button>)}</nav>}
@@ -1738,27 +1765,70 @@ export function AiGeneratorPage({
             </div>
           </div>
         )}
-        {canGenerateWithAi && step === 3 && review && activeReviewRun && (
-          <div className="ai-review-stage">
-            {review.content?.moduleApproval && <button className="button button-secondary" type="button" disabled={busy} onClick={() => void editApprovedModules()}>Chỉnh sửa module</button>}
-            <AiReview
-              api={api}
-              review={review}
-              busy={busy}
-              sequence={{
-                index: activeReviewIndex,
-                total: templateRuns.length,
-                kind: activeReviewRun.kind,
-              }}
-              onUpdated={(ops) => void updateReview(ops)}
-              onResolve={(flag, action, note, index) => void resolveFlag(flag, action, note, index)}
-            />
-            <section className="ai-review-settings-bar" aria-label="Thiết lập template đang rà soát">
-              <label className="form-field"><span>Ngưỡng đạt</span><input type="number" min={50} max={100} value={passingScore} onChange={(event) => updateActiveSettings({ passingScore: Number(event.target.value) })} /></label>
-              <label className="form-field"><span>Số lượt mỗi module</span><input type="number" min={1} max={10} value={maxAttemptsPerModule ?? ''} placeholder="Không giới hạn" onChange={(event) => updateActiveSettings({ maxAttemptsPerModule: event.target.value ? Number(event.target.value) : null })} /></label>
-              <label className="form-field"><span>Chế độ học</span><select value={learningMode} onChange={(event) => updateActiveSettings({ learningMode: event.target.value as 'sequential' | 'free' })}><option value="sequential">Tuần tự</option><option value="free">Tự do</option></select></label>
-            </section>
-          </div>
+        {canGenerateWithAi && step === 3 && (
+          review && activeReviewRun ? (
+            <div className="ai-review-stage">
+              {review.content?.moduleApproval && <button className="button button-secondary" type="button" disabled={busy} onClick={() => void editApprovedModules()}>Chỉnh sửa module</button>}
+              <AiReview
+                api={api}
+                review={review}
+                busy={busy}
+                sequence={{
+                  index: activeReviewIndex,
+                  total: templateRuns.length,
+                  kind: activeReviewRun.kind,
+                }}
+                onUpdated={(ops) => void updateReview(ops)}
+                onResolve={(flag, action, note, index) => void resolveFlag(flag, action, note, index)}
+              />
+              <section className="ai-review-settings-bar" aria-label="Thiết lập template đang rà soát">
+                <label className="form-field"><span>Ngưỡng đạt</span><input type="number" min={50} max={100} value={passingScore} onChange={(event) => updateActiveSettings({ passingScore: Number(event.target.value) })} /></label>
+                <label className="form-field"><span>Số lượt mỗi module</span><input type="number" min={1} max={10} value={maxAttemptsPerModule ?? ''} placeholder="Không giới hạn" onChange={(event) => updateActiveSettings({ maxAttemptsPerModule: event.target.value ? Number(event.target.value) : null })} /></label>
+                <label className="form-field"><span>Chế độ học</span><select value={learningMode} onChange={(event) => updateActiveSettings({ learningMode: event.target.value as 'sequential' | 'free' })}><option value="sequential">Tuần tự</option><option value="free">Tự do</option></select></label>
+              </section>
+            </div>
+          ) : templateJob?.pipelineVersion === 'module_v2' && templateJob.outlineApprovedRevision === templateJob.outline?.revision ? (
+            <div className="ai-workspace ai-module-review-stage">
+              <section className="ai-workspace-card ai-workspace-progress-card">
+                <span className="section-kicker">TIẾN TRÌNH AI</span>
+                {templateRuns.length > 1 && (
+                  <nav className="ai-run-sequence" aria-label="Chọn template">
+                    {templateRuns.map((run, index) => (
+                      <button
+                        type="button"
+                        className={run.review ? 'done' : index === activeTemplateIndex ? 'active' : ''}
+                        aria-pressed={run.kind === activeTemplateRun?.kind}
+                        key={run.kind}
+                        onClick={() => { setSelectedTemplateKind(run.kind); if (!run.job) setStep(2); }}
+                      >{run.job ? 'Xem' : 'Tiếp tục'} Template {index + 1}</button>
+                    ))}
+                  </nav>
+                )}
+                <AiMilestoneProgress
+                  label={`Template ${activeTemplateIndex + 1}/${templateRuns.length} · ${activeTemplateRun?.kind === 'advanced' ? 'Chuyên sâu' : 'Thông thường'}`}
+                  job={templateJob}
+                  milestones={templateMilestones(templateJob)}
+                />
+              </section>
+              <section className="ai-workspace-card ai-module-stage">
+                <div className="ai-module-stage-heading">
+                  <button type="button" onClick={() => { setOutlineFocusModuleId(null); setEditingOutline(true); setStep(2); }}>Chỉnh sửa lộ trình</button>
+                  {templateJob.status === 'running' && <button className="button button-secondary" type="button" disabled={busy} onClick={() => void resumeModuleJob()}>Tiếp tục xử lý</button>}
+                  {templateJob.status === 'completed' && <button type="button" disabled={busy} onClick={() => void resumeModuleJob()}>Rà soát bản nháp</button>}
+                </div>
+                <AiModuleWorkspace
+                  runs={templateJob.moduleRuns ?? []}
+                  calls={templateJob.calls}
+                  history={templateJob.stageOutputs.__moduleAudit}
+                  selectedId={selectedModuleId}
+                  busy={busy}
+                  onSelect={(id) => { setSelectedModuleId(id); if (roomId) writeAiResumeKey('onboarding:ai:module:' + roomId, id); }}
+                  onAction={(action, args) => moduleAction(action, args, action === 'approve_module_lesson' || action === 'approve_module_questions' || action === 'retry_module')}
+                  onSources={() => { setOutlineFocusModuleId(selectedModuleId || templateJob.moduleRuns?.[0]?.outline.moduleLocalId || null); setEditingOutline(true); setStep(2); }}
+                />
+              </section>
+            </div>
+          ) : null
         )}
         {canGenerateWithAi && step === 4 && templateRuns.length > 0 && (
           <div className="ai-publish-summary ai-publish-batch-summary">
@@ -1847,10 +1917,14 @@ export function AiGeneratorPage({
             className="button button-secondary"
             type="button"
             disabled={busy || step === 0 || publishTargets.some((target) => Boolean(target.publishedTemplate))
-              || (Boolean(initialTemplate) && step !== 3) || (step === 3 && !reviewNavigation.canBack)}
+              || (Boolean(initialTemplate) && step !== 3) || (step === 3 && Boolean(review) && !reviewNavigation.canBack)}
             onClick={() => {
               if (step === 3 && reviewNavigation.canBack) {
                 setActiveReviewIndex(moveReviewIndex(templateRuns, activeReviewIndex, 'back').index);
+              } else if (step === 3 && !review) {
+                setOutlineFocusModuleId(null);
+                setEditingOutline(true);
+                setStep(2);
               } else if (step === 4) {
                 setActiveReviewIndex(Math.max(0, templateRuns.length - 1));
                 setStep(3);

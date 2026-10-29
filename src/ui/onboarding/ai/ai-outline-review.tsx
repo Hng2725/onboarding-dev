@@ -53,6 +53,8 @@ export function AiOutlineReview({
   busy,
   onEdit,
   onApprove,
+  initialModuleId,
+  initialPanel = 'closed',
   sourceCatalog = [],
   onSupplement,
 }: {
@@ -62,12 +64,14 @@ export function AiOutlineReview({
   busy: boolean;
   onEdit: (edits: readonly OutlineEdit[]) => void;
   onApprove: () => void;
+  initialModuleId?: string;
+  initialPanel?: 'closed' | 'source';
   sourceCatalog?: ModuleSourceCatalog;
   onSupplement?: (moduleLocalId: string, sourceIds: string[], sectionIds: string[]) => void;
 }) {
   const modules = outline.modules.filter((module) => !module.tombstoned).sort((left, right) => left.order - right.order);
-  const [selectedModuleId, setSelectedModuleId] = useState(() => modules[0]?.moduleLocalId ?? '');
-  const [panel, setPanel] = useState<'closed' | 'edit' | 'add'>('closed');
+  const [selectedModuleId, setSelectedModuleId] = useState(() => modules.some((module) => module.moduleLocalId === initialModuleId) ? initialModuleId! : modules[0]?.moduleLocalId ?? '');
+  const [panel, setPanel] = useState<'closed' | 'edit' | 'add'>(() => initialPanel === 'source' ? 'edit' : 'closed');
   const [editorDirty, setEditorDirty] = useState(false);
   const moduleIds = modules.map((module) => module.moduleLocalId).join('|');
   useEffect(() => {
@@ -172,6 +176,7 @@ export function AiOutlineReview({
           busy={busy}
           sourceCatalog={sourceCatalog}
           onSupplement={onSupplement}
+          initialSourceOpen={initialPanel === 'source'}
           onDirty={setEditorDirty}
           onEdit={onEdit}
           onClose={closePanel}
@@ -243,6 +248,7 @@ function ModuleEditPanel({
   busy,
   sourceCatalog,
   onSupplement,
+  initialSourceOpen,
   onDirty,
   onEdit,
   onClose,
@@ -256,6 +262,7 @@ function ModuleEditPanel({
   busy: boolean;
   sourceCatalog: ModuleSourceCatalog;
   onSupplement?: (moduleLocalId: string, sourceIds: string[], sectionIds: string[]) => void;
+  initialSourceOpen: boolean;
   onDirty: (dirty: boolean) => void;
   onEdit: (edits: readonly OutlineEdit[]) => void;
   onClose: () => void;
@@ -266,7 +273,7 @@ function ModuleEditPanel({
   const [estimatedMinutes, setEstimatedMinutes] = useState(module.estimatedMinutes);
   const [objectives, setObjectives] = useState(module.objectives.join('\n'));
   const [assignments, setAssignments] = useState(module.responsibilityIndexes.join(', '));
-  const [sourcePickerOpen, setSourcePickerOpen] = useState(false);
+  const [sourcePickerOpen, setSourcePickerOpen] = useState(initialSourceOpen);
   const [selectedSections, setSelectedSections] = useState<ReadonlySet<string>>(new Set());
   const dirty = title !== initialTitle
     || description !== module.description

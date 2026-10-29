@@ -228,6 +228,9 @@ describe('Admin AI template UI model', () => {
       sourceCount: 2, inventoryStatus: 'completed', templateStatus: 'running',
     })).toBe(2);
     expect(aiGeneratorStepFor({
+      sourceCount: 2, inventoryStatus: 'completed', templateStatus: 'running', outlineApproved: true,
+    })).toBe(3);
+    expect(aiGeneratorStepFor({
       sourceCount: 2, inventoryStatus: 'completed', templateStatus: 'completed',
     })).toBe(3);
     expect(aiGeneratorStepFor({
