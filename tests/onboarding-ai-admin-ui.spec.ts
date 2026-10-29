@@ -600,6 +600,7 @@ describe('Admin AI template UI model', () => {
     ];
     const callbacks = {
       clearResume: () => calls.push('clear'),
+      resetSession: () => calls.push('reset'),
       onComplete: () => calls.push('refresh'),
       onClose: () => calls.push('close'),
     };
@@ -614,7 +615,7 @@ describe('Admin AI template UI model', () => {
     expect(finishSuccessfulAiPublish(complete.map((target) => ({ ...target, review: { ...target.review, version: 2 } })), callbacks)).toBe(false);
 
     expect(finishSuccessfulAiPublish(complete, callbacks)).toBe(true);
-    expect(calls).toEqual(['clear', 'refresh', 'close']);
+    expect(calls).toEqual(['clear', 'reset', 'refresh', 'close']);
   });
   it('reports completed AI calls and blocks publishing while blocking flags are open', () => {
     expect(aiJobProgress({

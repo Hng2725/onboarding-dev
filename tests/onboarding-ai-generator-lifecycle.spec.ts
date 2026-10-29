@@ -133,7 +133,7 @@ describe('AI generator lifecycle', () => {
     });
     const api = {
       adminAi: vi.fn(async (action: string, args: Record<string, unknown> = {}) => {
-        if (action === 'list_sources') return { sources: [] };
+        if (action === 'list_sources') return { sources: (await store.query(actor.roomId, 'onboarding_sources')).records };
         if (action === 'list_jobs') return { jobs: (await store.query(actor.roomId, 'onboarding_ai_jobs')).records,
           publicationBatches: await reviews.listIncompletePublications(actor) };
         if (action === 'begin_publication') return { batch: await reviews.beginPublication(actor, args as unknown as Parameters<AiReviewService['beginPublication']>[1]) };
@@ -152,7 +152,10 @@ describe('AI generator lifecycle', () => {
     targets.length = 0;
     templates = createTemplateService(store);
     reviews = createAiReviewService(store, templates);
-    const storage = new Map<string, string>();
+    const storage = new Map<string, string>([
+      ['onboarding:ai:responsibilities:room-1', 'Old task'],
+      ['onboarding:ai:module:room-1', 'old-module'],
+    ]);
     vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
     vi.stubGlobal('FileReader', class {
       result = 'data:application/pdf;base64,YQ==';
@@ -179,6 +182,18 @@ describe('AI generator lifecycle', () => {
     expect(await store.count(actor.roomId, 'onboarding_templates')).toBe(2);
     expect(await store.count(actor.roomId, 'onboarding_resources')).toBe(9);
     expect(await reviews.listIncompletePublications(actor)).toEqual([]);
+    view.unmount();
+    expect(storage.size).toBe(0);
+
+    await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, {
+      api: api as never, canGenerateWithAi: true, onClose: closed, onComplete: completed,
+    })); });
+    expect(activeStepLabel(view)).toBe('Tài liệu nguồn');
+    const sourceList = view.root.findByProps({ 'aria-label': 'Danh sách tài liệu nguồn' });
+    expect(sourceList.findByType('input').props.checked).toBe(true);
+    expect(sourceList.findAllByType('strong').some((item) => item.children.join('') === 'orders.md')).toBe(true);
+    expect(api.adminAi.mock.calls.some(([action]) => action === 'delete_source')).toBe(false);
+    expect(api.adminTemplates.mock.calls.some(([action]) => action === 'delete')).toBe(false);
     view.unmount();
     vi.unstubAllGlobals();
     host.apps[0].uploadFile.mockReset();

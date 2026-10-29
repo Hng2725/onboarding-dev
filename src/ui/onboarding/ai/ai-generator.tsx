@@ -736,6 +736,7 @@ export function finishSuccessfulAiPublish(
   targets: readonly AiPublishTarget[],
   callbacks: {
     readonly clearResume: () => void;
+    readonly resetSession: () => void;
     readonly onComplete: () => void;
     readonly onClose: () => void;
   },
@@ -745,6 +746,7 @@ export function finishSuccessfulAiPublish(
     || aiPublishTargetKey(target.review) !== aiPublishTargetKey(target.preparedReview)
     || aiPublishTargetKey(target.review) !== aiPublishTargetKey(target.publishedTemplate))) return false;
   callbacks.clearResume();
+  callbacks.resetSession();
   callbacks.onComplete();
   callbacks.onClose();
   return true;
@@ -1704,14 +1706,8 @@ export function AiGeneratorPage({
         tone: 'success',
       });
       if (!finishSuccessfulAiPublish(completed, {
-        clearResume: () => clearAiResumeKeys([
-          'onboarding:ai:inventory:' + roomId,
-          'onboarding:ai:template:' + roomId,
-          'onboarding:ai:template:' + roomId + ':normal',
-          'onboarding:ai:template:' + roomId + ':advanced',
-          'onboarding:ai:publish:' + roomId + ':' + userId,
-          'onboarding:ai:selection:' + roomId,
-        ]),
+        clearResume: () => clearAiResumeKeys(aiGeneratorResumeKeys(roomId, userId)),
+        resetSession: () => resetLocalSession(sources),
         onComplete,
         onClose,
       })) {
