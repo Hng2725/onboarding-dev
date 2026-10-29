@@ -366,7 +366,7 @@ it('approves the persisted outline revision then resumes only that job', async (
   let view!: TestRenderer.ReactTestRenderer;
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
   expect(api.adminAi.mock.calls.some(([action]) => action === 'next_step')).toBe(false);
-  const button = view.root.findAllByType('button').find((item) => item.children.join('') === 'Duyệt khung và bắt đầu viết')!;
+  const button = view.root.findAllByType('button').find((item) => item.children.join('') === 'Duyệt lộ trình và tiếp tục')!;
   await act(async () => { button.props.onClick(); });
   expect(api.adminAi).toHaveBeenCalledWith('approve_outline', { jobId: 'template-1', expectedRevision: 4 });
   expect(api.adminAi).toHaveBeenCalledWith('next_step', expect.objectContaining({ jobId: 'template-1' }));
