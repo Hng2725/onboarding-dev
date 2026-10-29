@@ -68,7 +68,6 @@ import {
   aiReviewReadiness,
   generateValidatedTemplateRuns,
   mergeTemplateRunJobs,
-  moveReviewIndex,
   reviewAdvanceState,
   selectResumableTemplateRuns,
   templateJobRequest,
@@ -753,7 +752,7 @@ export function AiTemplateSelection({
   readonly onTemplateTitleChange: (value: string) => void;
   readonly onResponsibilitiesChange: (value: string) => void;
 }) {
-  const advanced = selection === 'advanced' || selection === 'both';
+  const advanced = selection === 'advanced';
   return (
     <section className="ai-request-fields" aria-labelledby="ai-template-selection-title">
       <span className="section-kicker">LOẠI LỘ TRÌNH</span>
@@ -782,16 +781,6 @@ export function AiTemplateSelection({
         >
           <strong>Template 2</strong>
           <span>Chuyên sâu theo vai trò và nhiệm vụ</span>
-        </button>
-        <button
-          className={selection === 'both' ? 'active' : ''}
-          type="button"
-          role="radio"
-          aria-checked={selection === 'both'}
-          onClick={() => onSelect('both')}
-        >
-          <strong>Cả hai</strong>
-          <span>Tạo Template 1 trước, sau đó Template 2</span>
         </button>
       </div>
       {errors.selection && (
@@ -1053,10 +1042,12 @@ export function AiGeneratorPage({
         setRoomJobs(result.jobs);
         const inventoryId = roomId ? readAiResumeKey('onboarding:ai:inventory:' + roomId) : null;
         const legacyTemplateId = roomId ? readAiResumeKey('onboarding:ai:template:' + roomId) : null;
-        const resumeJobIds = roomId ? {
-          normal: readAiResumeKey('onboarding:ai:template:' + roomId + ':normal'),
-          advanced: readAiResumeKey('onboarding:ai:template:' + roomId + ':advanced'),
-        } : {};
+        // One-time migration: older sessions stored one key per kind plus a selection key.
+        const resumeJobIds = roomId ? [
+          legacyTemplateId,
+          readAiResumeKey('onboarding:ai:template:' + roomId + ':normal'),
+          readAiResumeKey('onboarding:ai:template:' + roomId + ':advanced'),
+        ] : [];
         const { inventory } = selectResumableAiJobs({
           jobs: result.jobs,
           inventoryJobId: inventoryId,
@@ -1067,27 +1058,26 @@ export function AiGeneratorPage({
           jobs: result.jobs,
           publicationBatches: result.publicationBatches,
           resumeJobIds,
-          legacyTemplateJobId: legacyTemplateId,
           userId,
         });
-        if (restoredRuns.length === 1 && roomId && readAiResumeKey('onboarding:ai:selection:' + roomId) === 'both') {
-          restoredRuns = (['normal', 'advanced'] as const).map((kind) => restoredRuns.find((run) => run.kind === kind) ?? { kind, job: null, review: null });
-        }
         const restoredInventoryId = restoredRuns.find((run) => run.job?.inventoryJobId)?.job?.inventoryJobId;
         const restoredInventory = result.jobs.find((job) => job.kind === 'inventory' && job.jobId === restoredInventoryId);
         setInventoryJob(inventory ?? restoredInventory ?? null);
         setTemplateRuns(restoredRuns);
         if (restoredRuns.length > 0) {
-          setTemplateSelection(restoredRuns.length > 1 ? 'both' : restoredRuns[0].kind);
+          setTemplateSelection(restoredRuns[0].kind);
           const advancedProfile = restoredRuns.find((run) => run.kind === 'advanced')?.job?.roleProfile;
           if (advancedProfile) {
             setResponsibilities(advancedProfile.responsibilities.join('\n'));
           } else if (roomId) setResponsibilities(readAiResumeKey('onboarding:ai:responsibilities:' + roomId) ?? '');
           if (roomId) {
-            for (const run of restoredRuns) {
-              if (run.job) writeAiResumeKey('onboarding:ai:template:' + roomId + ':' + run.kind, run.job.jobId);
-            }
-            if (legacyTemplateId) clearAiResumeKeys(['onboarding:ai:template:' + roomId]);
+            const restoredJob = restoredRuns[0].job;
+            if (restoredJob) writeAiResumeKey('onboarding:ai:template:' + roomId, restoredJob.jobId);
+            clearAiResumeKeys([
+              'onboarding:ai:template:' + roomId + ':normal',
+              'onboarding:ai:template:' + roomId + ':advanced',
+              'onboarding:ai:selection:' + roomId,
+            ]);
           }
           for (const run of restoredRuns) {
             const output = run.publicationTarget ?? (run.job?.status === 'completed' && run.job.result && typeof run.job.result === 'object'
@@ -1419,7 +1409,6 @@ export function AiGeneratorPage({
   function chooseTemplateSelection(selection: Exclude<TemplateSelection, null>) {
     setSelectedTemplateKind(null);
     setTemplateSelection(selection);
-    if (roomId) writeAiResumeKey('onboarding:ai:selection:' + roomId, selection);
     setActiveReviewIndex(0);
     setTemplateRuns((current) => templateKindsForSelection(selection).map((kind) =>
       current.find((run) => run.kind === kind) ?? { kind, job: null, review: null }));
@@ -1507,7 +1496,7 @@ export function AiGeneratorPage({
                 }))).job;
           setTemplateJob(job);
           if (roomId) {
-            writeAiResumeKey('onboarding:ai:template:' + roomId + ':' + current.kind, job.jobId);
+            writeAiResumeKey('onboarding:ai:template:' + roomId, job.jobId);
           }
           job = await pump(job);
           setTemplateJob(job);
@@ -1539,9 +1528,7 @@ export function AiGeneratorPage({
       setActiveReviewIndex(Math.max(0, result.runs.findIndex((run) => run.review && !templateRuns.find((prior) => prior.kind === run.kind)?.review)));
       setStep(3);
       setNotice({
-        message: result.runs.length === 2
-          ? 'AI đã tạo hai bản nháp theo thứ tự Template 1 rồi Template 2.'
-          : 'AI đã tạo bản nháp để Admin rà soát.',
+        message: 'AI đã tạo bản nháp để Admin rà soát.',
         tone: 'success',
       });
     } catch (caught) {
@@ -1718,8 +1705,8 @@ export function AiGeneratorPage({
     }
   }
   const reviewNavigation = useMemo(
-    () => reviewAdvanceState(templateRuns, activeReviewIndex),
-    [activeReviewIndex, templateRuns],
+    () => reviewAdvanceState(templateRuns),
+    [templateRuns],
   );
   const publishReadiness = useMemo(() => {
     const blockingCount = templateRuns.reduce(
@@ -1853,7 +1840,7 @@ export function AiGeneratorPage({
               />
               <div className="ai-output-summary">
                 <strong>Kết quả dự kiến</strong>
-                <span>{templateSelection === 'both' ? '2 template độc lập' : '1 template'}</span>
+                <span>1 template</span>
                 <span>Tài liệu học và câu hỏi theo từng module</span>
               </div>
             </section>}
@@ -2031,7 +2018,7 @@ export function AiGeneratorPage({
                 ? 'Đang chuẩn bị và xuất bản…'
                 : publishTargets.some((target) => target.phase === 'failed')
                   ? 'Thử lại xuất bản'
-                  : templateRuns.length > 1 ? 'Xuất bản cả hai' : 'Xuất bản template'}
+                  : 'Xuất bản template'}
             </button>
           </div>
         )}
@@ -2048,11 +2035,9 @@ export function AiGeneratorPage({
               className="button button-secondary"
               type="button"
               disabled={busy || resetting || step === 0 || publishTargets.some((target) => Boolean(target.publishedTemplate))
-                || (Boolean(initialTemplate) && step !== 3) || (step === 3 && Boolean(review) && !reviewNavigation.canBack)}
+                || (Boolean(initialTemplate) && step !== 3) || (step === 3 && Boolean(review))}
               onClick={() => {
-                if (step === 3 && reviewNavigation.canBack) {
-                  setActiveReviewIndex(moveReviewIndex(templateRuns, activeReviewIndex, 'back').index);
-                } else if (step === 3 && !review) {
+                if (step === 3 && !review) {
                   setOutlineFocusModuleId(null);
                   setEditingOutline(true);
                   setStep(2);
@@ -2063,7 +2048,7 @@ export function AiGeneratorPage({
                   setStep((value) => Math.max(0, value - 1));
                 }
               }}
-            >{step === 3 && reviewNavigation.canBack ? 'Template trước' : 'Quay lại'}</button>
+            >Quay lại</button>
           </div>
           <div>
             {step === 0 && <button className="button button-primary" type="button" disabled={selectedIds.size === 0} onClick={() => setStep(1)}>Tiếp tục</button>}
@@ -2078,14 +2063,9 @@ export function AiGeneratorPage({
                   type="button"
                   disabled={busy || !reviewNavigation.canNext}
                   onClick={() => {
-                    if (reviewNavigation.atPublishSummary) setStep(4);
-                    else {
-                      const nextIndex = moveReviewIndex(templateRuns, activeReviewIndex, 'next').index;
-                      setActiveReviewIndex(nextIndex);
-                      if (!templateRuns[nextIndex].review) { setSelectedTemplateKind(templateRuns[nextIndex].kind); setStep(2); }
-                    }
+                    setStep(4);
                   }}
-                >{reviewNavigation.atPublishSummary ? 'Kiểm tra xuất bản' : `Tiếp: Template ${activeReviewIndex + 2}`}</button>
+                >Kiểm tra xuất bản</button>
               </>
             )}
             {step === 4 && !publishReadiness.allowed && (

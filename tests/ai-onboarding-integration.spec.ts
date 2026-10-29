@@ -15,7 +15,7 @@ import { seedAiSource } from './helpers/ai-template-fixture';
 import { approvedModuleJob } from './helpers/approved-module-fixture';
 import { completePlan } from './helpers/complete-plan';
 import { useManualReview } from './helpers/manual-review';
-import { generateValidatedTemplateRuns, moveReviewIndex, reviewAdvanceState } from '../src/ui/onboarding/ai/ai-template-batch';
+import { generateValidatedTemplateRuns, reviewAdvanceState } from '../src/ui/onboarding/ai/ai-template-batch';
 import { publishAiTemplateBatch } from '../src/ui/onboarding/ai/ai-publish-batch';
 
 const admin: OnboardingActor = { userId: 'admin-1', roomId: 'room-a', access: 'admin' };
@@ -128,7 +128,7 @@ describe('AI onboarding integration', () => {
     expect(await store.count(admin.roomId, 'onboarding_resources')).toBe(0);
   });
 
-  it('requires explicit Both advancement and publishes both materialized drafts sequentially and idempotently', async () => {
+  it('publishes the single materialized draft idempotently', async () => {
     const store = new MemoryOnboardingStore();
     await seedAiSource(store);
     const jobs = createAiJobService(store);
@@ -143,14 +143,9 @@ describe('AI onboarding integration', () => {
       const result = done.job.result as { templateId: string; version: number };
       return { ...run, job: done.job, review: await review.getReview(admin, result.templateId, result.version) };
     };
-    const first = await generateValidatedTemplateRuns({ selection: 'both', responsibilities: 'Process orders\nReview orders', runs: [], generateOne });
-    expect(order).toEqual(['generate:normal']);
-    expect(first.runs[1].job).toBeNull();
-    expect(reviewAdvanceState(first.runs, 0).canNext).toBe(true);
-    const next = moveReviewIndex(first.runs, 0, 'next');
-    expect(next.index).toBe(1);
-    const second = await generateValidatedTemplateRuns({ selection: 'both', responsibilities: 'Process orders\nReview orders', runs: next.runs, generateOne });
-    expect(order).toEqual(['generate:normal', 'generate:advanced']);
+    const second = await generateValidatedTemplateRuns({ selection: 'advanced', responsibilities: 'Process orders\nReview orders', runs: [], generateOne });
+    expect(order).toEqual(['generate:advanced']);
+    expect(reviewAdvanceState(second.runs).canNext).toBe(true);
     const dependencies = {
       prepareResources: async (target: import('../src/ui/onboarding/ai/ai-publish-batch').AiPublishTarget) => {
         order.push(`files:${target.kind}`);
@@ -163,11 +158,11 @@ describe('AI onboarding integration', () => {
       exportJson: async (published: import('../src/onboarding/templates').AdminTemplateDetail) => { order.push(`json:${published.employeeType}`); },
     };
     const published = await publishAiTemplateBatch(second.runs.map((run) => ({ kind: run.kind, review: run.review!, jsonExported: false, phase: 'idle' as const })), dependencies);
-    expect(order).toEqual(['generate:normal', 'generate:advanced', 'files:normal', 'publish:normal', 'json:normal', 'files:advanced', 'publish:advanced', 'json:advanced']);
+    expect(order).toEqual(['generate:advanced', 'files:advanced', 'publish:advanced', 'json:advanced']);
     const once = [...order];
     await publishAiTemplateBatch(published, dependencies);
     expect(order).toEqual(once);
-    expect((await templates.list(admin)).filter((template) => template.source === 'ai_generated').map((template) => template.status)).toEqual(['published', 'published']);
+    expect((await templates.list(admin)).filter((template) => template.source === 'ai_generated').map((template) => template.status)).toEqual(['published']);
   });
   it('materializes current approved module pairs on completion without publishing', async () => {
     const store = new MemoryOnboardingStore();

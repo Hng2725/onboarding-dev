@@ -1111,7 +1111,7 @@ describe('AI template request workspace', () => {
     onResponsibilitiesChange: () => undefined,
   };
 
-  it('renders all three mandatory choices and explains a missing selection', () => {
+  it('renders both mandatory choices and explains a missing selection', () => {
     const html = renderToStaticMarkup(createElement(AiTemplateSelection, {
       ...commonProps,
       selection: null,
@@ -1120,7 +1120,7 @@ describe('AI template request workspace', () => {
 
     expect(html).toContain('Template 1');
     expect(html).toContain('Template 2');
-    expect(html).toContain('Cả hai');
+    expect(html).not.toContain('Cả hai');
     expect(html).toContain('Chọn ít nhất một loại lộ trình.');
     expect(html).toContain('role="radiogroup"');
   });

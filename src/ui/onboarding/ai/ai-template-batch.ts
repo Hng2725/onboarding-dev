@@ -2,7 +2,7 @@ import { normalizeForMatch } from '../../../onboarding/ai/grounding';
 import type { AiJobRecord, AiPublicationBatch, AiPublicationTarget, AiTemplateAssessmentSettings, EmployeeType, RoleProfile } from '../../../onboarding/contracts';
 import type { AdminTemplateDetail } from '../../../onboarding/templates';
 
-export type TemplateSelection = EmployeeType | 'both' | null;
+export type TemplateSelection = EmployeeType | null;
 
 export interface TemplateRequestErrors {
   readonly selection?: string;
@@ -21,7 +21,6 @@ export interface AiTemplateRun {
 }
 
 export function templateKindsForSelection(selection: TemplateSelection): readonly EmployeeType[] {
-  if (selection === 'both') return ['normal', 'advanced'];
   return selection ? [selection] : [];
 }
 
@@ -45,15 +44,8 @@ export function validateTemplateRequest(input: {
   };
 }
 
-export function templateTitleForKind(
-  baseTitle: string,
-  selection: TemplateSelection,
-  kind: EmployeeType,
-): string | undefined {
-  const title = baseTitle.trim();
-  if (!title) return undefined;
-  if (selection !== 'both') return title;
-  return `${title} – ${kind === 'normal' ? 'Template 1' : 'Template 2'}`;
+export function templateTitleForKind(baseTitle: string): string | undefined {
+  return baseTitle.trim() || undefined;
 }
 
 export class AiTemplateGenerationError extends Error {
@@ -104,8 +96,8 @@ export function mergeTemplateRunJobs(
 }
 export function selectResumableTemplateRuns(input: {
   readonly jobs: readonly AiJobRecord[];
-  readonly resumeJobIds: Readonly<Partial<Record<EmployeeType, string | null>>>;
-  readonly legacyTemplateJobId?: string | null;
+  /** Saved job ids (the single key plus any legacy per-kind keys); the newest eligible job wins. */
+  readonly resumeJobIds: readonly (string | null | undefined)[];
   readonly userId?: string;
   readonly publicationBatches?: readonly AiPublicationBatch[];
 }): readonly AiTemplateRun[] {
@@ -114,27 +106,19 @@ export function selectResumableTemplateRuns(input: {
     && Boolean(job.templateKind)
     && (!input.userId || job.createdBy === input.userId));
   const byId = (jobId: string | null | undefined) => eligible.find((job) => job.jobId === jobId);
+  const createdAt = (job: AiJobRecord | undefined) => (job ? Date.parse(job.createdAt) : 0);
   const publication = input.publicationBatches?.filter((batch) => !input.userId || batch.createdBy === input.userId)
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
-  if (publication) return [...publication.targets]
-    .sort((a, b) => a.kind === b.kind ? 0 : a.kind === 'normal' ? -1 : 1)
-    .map((target) => ({ kind: target.kind, job: byId(target.jobId) ?? null, review: null,
-      settings: target.settings, publicationBatchId: publication.batchId, publicationTarget: target }));
-  const legacy = byId(input.legacyTemplateJobId);
-  const newestRecoverable = (kind: EmployeeType) => eligible
-    .filter((job) => job.templateKind === kind
-      && (job.status === 'running' || job.status === 'failed'))
-    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0];
-
-  return (['normal', 'advanced'] as const).flatMap((kind) => {
-    const saved = byId(input.resumeJobIds[kind]);
-    const job = saved?.templateKind === kind
-      ? saved
-      : legacy?.templateKind === kind
-        ? legacy
-        : newestRecoverable(kind);
-    return job ? [{ kind, job, review: null }] : [];
-  });
+  const target = publication && [...publication.targets]
+    .sort((a, b) => createdAt(byId(b.jobId)) - createdAt(byId(a.jobId)))[0];
+  if (publication && target) {
+    return [{ kind: target.kind, job: byId(target.jobId) ?? null, review: null,
+      settings: target.settings, publicationBatchId: publication.batchId, publicationTarget: target }];
+  }
+  const saved = input.resumeJobIds.flatMap((jobId) => byId(jobId) ?? []);
+  const recoverable = eligible.filter((job) => job.status === 'running' || job.status === 'failed');
+  const job = [...saved, ...recoverable].sort((left, right) => createdAt(right) - createdAt(left))[0];
+  return job?.templateKind ? [{ kind: job.templateKind, job, review: null }] : [];
 }
 
 export interface TemplateStartJobRequest extends Readonly<Record<string, unknown>> {
@@ -169,9 +153,7 @@ export function templateJobRequest(input: {
           },
         }
       : {}),
-    ...(templateTitleForKind(input.baseTitle, input.selection, input.kind)
-      ? { title: templateTitleForKind(input.baseTitle, input.selection, input.kind) }
-      : {}),
+    ...(templateTitleForKind(input.baseTitle) ? { title: templateTitleForKind(input.baseTitle) } : {}),
     operationId: input.operationId,
   };
 }
@@ -207,32 +189,18 @@ export function aiReviewReadiness(
 
 export function reviewAdvanceState(
   runs: readonly AiTemplateRun[],
-  activeIndex: number,
 ): {
   readonly canBack: boolean;
   readonly canNext: boolean;
   readonly atPublishSummary: boolean;
   readonly blockingCount: number;
 } {
-  const current = runs[activeIndex];
+  const current = runs[0];
   const readiness = aiReviewReadiness(current?.review);
   return {
-    canBack: activeIndex > 0,
+    canBack: false,
     canNext: Boolean(current?.review) && readiness.allowed,
-    atPublishSummary: runs.length > 0 && activeIndex === runs.length - 1,
+    atPublishSummary: runs.length > 0,
     blockingCount: readiness.blockingCount,
-  };
-}
-
-export function moveReviewIndex(
-  runs: readonly AiTemplateRun[],
-  activeIndex: number,
-  direction: 'back' | 'next',
-): { readonly runs: readonly AiTemplateRun[]; readonly index: number } {
-  const delta = direction === 'back' ? -1 : 1;
-  const upper = Math.max(0, runs.length - 1);
-  return {
-    runs,
-    index: Math.max(0, Math.min(upper, activeIndex + delta)),
   };
 }

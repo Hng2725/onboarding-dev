@@ -6,7 +6,6 @@ import {
   generateTemplateRuns,
   generateValidatedTemplateRuns,
   mergeTemplateRunJobs,
-  moveReviewIndex,
   reviewAdvanceState,
   selectResumableTemplateRuns,
   templateJobRequest,
@@ -36,8 +35,7 @@ describe('AI template batch selection', () => {
   it.each([
     ['normal', ['normal']],
     ['advanced', ['advanced']],
-    ['both', ['normal', 'advanced']],
-  ] as const)('maps %s to its ordered template runs', (selection, expected) => {
+  ] as const)('maps %s to a single template run', (selection, expected) => {
     expect(templateKindsForSelection(selection)).toEqual(expected);
   });
 
@@ -48,7 +46,7 @@ describe('AI template batch selection', () => {
     })).toEqual({});
   });
 
-  it.each(['advanced', 'both'] as const)(
+  it.each(['advanced'] as const)(
     'requires two to eight unique responsibilities for %s',
     (selection) => {
       const missing = validateTemplateRequest({
@@ -83,109 +81,70 @@ describe('AI template batch selection', () => {
     expect(validateTemplateRequest({ selection: 'advanced', responsibilities: 'A\n A ' }).responsibilities).toBeDefined();
     expect(validateTemplateRequest({ selection: 'advanced', responsibilities: 'A\nB' })).toEqual({});
   });
-  it('derives distinct titles only when both templates are selected', () => {
-    expect(templateTitleForKind('   ', 'normal', 'normal')).toBeUndefined();
-    expect(templateTitleForKind('  Hội nhập Khối Vận hành  ', 'normal', 'normal'))
-      .toBe('Hội nhập Khối Vận hành');
-    expect(templateTitleForKind('Hội nhập Khối Vận hành', 'advanced', 'advanced'))
-      .toBe('Hội nhập Khối Vận hành');
-    expect(templateTitleForKind('Hội nhập Khối Vận hành', 'both', 'normal'))
-      .toBe('Hội nhập Khối Vận hành – Template 1');
-    expect(templateTitleForKind('Hội nhập Khối Vận hành', 'both', 'advanced'))
-      .toBe('Hội nhập Khối Vận hành – Template 2');
+  it('uses the trimmed base title unchanged', () => {
+    expect(templateTitleForKind('   ')).toBeUndefined();
+    expect(templateTitleForKind('  Hội nhập Khối Vận hành  ')).toBe('Hội nhập Khối Vận hành');
   });
 });
 
 describe('AI template batch coordinator', () => {
-  it('does not start Template 2 while Template 1 has a blocking review flag', async () => {
+  it('does not regenerate a run whose review has a blocking flag', async () => {
     const calls: string[] = [];
-    await generateTemplateRuns([{ ...completedRun('normal', 'blocked'), review: { ...completedRun('normal', 'blocked').review!, flags: [{ id: 'block', type: 'missing', severity: 'blocking', status: 'open', message: 'Missing', questionForAdmin: 'Resolve?', location: {}, evidence: [] }] } }, run('advanced')], async (current) => { calls.push(current.kind); return current; });
+    const blocked = completedRun('normal', 'blocked');
+    await generateTemplateRuns([{ ...blocked, review: { ...blocked.review!, flags: [{ id: 'block', type: 'missing', severity: 'blocking', status: 'open', message: 'Missing', questionForAdmin: 'Resolve?', location: {}, evidence: [] }] } }], async (current) => { calls.push(current.kind); return current; });
     expect(calls).toEqual([]);
   });
   it('stops after a module template is materialized until an explicit next action', async () => {
     const calls: string[] = [];
-    const result = await generateTemplateRuns([run('normal'), run('advanced')], async (current) => {
+    const result = await generateTemplateRuns([run('advanced')], async (current) => {
       calls.push(current.kind);
       return { ...completedRun(current.kind, 'Approved'), job: { ...resumableJob(current.kind, 'module-job', 'completed'), pipelineVersion: 'module_v2' } };
     });
-    expect(calls).toEqual(['normal']);
-    expect(result[1].review).toBeNull();
+    expect(calls).toEqual(['advanced']);
+    expect(result).toHaveLength(1);
   });
 
   it('does not treat a missing review as publish ready', () => {
     expect(aiReviewReadiness(null).allowed).toBe(false);
   });
-  it('awaits normal before advanced and reports each completed snapshot', async () => {
-    const calls: string[] = [];
+  it('generates a single run and reports its completed snapshot', async () => {
     const updates: string[][] = [];
-    let releaseNormal: (() => void) | undefined;
-    const normalGate = new Promise<void>((resolve) => {
-      releaseNormal = resolve;
-    });
-
-    const pending = generateTemplateRuns(
-      [run('normal'), run('advanced')],
-      async (current) => {
-        calls.push(current.kind);
-        if (current.kind === 'normal') await normalGate;
-        return completedRun(current.kind, current.kind);
-      },
+    const result = await generateTemplateRuns(
+      [run('advanced')],
+      async (current) => completedRun(current.kind, current.kind),
       (current) => updates.push(current.map((item) => item.review?.title ?? 'pending')),
     );
-
-    await Promise.resolve();
-    expect(calls).toEqual(['normal']);
-    releaseNormal?.();
-
-    const result = await pending;
-    expect(calls).toEqual(['normal', 'advanced']);
-    expect(updates).toEqual([
-      ['normal', 'pending'],
-      ['normal', 'advanced'],
-    ]);
-    expect(result.map((item) => item.review?.title)).toEqual(['normal', 'advanced']);
+    expect(updates).toEqual([['advanced']]);
+    expect(result.map((item) => item.review?.title)).toEqual(['advanced']);
   });
 
   it('skips a run that already has a review', async () => {
     const calls: string[] = [];
     const result = await generateTemplateRuns(
-      [completedRun('normal', 'ready'), run('advanced')],
-      async (current) => {
-        calls.push(current.kind);
-        return completedRun(current.kind, 'new');
-      },
+      [completedRun('normal', 'ready')],
+      async (current) => { calls.push(current.kind); return completedRun(current.kind, 'new'); },
     );
-
-    expect(calls).toEqual(['advanced']);
-    expect(result.map((item) => item.review?.title)).toEqual(['ready', 'new']);
+    expect(calls).toEqual([]);
+    expect(result.map((item) => item.review?.title)).toEqual(['ready']);
   });
 
-  it('retains the completed normal review when advanced fails and resumes only advanced', async () => {
-    const firstCalls: string[] = [];
+  it('retains the run and wraps the error when generation fails, then resumes it', async () => {
     let retained: readonly AiTemplateRun[] | undefined;
-
     try {
-      await generateTemplateRuns([run('normal'), run('advanced')], async (current) => {
-        firstCalls.push(current.kind);
-        if (current.kind === 'advanced') throw new Error('advanced failed');
-        return completedRun('normal', 'normal ready');
-      });
+      await generateTemplateRuns([run('advanced')], async () => { throw new Error('advanced failed'); });
     } catch (error) {
       expect(error).toBeInstanceOf(AiTemplateGenerationError);
       retained = (error as AiTemplateGenerationError).runs;
     }
-
-    expect(firstCalls).toEqual(['normal', 'advanced']);
-    expect(retained?.map((item) => item.review?.title ?? null)).toEqual(['normal ready', null]);
+    expect(retained?.map((item) => item.review?.title ?? null)).toEqual([null]);
 
     const retryCalls: string[] = [];
     const resumed = await generateTemplateRuns(retained ?? [], async (current) => {
       retryCalls.push(current.kind);
       return completedRun(current.kind, 'advanced ready');
     });
-
     expect(retryCalls).toEqual(['advanced']);
-    expect(resumed.map((item) => item.review?.title)).toEqual(['normal ready', 'advanced ready']);
+    expect(resumed.map((item) => item.review?.title)).toEqual(['advanced ready']);
   });
 });
 
@@ -214,74 +173,56 @@ function resumableJob(
 }
 
 describe('AI template batch failure retention', () => {
-  it('keeps the live failed Template 2 job when the coordinator snapshot predates its start', () => {
+  it('keeps the live failed job when the coordinator snapshot predates its start', () => {
     const failedAdvanced = resumableJob('advanced', 'advanced-failed', 'failed');
-    const merged = mergeTemplateRunJobs(
-      [completedRun('normal', 'normal ready'), run('advanced')],
-      [completedRun('normal', 'normal ready'), { ...run('advanced'), job: failedAdvanced }],
-    );
-
-    expect(merged[0].review?.title).toBe('normal ready');
-    expect(merged[1].job).toBe(failedAdvanced);
+    const merged = mergeTemplateRunJobs([run('advanced')], [{ ...run('advanced'), job: failedAdvanced }]);
+    expect(merged[0].job).toBe(failedAdvanced);
   });
 });
 describe('AI template batch resume and request building', () => {
-  it('recovers completed jobs only from their persisted incomplete batch when local resume IDs are blank', () => {
+  it('recovers only the newest target of a persisted incomplete batch when local resume IDs are blank', () => {
     const normal = resumableJob('normal', 'normal-job', 'completed');
     const advanced = resumableJob('advanced', 'advanced-job', 'completed');
     const targets = [normal, advanced].map((job) => ({ kind: job.templateKind, jobId: job.jobId,
       templateId: job.result!.templateId, version: 2, settings: { passingScore: 85, maxAttemptsPerModule: 4, learningMode: 'free' as const } }));
-    const runs = selectResumableTemplateRuns({ jobs: [normal, advanced, resumableJob('normal', 'unrelated')], resumeJobIds: {}, userId: 'admin-1',
+    const runs = selectResumableTemplateRuns({ jobs: [normal, advanced, resumableJob('normal', 'unrelated')], resumeJobIds: [], userId: 'admin-1',
       publicationBatches: [{ batchId: 'batch-1', createdBy: 'admin-1', createdAt: normal.createdAt, targets }] });
-    expect(runs.map((run) => [run.kind, run.job?.jobId, run.publicationTarget?.version, run.publicationBatchId])).toEqual([
-      ['normal', 'normal-job', 2, 'batch-1'], ['advanced', 'advanced-job', 2, 'batch-1'],
-    ]);
-    expect(runs[1].settings).toEqual(targets[1].settings);
+    expect(runs).toHaveLength(1);
+    expect(runs[0].publicationBatchId).toBe('batch-1');
+    expect(runs[0].settings).toEqual(runs[0].publicationTarget?.settings);
   });
-  it('restores owned normal and advanced resume IDs in template order', () => {
-    const normal = resumableJob('normal', 'normal-job', 'completed');
-    const advanced = resumableJob('advanced', 'advanced-job');
-    const otherAdmin = resumableJob('normal', 'other-job', 'running', 'admin-2');
+  it('returns only the newest owned run when jobs of both kinds exist', () => {
+    const normal = { ...resumableJob('normal', 'normal-job', 'completed'), createdAt: '2026-10-26T09:00:00.000Z' };
+    const advanced = { ...resumableJob('advanced', 'advanced-job'), createdAt: '2026-10-27T09:00:00.000Z' };
+    const otherAdmin = { ...resumableJob('normal', 'other-job', 'running', 'admin-2'), createdAt: '2026-10-28T09:00:00.000Z' };
 
     const runs = selectResumableTemplateRuns({
       jobs: [advanced, otherAdmin, normal],
-      resumeJobIds: { normal: 'normal-job', advanced: 'advanced-job' },
+      resumeJobIds: ['normal-job', 'advanced-job'],
       userId: 'admin-1',
     });
 
     expect(runs.map((item) => [item.kind, item.job?.jobId, item.job?.status])).toEqual([
-      ['normal', 'normal-job', 'completed'],
       ['advanced', 'advanced-job', 'running'],
     ]);
   });
 
-  it('restores a legacy template resume ID under its recorded kind', () => {
+  it('restores a saved resume ID under its recorded kind', () => {
     const advanced = resumableJob('advanced', 'legacy-job', 'failed');
     expect(selectResumableTemplateRuns({
       jobs: [advanced],
-      resumeJobIds: {},
-      legacyTemplateJobId: 'legacy-job',
+      resumeJobIds: ['legacy-job'],
       userId: 'admin-1',
     }).map((item) => [item.kind, item.job?.jobId])).toEqual([
       ['advanced', 'legacy-job'],
     ]);
   });
 
-  it('preserves a completed normal run while advanced is resumable', () => {
-    const runs = selectResumableTemplateRuns({
-      jobs: [
-        resumableJob('advanced', 'advanced-running'),
-        resumableJob('normal', 'normal-completed', 'completed'),
-      ],
-      resumeJobIds: { normal: 'normal-completed', advanced: 'advanced-running' },
-      userId: 'admin-1',
-    });
-
-    expect(runs[0]).toMatchObject({ kind: 'normal', job: { status: 'completed' } });
-    expect(runs[1]).toMatchObject({ kind: 'advanced', job: { status: 'running' } });
+  it('returns nothing when no job is resumable', () => {
+    expect(selectResumableTemplateRuns({ jobs: [], resumeJobIds: [null], userId: 'admin-1' })).toEqual([]);
   });
 
-  it('builds normal and advanced requests with distinct titles for both', () => {
+  it('builds normal and advanced requests', () => {
     const common = {
       inventoryJobId: 'inventory-1',
       responsibilities: ' Kiểm soát đơn hàng \n\n Đào tạo quy trình ',
@@ -318,20 +259,6 @@ describe('AI template batch resume and request building', () => {
       operationId: 'operation-advanced',
     });
 
-    expect(templateJobRequest({
-      ...common,
-      selection: 'both',
-      kind: 'normal',
-      baseTitle: 'Hội nhập vận hành',
-      operationId: 'operation-both-normal',
-    }).title).toBe('Hội nhập vận hành – Template 1');
-    expect(templateJobRequest({
-      ...common,
-      selection: 'both',
-      kind: 'advanced',
-      baseTitle: 'Hội nhập vận hành',
-      operationId: 'operation-both-advanced',
-    }).title).toBe('Hội nhập vận hành – Template 2');
   });
 
   it('builds a responsibilities-only advanced profile', () => {
@@ -340,7 +267,6 @@ describe('AI template batch resume and request building', () => {
   it.each([
     { selection: null, responsibilities: '' },
     { selection: 'advanced' as const, responsibilities: 'Một nhiệm vụ' },
-    { selection: 'both' as const, responsibilities: '' },
   ])('does not reach job generation for invalid input %#', async (input) => {
     let calls = 0;
     const result = await generateValidatedTemplateRuns({
@@ -382,51 +308,22 @@ function reviewRun(
 }
 
 describe('AI template review sequence', () => {
-  it('starts both-template review at Template 1 and blocks Next on open mandatory flags', () => {
-    const runs = [reviewRun('normal', 'open'), reviewRun('advanced')];
-    expect(runs[0].kind).toBe('normal');
+  it('blocks Next on open mandatory flags', () => {
+    const runs = [reviewRun('normal', 'open')];
     expect(aiReviewReadiness(runs[0].review)).toEqual({ allowed: false, blockingCount: 1 });
-    expect(reviewAdvanceState(runs, 0)).toEqual({
-      canBack: false,
-      canNext: false,
-      atPublishSummary: false,
-      blockingCount: 1,
-    });
+    expect(reviewAdvanceState(runs)).toEqual({ canBack: false, canNext: false, atPublishSummary: true, blockingCount: 1 });
   });
 
-  it('enables Next after blocking flags resolve and points the last template to publish summary', () => {
-    const runs = [reviewRun('normal'), reviewRun('advanced')];
-    expect(reviewAdvanceState(runs, 0)).toEqual({
-      canBack: false,
-      canNext: true,
-      atPublishSummary: false,
-      blockingCount: 0,
-    });
-    expect(reviewAdvanceState(runs, 1)).toEqual({
-      canBack: true,
-      canNext: true,
-      atPublishSummary: true,
-      blockingCount: 0,
-    });
-  });
-
-  it('moves Back without replacing either review or settings object', () => {
-    const runs = [reviewRun('normal'), reviewRun('advanced')];
-    const moved = moveReviewIndex(runs, 1, 'back');
-    expect(moved.index).toBe(0);
-    expect(moved.runs).toBe(runs);
-    expect(moved.runs[0].review).toBe(runs[0].review);
-    expect(moved.runs[0].settings).toBe(runs[0].settings);
-    expect(moved.runs[1].review).toBe(runs[1].review);
-    expect(moved.runs[1].settings).toBe(runs[1].settings);
-  });
-
-  it('keeps a single template on the direct review-to-publish path', () => {
-    expect(reviewAdvanceState([reviewRun('advanced')], 0)).toEqual({
+  it('enables Next after blocking flags resolve and goes straight to the publish summary', () => {
+    expect(reviewAdvanceState([reviewRun('advanced')])).toEqual({
       canBack: false,
       canNext: true,
       atPublishSummary: true,
       blockingCount: 0,
     });
+  });
+
+  it('has no publish summary without a run', () => {
+    expect(reviewAdvanceState([]).atPublishSummary).toBe(false);
   });
 });
