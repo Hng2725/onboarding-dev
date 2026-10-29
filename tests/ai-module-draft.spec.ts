@@ -148,7 +148,7 @@ describe('tolerant module validation', () => {
     expect(result.ok).toBe(true);
     expect(result.ok && result.value.flags).toHaveLength(3);
   });
-  it('rewrites a foreign moduleLocalId and drops flags pointing outside the module', () => {
+  it('rewrites a foreign moduleLocalId and moves flags pointing outside the module to module level', () => {
     const flags = [
       mkFlag('ambiguous', { location: { moduleLocalId: 'other' } }),
       mkFlag('outdated', { location: { blockLocalId: 'nope' } }),
@@ -158,8 +158,11 @@ describe('tolerant module validation', () => {
     const result = validateModuleLessonOutput({ ...locationless, flags }, input);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.flags).toHaveLength(2);
-    expect(result.value.flags[0].location.moduleLocalId).toBe('m1');
-    expect(result.value.flags[1].location.blockLocalId).toBe('b1');
+    expect(result.value.flags).toHaveLength(4);
+    expect(result.value.flags[0].location).toEqual({ moduleLocalId: 'm1' });
+    expect(result.value.flags[1].location).toEqual({ moduleLocalId: 'm1' });
+    expect(result.value.flags[2].location).toEqual({ moduleLocalId: 'm1' });
+    expect(result.value.flags[3].location).toEqual({ moduleLocalId: 'm1', blockLocalId: 'b1' });
+    expect(result.value.flags.map((f) => f.severity)).toEqual(['warning', 'warning', 'warning', 'warning']);
   });
 });
