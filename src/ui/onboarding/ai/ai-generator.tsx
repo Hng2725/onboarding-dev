@@ -38,6 +38,7 @@ import {
   isNativeChatAttempt,
 } from './ai-gateway-native-chat';
 import { pumpAiJob } from './ai-pump';
+import { pumpWithQuestionRecovery } from './question-recovery';
 import { AiReview } from './ai-review';
 import { AiOutlineReview, type ModuleSourceCatalog } from './ai-outline-review';
 import { AiModuleWorkspace } from './ai-module-workspace';
@@ -1160,29 +1161,43 @@ export function AiGeneratorPage({
 
   async function pump(job: AiJobRecord, preferNative = false): Promise<AiJobRecord> {
     if (!roomId) throw new Error('Không xác định được room để chạy AI.');
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    const useNative = nativeFallbackAvailable
-      && (preferNative || aiJobPrefersNative(job));
-    if (useNative && nativeCleanupBlock) {
-      throw new Error(NATIVE_CLEANUP_BLOCKED);
-    }
-    const provider: AiProvider = useNative ? 'native_chat' : 'sandbox';
-    return pumpAiJob({
-      api,
-      gateway: gatewayFor(provider),
-      provider,
-      gatewayFor,
-      jobId: job.jobId,
-      workerId: 'onboarding-ai-' + crypto.randomUUID(),
-      signal: controller.signal,
-      onProgress: (next) => {
-        if (next.kind === 'inventory') setInventoryJob(next);
-        else setTemplateJob(next);
-        setRoomJobs((current) => current.some((candidate) => candidate.jobId === next.jobId)
-          ? current.map((candidate) => candidate.jobId === next.jobId ? next : candidate)
-          : [next, ...current]);
+    const recordProgress = (next: AiJobRecord) => {
+      if (next.kind === 'inventory') setInventoryJob(next);
+      else setTemplateJob(next);
+      setRoomJobs((current) => current.some((candidate) => candidate.jobId === next.jobId)
+        ? current.map((candidate) => candidate.jobId === next.jobId ? next : candidate)
+        : [next, ...current]);
+    };
+    return pumpWithQuestionRecovery({
+      initialJob: job,
+      initialPreferNative: preferNative,
+      nativeAvailable: nativeFallbackAvailable && !nativeCleanupBlock,
+      pumpOnce: async (current, usePreferredNative) => {
+        abortRef.current?.abort();
+        const controller = new AbortController();
+        abortRef.current = controller;
+        const useNative = nativeFallbackAvailable
+          && (usePreferredNative || aiJobPrefersNative(current));
+        if (useNative && nativeCleanupBlock) throw new Error(NATIVE_CLEANUP_BLOCKED);
+        const provider: AiProvider = useNative ? 'native_chat' : 'sandbox';
+        return pumpAiJob({
+          api,
+          gateway: gatewayFor(provider),
+          provider,
+          gatewayFor,
+          jobId: current.jobId,
+          workerId: 'onboarding-ai-' + crypto.randomUUID(),
+          signal: controller.signal,
+          onProgress: recordProgress,
+        });
+      },
+      runAction: async (action, args) => {
+        const result = await api.adminAi<{ job: AiJobRecord }>(action, {
+          jobId: job.jobId,
+          ...args,
+        });
+        recordProgress(result.job);
+        return result;
       },
     });
   }

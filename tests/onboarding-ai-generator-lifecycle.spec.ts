@@ -509,3 +509,35 @@ it('resumes an interrupted module job only on explicit action', async () => {
   expect(api.adminAi.mock.calls.some(([action]) => action === 'start_job' || action === 'cancel_job' || action === 'retry_module')).toBe(false);
   view.unmount(); vi.unstubAllGlobals();
 });
+
+it('automatically recovers a failed Sandbox question through Native and grounded fallback', async () => {
+  const storage = new Map([['onboarding:ai:template:room-1:normal', 'template-1']]);
+  vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+  const outline = { moduleLocalId: 'm', frameKey: 't1-core', order: 0, title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] };
+  const lessonDraft = { localId: 'm', frameKey: 't1-core', title: 'Core', description: '', estimatedMinutes: 10, objectives: [], featureIds: [], questions: [], blocks: [{ localId: 'b', kind: 'concept' as const, body: 'Nội dung có nguồn.', sourceRefs: [{ sectionId: 's', quote: 'Nội dung có nguồn.' }] }] };
+  const baseRun = { outline, outlineRevision: 1, lessonState: 'approved' as const, lessonVersion: 1, approvedLessonVersion: 1, lessonDraft, lessonProvenance: 'fallback' as const };
+  const sandboxFailed = { ...failedTemplateJob, templateKind: 'normal' as const, roleProfile: undefined, status: 'running' as const, pipelineVersion: 'module_v2' as const, outline: { revision: 1, modules: [outline], flags: [], taskCoverage: [] }, outlineApprovedRevision: 1, moduleRuns: [{ ...baseRun, questionState: 'failed' as const, questionVersion: 1 }], calls: [{ callId: 'q-sandbox', stage: 'B' as const, operationId: 'q-sandbox', status: 'failed' as const, provider: 'sandbox' as const, attemptRef: 'sandbox-attempt', moduleLocalId: 'm', moduleTarget: 'questions' as const, moduleVersion: 1 }] };
+  const nativeQueued = { ...sandboxFailed, moduleRuns: [{ ...baseRun, questionState: 'queued' as const, questionVersion: 2 }] };
+  const nativeFailed = { ...nativeQueued, moduleRuns: [{ ...baseRun, questionState: 'failed' as const, questionVersion: 2 }], calls: [...sandboxFailed.calls, { callId: 'q-native', stage: 'B' as const, operationId: 'q-native', status: 'failed' as const, provider: 'native_chat' as const, attemptRef: 'native-chat:s:m', moduleLocalId: 'm', moduleTarget: 'questions' as const, moduleVersion: 2 }] };
+  const fallbackReady = { ...nativeFailed, moduleRuns: [{ ...baseRun, questionState: 'review_ready' as const, questionVersion: 3, questionLessonVersion: 1, questionProvenance: 'fallback' as const, questionDraft: [] }] };
+  let nextStep = 0;
+  const api = { adminAi: vi.fn(async (action: string) => {
+    if (action === 'list_sources') return { sources: [] };
+    if (action === 'list_jobs') return { jobs: [inventoryJob, sandboxFailed] };
+    if (action === 'next_step') return { kind: 'awaiting_admin', job: nextStep++ === 0 ? sandboxFailed : nativeFailed };
+    if (action === 'retry_module') return { job: nativeQueued };
+    if (action === 'use_question_fallback') return { job: fallbackReady };
+    throw new Error('Unexpected action: ' + action);
+  }) };
+  let view!: TestRenderer.ReactTestRenderer;
+  await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+
+  const resume = view.root.findAllByType('button').find((item) => item.children.join('').includes('Tiếp tục xử lý'))!;
+  await act(async () => { resume.props.onClick(); await Promise.resolve(); });
+
+  expect(api.adminAi.mock.calls.map(([action]) => action)).toEqual(expect.arrayContaining(['retry_module', 'use_question_fallback']));
+  expect(api.adminAi.mock.calls.filter(([action]) => action === 'retry_module')).toHaveLength(1);
+  expect(api.adminAi.mock.calls.filter(([action]) => action === 'use_question_fallback')).toHaveLength(1);
+  expect(api.adminAi.mock.calls.some(([action]) => action === 'update_module_questions')).toBe(false);
+  view.unmount(); vi.unstubAllGlobals();
+});
