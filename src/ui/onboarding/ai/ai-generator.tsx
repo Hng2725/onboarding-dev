@@ -38,6 +38,7 @@ import {
   createNativeChatAiGateway,
   isNativeChatAttempt,
 } from './ai-gateway-native-chat';
+import { actionableProviderFailure, errorCode, vietnameseErrorMessage } from './ai-labels';
 import { pumpAiJob } from './ai-pump';
 import { pumpWithInventoryRecovery } from './inventory-recovery';
 import {
@@ -188,25 +189,6 @@ export function aiJobCurrentCall<T extends {
     ?? job.calls.find((call) => call.status === 'pending');
 }
 
-function actionableProviderFailure(message: string): string | null {
-  if (/worker[_ ]failed|worker exited with code/i.test(message)) {
-    const exitCode = /worker exited with code\s+(-?\d+)/i.exec(message)?.[1];
-    const diagnostic = exitCode ? `worker_failed, exit code ${exitCode}` : 'worker_failed';
-    return `Worker Sandbox của PrivOS đã dừng (${diagnostic}). Đây là lỗi hạ tầng `
-      + 'Sandbox, không phải lỗi dữ liệu template. Admin workspace cần repair/restart Sandbox '
-      + 'hoặc cấp quyền Native AI Chat, sau đó bấm Thử lại.';
-  }
-  if (/rejected (?:this agent's|the configured) credentials|model provider key/i.test(message)) {
-    return 'PrivOS từ chối khóa nhà cung cấp model của agent AI. Admin workspace cần kiểm tra '
-      + 'khóa nhà cung cấp model trong cài đặt agent, sau đó bấm Thử lại.';
-  }
-  if (/agent stopped unexpectedly/i.test(message)) {
-    return 'Agent AI của PrivOS dừng đột ngột trước khi hoàn tất. Bấm Thử lại; nếu lặp lại, '
-      + 'Admin workspace cần kiểm tra cấu hình agent.';
-  }
-  return null;
-}
-
 export function aiJobErrorText(job: {
   readonly status: string;
   readonly errorCode?: string;
@@ -338,36 +320,8 @@ export function canPublishAiReview(flags: readonly VerificationFlag[]): {
   return aiReviewReadiness({ flags } as Pick<AdminTemplateDetail, 'flags'>);
 }
 
-function errorCode(error: unknown): string | undefined {
-  if (!error || typeof error !== 'object') return undefined;
-  const record = error as Record<string, unknown>;
-  if (typeof record.code === 'string') return record.code;
-  if (record.data && typeof record.data === 'object' && !Array.isArray(record.data)) {
-    const code = (record.data as Record<string, unknown>).code;
-    if (typeof code === 'string') return code;
-  }
-  return undefined;
-}
-
 export function generationErrorMessage(error: unknown): string {
-  const providerMessage = error instanceof Error ? actionableProviderFailure(error.message) : null;
-  if (providerMessage) return providerMessage;
-  const code = errorCode(error);
-  const messages: Record<string, string> = {
-    SOURCE_TOO_LARGE: 'Tài liệu vượt quá giới hạn 2 MB.',
-    SOURCE_TYPE_UNSUPPORTED: 'Định dạng tài liệu chưa được hỗ trợ.',
-    SOURCE_NO_TEXT: 'Không tìm thấy lớp chữ trong tài liệu; phiên bản này chưa hỗ trợ OCR.',
-    SOURCE_DUPLICATE: 'Tài liệu này đã có trong danh sách nguồn.',
-    ROLE_PROFILE_INVALID: 'Hồ sơ vai trò cần từ 2 đến 8 nhiệm vụ duy nhất.',
-    AI_DISPATCH_UNKNOWN: 'Không xác định được trạng thái lần gọi AI. Hãy bấm Thử lại để tạo một lần gọi an toàn mới.',
-    AI_TIMEOUT: 'AI xử lý quá thời gian. Hãy thử lại job.',
-    AI_OUTPUT_INVALID: 'AI chưa tạo được cấu trúc hợp lệ sau các lần tự sửa.',
-    TEMPLATE_FLAGS_BLOCKING: 'Cần xử lý hết cờ bắt buộc trước khi xuất bản.',
-    REVIEW_CONFLICT: 'Template vừa được cập nhật ở nơi khác. Hãy tải lại bản mới nhất.',
-    JOB_OWNER_REQUIRED: 'Job AI này do Admin khác tạo; chỉ người tạo mới tiếp tục hoặc hủy được.',
-  };
-  if (code && messages[code]) return messages[code];
-  return error instanceof Error && error.message ? error.message : 'Không thể hoàn tất yêu cầu AI.';
+  return vietnameseErrorMessage(error);
 }
 
 export type ConfirmAttempt = (call: AiCallRecord) => Promise<AiCancellationOutcome>;

@@ -8,21 +8,12 @@ import {
 import { useState } from 'react';
 
 import type { VerificationFlag } from '../../../onboarding/contracts';
+import { FLAG_TYPE_LABELS } from './ai-labels';
 
 export type FlagResolutionAction = 'choose_option' | 'add_note' | 'remove' | 'accept';
 
 function flagLabel(flag: VerificationFlag): string {
-  const labels: Record<VerificationFlag['type'], string> = {
-    missing: 'Thiếu thông tin',
-    conflict: 'Mâu thuẫn',
-    ambiguous: 'Chưa rõ',
-    outdated: 'Có thể lỗi thời',
-    unsupported: 'Không có căn cứ',
-    audience_unclear: 'Chưa rõ đối tượng',
-    low_quality_source: 'Nguồn chất lượng thấp',
-    generation_error: 'Lỗi tạo nội dung',
-  };
-  return labels[flag.type];
+  return FLAG_TYPE_LABELS[flag.type] ?? flag.type;
 }
 
 export function FlagPanel({

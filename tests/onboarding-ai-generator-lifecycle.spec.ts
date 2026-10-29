@@ -792,7 +792,7 @@ describe('AI generator reset UI', () => {
     await act(async () => { view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => button.children.join('') === 'Xóa dữ liệu')!.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
 
     expect(activeStepLabel(view)).toBe('Phân tích');
-    expect(JSON.stringify(view.toJSON())).toContain('Cannot reload sources');
+    expect(JSON.stringify(view.toJSON())).toContain('Không thể hoàn tất yêu cầu AI.');
     view.unmount();
   });
 
