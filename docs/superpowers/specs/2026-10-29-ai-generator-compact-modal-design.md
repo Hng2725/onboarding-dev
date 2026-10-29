@@ -1,7 +1,7 @@
 # Thiết kế modal AI Generator compact cân bằng
 
 Ngày: 2026-10-29  
-Trạng thái: Chờ duyệt  
+Trạng thái: Đã duyệt
 Phạm vi: Chỉ giao diện modal **Tạo template từ tài liệu**
 
 ## Mục đích
