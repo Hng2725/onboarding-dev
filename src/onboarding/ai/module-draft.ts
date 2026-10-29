@@ -19,8 +19,8 @@ export type ModuleQuestionValidationInput = ModuleQuestionPromptInput;
 export interface ModuleLessonRepairPromptInput extends ModuleLessonPromptInput { readonly previous: unknown; readonly errors: readonly string[]; }
 export interface ModuleQuestionRepairPromptInput extends ModuleQuestionPromptInput { readonly previous: unknown; readonly errors: readonly string[]; }
 type Result<T> = { readonly ok: true; readonly value: T; readonly errors: readonly [] } | { readonly ok: false; readonly errors: readonly ValidationError[] };
-export type ModuleLessonValidation = Result<{ readonly module: GeneratedModule; readonly flags: readonly GeneratedFlag[] }>;
-export type ModuleQuestionValidation = Result<{ readonly questions: readonly GeneratedQuestion[]; readonly flags: readonly GeneratedFlag[]; readonly lessonVersion: number }>;
+export type ModuleLessonValidation = Result<{ readonly module: GeneratedModule; readonly flags: readonly GeneratedFlag[]; readonly notes: readonly string[] }>;
+export type ModuleQuestionValidation = Result<{ readonly questions: readonly GeneratedQuestion[]; readonly flags: readonly GeneratedFlag[]; readonly lessonVersion: number; readonly notes: readonly string[] }>;
 
 function verifyInput(input: ModuleLessonPromptInput, allowEmpty = false): void {
   const ids = input.module.sourceSectionIds;
@@ -110,19 +110,21 @@ function grounded(refs: readonly RawSourceRef[], sections: readonly SourceSectio
     if (!section || !normalizedQuote || ref.quote.trim().length < AI_GENERATION_LIMITS.minQuoteChars || ref.quote.trim().length > AI_GENERATION_LIMITS.maxQuoteChars || !normalizeForMatch(section.text).includes(normalizedQuote)) add(errors, 'SOURCE_REF_UNGROUNDED', path, 'Reference must quote a selected section.');
   }
 }
-function validateFlags(flags: readonly GeneratedFlag[], input: ModuleLessonPromptInput, blockIds: ReadonlySet<string>, questionIds: ReadonlySet<string>, errors: ValidationError[], notes: string[]): readonly GeneratedFlag[] {
-  return flags.map((flag, index) => {
+function validateFlags(flags: readonly GeneratedFlag[], rawIndexes: readonly number[], input: ModuleLessonPromptInput, blockIds: ReadonlySet<string>, questionIds: ReadonlySet<string>, errors: ValidationError[], notes: string[]): readonly GeneratedFlag[] {
+  return flags.map((flag, position) => {
     const l = flag.location;
+    const index = rawIndexes[position] ?? position;
     grounded(flag.evidence, input.sections, errors, 'root.flags[' + String(index) + '].evidence');
     const foreign = (l.blockLocalId && !blockIds.has(l.blockLocalId)) || (l.questionLocalId && !questionIds.has(l.questionLocalId)) || (l.featureId && !input.module.featureIds.includes(l.featureId));
     if (foreign) notes.push('Chuyển cờ về cấp module ở vị trí ' + String(index));
     return { ...flag, location: foreign ? { moduleLocalId: input.module.moduleLocalId } : { ...l, moduleLocalId: input.module.moduleLocalId } };
   });
 }
-function parseModuleFlags(raw: unknown, input: ModuleLessonPromptInput, blockIds: ReadonlySet<string>, questionIds: ReadonlySet<string>, errors: ValidationError[]): readonly GeneratedFlag[] {
+function parseModuleFlags(raw: unknown, input: ModuleLessonPromptInput, blockIds: ReadonlySet<string>, questionIds: ReadonlySet<string>, errors: ValidationError[]): { readonly flags: readonly GeneratedFlag[]; readonly notes: readonly string[] } {
   const notes: string[] = [];
-  const parsed = parseFlags(raw, errors, { defaultLocation: { moduleLocalId: input.module.moduleLocalId }, notes });
-  return validateFlags(parsed, input, blockIds, questionIds, errors, notes);
+  const keptIndexes: number[] = [];
+  const parsed = parseFlags(raw, errors, { defaultLocation: { moduleLocalId: input.module.moduleLocalId }, notes, keptIndexes });
+  return { flags: validateFlags(parsed, keptIndexes, input, blockIds, questionIds, errors, notes), notes };
 }
 export function validateModuleLessonOutput(raw: unknown, input: ModuleLessonValidationInput, allowManualWithoutSources = false): ModuleLessonValidation {
   const errors: ValidationError[] = [];
@@ -135,11 +137,11 @@ export function validateModuleLessonOutput(raw: unknown, input: ModuleLessonVali
   if (blocks.filter((b) => b.kind === 'summary').length !== 1 || blocks[blocks.length - 1]?.kind !== 'summary') add(errors, 'SUMMARY_POSITION', 'root.blocks', 'Exactly one summary must be last.');
   if (input.templateKind === 'advanced' && !blocks.some((b) => b.kind === 'scenario')) add(errors, 'SCENARIO_REQUIRED', 'root.blocks', 'A scenario is required.');
   blocks.forEach((b) => grounded(b.sourceRefs, input.sections, errors, 'root.blocks.sourceRefs'));
-  const flags = parseModuleFlags(raw.flags, input, new Set(blocks.map((b) => b.localId)), new Set(), errors);
+  const { flags, notes } = parseModuleFlags(raw.flags, input, new Set(blocks.map((b) => b.localId)), new Set(), errors);
   const minutes = typeof raw.estimatedMinutes === 'number' && Number.isFinite(raw.estimatedMinutes) && raw.estimatedMinutes > 0 ? raw.estimatedMinutes : 0;
   if (!minutes) add(errors, 'ESTIMATED_MINUTES', 'root.estimatedMinutes', 'Estimated minutes must be positive.');
   const module: GeneratedModule = { localId: input.module.moduleLocalId, frameKey: input.module.frameKey, title: text(raw.title, 'root.title', errors, 80), description: text(raw.description, 'root.description', errors, 500), estimatedMinutes: minutes, objectives, featureIds: input.module.featureIds, blocks, questions: [] };
-  return errors.length ? { ok: false, errors } : { ok: true, value: { module, flags }, errors: [] };
+  return errors.length ? { ok: false, errors } : { ok: true, value: { module, flags, notes }, errors: [] };
 }
 export function validateModuleQuestionOutput(raw: unknown, input: ModuleQuestionValidationInput, allowManualWithoutSources = false): ModuleQuestionValidation {
   const errors: ValidationError[] = [];
@@ -149,6 +151,6 @@ export function validateModuleQuestionOutput(raw: unknown, input: ModuleQuestion
   const blockIds = new Set(input.lesson.blocks.map((b) => b.localId));
   const questions = parseQuestions(raw.questions, 'root', blockIds, errors, new Set([input.module.moduleLocalId, ...blockIds]), allowManualWithoutSources && input.lessonProvenance === 'manual' && input.module.sourceSectionIds.length === 0);
   questions.forEach((q) => grounded(q.sourceRefs, input.sections, errors, 'root.questions.sourceRefs'));
-  const flags = parseModuleFlags(raw.flags, input, blockIds, new Set(questions.map((q) => q.localId)), errors);
-  return errors.length ? { ok: false, errors } : { ok: true, value: { questions, flags, lessonVersion: input.lessonVersion }, errors: [] };
+  const { flags, notes } = parseModuleFlags(raw.flags, input, blockIds, new Set(questions.map((q) => q.localId)), errors);
+  return errors.length ? { ok: false, errors } : { ok: true, value: { questions, flags, lessonVersion: input.lessonVersion, notes }, errors: [] };
 }

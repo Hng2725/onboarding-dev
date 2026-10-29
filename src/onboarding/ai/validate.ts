@@ -320,7 +320,7 @@ function normalizeTemplateShape(value: Record<string, unknown>): Record<string, 
 export function parseFlags(
   value: unknown,
   errors: ValidationError[],
-  options: { readonly defaultLocation?: GeneratedFlag['location']; readonly notes?: string[] } = {},
+  options: { readonly defaultLocation?: GeneratedFlag['location']; readonly notes?: string[]; readonly keptIndexes?: number[] } = {},
 ): readonly GeneratedFlag[] {
   if (!Array.isArray(value)) {
     add(errors, 'FIELD_INVALID', 'root.flags', 'flags must be an array.');
@@ -360,6 +360,7 @@ export function parseFlags(
     if (expectedWarning.includes(type) && severity !== 'warning') {
       add(errors, 'FLAG_SEMANTICS', path + '.severity', 'This flag type must be a warning.');
     }
+    options.keptIndexes?.push(index);
     flags.push({
       type,
       severity: severity === 'warning' ? 'warning' : 'blocking',

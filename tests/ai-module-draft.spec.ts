@@ -147,6 +147,7 @@ describe('tolerant module validation', () => {
     const result = validateModuleLessonOutput({ ...locationless, flags: [...locationless.flags.slice(0, 3), noType] }, input);
     expect(result.ok).toBe(true);
     expect(result.ok && result.value.flags).toHaveLength(3);
+    expect(result.ok && result.value.notes).toContain('Bỏ cờ không hợp lệ ở vị trí 3');
   });
   it('rewrites a foreign moduleLocalId and moves flags pointing outside the module to module level', () => {
     const flags = [
@@ -164,5 +165,17 @@ describe('tolerant module validation', () => {
     expect(result.value.flags[2].location).toEqual({ moduleLocalId: 'm1' });
     expect(result.value.flags[3].location).toEqual({ moduleLocalId: 'm1', blockLocalId: 'b1' });
     expect(result.value.flags.map((f) => f.severity)).toEqual(['warning', 'warning', 'warning', 'warning']);
+    expect(result.value.notes).toEqual(expect.arrayContaining(['Chuyển cờ về cấp module ở vị trí 1', 'Chuyển cờ về cấp module ở vị trí 2']));
+  });
+  it('keeps a blocking conflict flag with a foreign blockLocalId and indexes notes by raw position', () => {
+    const { type: _type, ...noType } = mkFlag('ambiguous');
+    const conflict = mkFlag('conflict', { location: { blockLocalId: 'nope' }, evidence: [ref, ref] });
+    const result = validateModuleLessonOutput({ ...locationless, flags: [noType, conflict] }, input);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.flags).toHaveLength(1);
+    expect(result.value.flags[0]).toMatchObject({ type: 'conflict', severity: 'blocking', location: { moduleLocalId: 'm1' } });
+    expect(result.value.flags[0].location.blockLocalId).toBeUndefined();
+    expect(result.value.notes).toEqual(['Bỏ cờ không hợp lệ ở vị trí 0', 'Chuyển cờ về cấp module ở vị trí 1']);
   });
 });
