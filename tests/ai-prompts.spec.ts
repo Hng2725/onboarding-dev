@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { SourceRecord } from '../src/onboarding/contracts';
 import {
   CONTEXT_LINE_CHARS,
+  PROMPT_VERSION,
   buildInventoryPrompt,
   buildModuleRepairPrompt,
   buildTemplateRepairBase,
@@ -97,6 +98,10 @@ const inventory = {
 };
 
 describe('AI template prompts', () => {
+  it('exposes the current prompt version', () => {
+    expect(PROMPT_VERSION).toBe('2026-10-29.1');
+  });
+
   it('defines the generated local-id contract instead of public persisted ids', () => {
     const lessons = buildTemplateLessonsPrompt({ templateKind: 'normal', inventory });
     const questions = buildTemplateQuestionsPrompt({

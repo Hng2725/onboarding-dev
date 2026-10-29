@@ -132,6 +132,53 @@ describe('AI job service', () => {
     });
   });
 
+  it('passes the other active outline modules, sorted by order, as relatedModules in the lesson call', async () => {
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    await store.create(admin.roomId, 'onboarding_ai_jobs', {
+      jobId: 'inventory-related', kind: 'inventory', status: 'completed', sourceIds: ['source-1'],
+      promptVersion: 'old', calls: [], stageOutputs: {},
+      result: { systemSummary: { purpose: 'Orders', modules: [], sourceRefs: generatedTemplate.modules[0].blocks[0].sourceRefs }, glossary: [], features: [], flags: [] },
+      operationId: 'inventory-related', createdBy: admin.userId,
+      createdAt: '2026-10-29T00:00:00.000Z', updatedAt: '2026-10-29T00:00:00.000Z',
+    });
+    const service = createAiJobService(store, { now: () => '2026-10-29T01:00:00.000Z' });
+    let job = await service.startJob(admin, {
+      kind: 'template', inventoryJobId: 'inventory-related', templateKind: 'normal', operationId: 'related',
+    });
+    const modules = job.outline!.modules;
+    expect(modules.length).toBeGreaterThanOrEqual(3);
+    const tombstoneId = modules[modules.length - 1].moduleLocalId;
+    const moveId = modules[0].moduleLocalId;
+    job = await service.updateOutline(admin, {
+      jobId: job.jobId, expectedRevision: 1,
+      edits: [
+        ...modules.map((m) => ({ type: 'update' as const, moduleLocalId: m.moduleLocalId, patch: { sourceSectionIds: ['source-1#s1'] } })),
+        { type: 'delete' as const, moduleLocalId: tombstoneId },
+        { type: 'add' as const, module: { ...modules[modules.length - 1], sourceSectionIds: ['source-1#s1'] } },
+        { type: 'reorder' as const, moduleLocalId: moveId, order: 9 },
+      ],
+    });
+    job = await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: job.outline!.revision });
+    const step = await service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' });
+    if (step.kind !== 'ai_call') throw new Error('Expected a lesson call.');
+
+    const current = await service.getJob(admin, job.jobId);
+    const draftedId = current.calls.at(-1)!.moduleLocalId!;
+    const active = current.moduleRuns!.map((run) => run.outline).filter((o) => !o.tombstoned);
+    expect(current.moduleRuns!.some((run) => run.outline.moduleLocalId === tombstoneId && run.outline.tombstoned)).toBe(true);
+    expect(active.length).toBeGreaterThanOrEqual(2);
+    const expected = active.filter((o) => o.moduleLocalId !== draftedId).sort((a, b) => a.order - b.order).map((o) => ({ order: o.order, title: o.title }));
+    const raw = step.systemContext.split('<module_data>')[1].split('</module_data>')[0].trim();
+    const moduleData = JSON.parse(raw.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&apos;/g, "'").replace(/&amp;/g, '&')) as { relatedModules: unknown };
+    expect(moduleData.relatedModules).toEqual(expected);
+    expect(expected.length).toBe(active.length - 1);
+    expect(expected.map((e) => e.order)).toEqual([...expected.map((e) => e.order)].sort((a, b) => a - b));
+    expect(draftedId).not.toBe(moveId);
+    expect(expected.at(-1)!.title).toBe(modules[0].title);
+    expect(JSON.stringify(moduleData.relatedModules)).not.toContain(String(current.moduleRuns!.find((run) => run.outline.moduleLocalId === tombstoneId)!.outline.moduleLocalId));
+  });
+
   it('rejects deterministic question fallback without grounded lesson blocks and leaves the run unchanged', async () => {
     const store = new MemoryOnboardingStore();
     await seedAiSource(store);
