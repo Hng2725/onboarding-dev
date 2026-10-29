@@ -45,7 +45,11 @@ import {
   shouldUseNativeForPump,
 } from './question-recovery';
 import { AiReview } from './ai-review';
-import { resetAiGeneratorServerState } from './ai-generator-reset';
+import {
+  collectAiGeneratorResetTemplateRefs,
+  loadAiGeneratorResetReviews,
+  resetAiGeneratorServerState,
+} from './ai-generator-reset';
 import { AiOutlineReview, type ModuleSourceCatalog } from './ai-outline-review';
 import { AiModuleWorkspace } from './ai-module-workspace';
 import {
@@ -921,6 +925,7 @@ export function AiGeneratorPage({
   const [cancelling, setCancelling] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [restoring, setRestoring] = useState(true);
   const [sourcePanelEpoch, setSourcePanelEpoch] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
   const cleanupAbortRef = useRef<AbortController | null>(null);
@@ -1078,6 +1083,7 @@ export function AiGeneratorPage({
 
   useEffect(() => {
     let active = true;
+    setRestoring(true);
     void (async () => {
       try {
         await loadSources();
@@ -1158,6 +1164,8 @@ export function AiGeneratorPage({
         if (active) void reconcileCleanups(result.jobs);
       } catch (caught) {
         if (active) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
+      } finally {
+        if (active) setRestoring(false);
       }
     })();
     return () => {
@@ -1222,16 +1230,22 @@ export function AiGeneratorPage({
   }
 
   async function resetGeneratorSession() {
-    if (!roomId || resetting) return;
+    if (!roomId || resetting || restoring) return;
     setResetting(true);
     setNotice(null);
     const jobs = [inventoryJob, ...templateRuns.map((run) => run.job)]
       .filter((job): job is AiJobRecord => Boolean(job));
-    const reviews = templateRuns
-      .map((run) => run.review)
-      .filter((candidate): candidate is AdminTemplateDetail => Boolean(candidate));
+    const refs = collectAiGeneratorResetTemplateRefs(templateRuns, publishTargets);
     const sessionJobIds = new Set(jobs.map((job) => job.jobId));
     try {
+      const reviews = await loadAiGeneratorResetReviews({
+        refs,
+        getReview: async (ref) => (await api.adminAi<{ review: AdminTemplateDetail }>('get_review', {
+          templateId: ref.templateId,
+          version: ref.version,
+        })).review,
+        isMissing: (error) => errorCode(error) === 'TEMPLATE_NOT_FOUND',
+      });
       await resetAiGeneratorServerState({
         jobs,
         reviews,
@@ -2047,7 +2061,7 @@ export function AiGeneratorPage({
         <footer className="ai-generator-footer">
           <div>
             {!initialTemplate && (
-              <button className="button button-danger" type="button" disabled={busy || resetting} onClick={() => setResetConfirmOpen(true)}>
+              <button className="button button-danger" type="button" disabled={busy || resetting || restoring} onClick={() => setResetConfirmOpen(true)}>
                 <DeleteOutlined /> Xóa dữ liệu
               </button>
             )}

@@ -751,4 +751,59 @@ describe('AI generator reset UI', () => {
     expect(JSON.stringify(view.toJSON())).toContain('guide.pdf');
     view.unmount();
   });
+
+  it('reloads current review status before reset and does not delete a partially published template', async () => {
+    const draft = materializedModuleReview();
+    const published = { ...draft, status: 'published' as const };
+    const completed = { ...failedTemplateJob, templateKind: 'normal' as const, status: 'completed' as const, result: { templateId: draft.id, version: draft.version } };
+    let reviewLoads = 0;
+    const api = {
+      adminAi: vi.fn(async (action: string) => {
+        if (action === 'list_sources') return { sources: [source] };
+        if (action === 'list_jobs') return {
+          jobs: [inventoryJob, completed],
+          publicationBatches: [{
+            batchId: 'partial-publish', createdBy: 'admin-1', createdAt: '2026-10-29T00:00:00.000Z',
+            targets: [{ kind: 'normal', jobId: completed.jobId, templateId: draft.id, version: draft.version }],
+          }],
+        };
+        if (action === 'get_review') return { review: reviewLoads++ === 0 ? draft : published };
+        throw new Error('Unexpected action: ' + action);
+      }),
+      adminTemplates: vi.fn(async () => undefined),
+    };
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+    expect(activeStepLabel(view)).toBe('Xuất bản');
+
+    act(() => view.root.findAllByType('button').find((button) => button.children.join('').includes('Xóa dữ liệu'))!.props.onClick());
+    await act(async () => { view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => button.children.join('') === 'Xóa dữ liệu')!.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
+
+    expect(reviewLoads).toBe(2);
+    expect(api.adminTemplates).not.toHaveBeenCalled();
+    expect(activeStepLabel(view)).toBe('Tài liệu nguồn');
+    view.unmount();
+  });
+
+  it('keeps reset disabled until the initial session restore has settled', async () => {
+    const jobs = deferred<{ jobs: readonly AiJobRecord[] }>();
+    const api = { adminAi: vi.fn(async (action: string) => {
+      if (action === 'list_sources') return { sources: [source] };
+      if (action === 'list_jobs') return jobs.promise;
+      throw new Error('Unexpected action: ' + action);
+    }), adminTemplates: vi.fn() };
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => {
+      view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined }));
+      await Promise.resolve();
+    });
+    const resetButton = () => view.root.findAllByType('button').find((button) => button.children.join('').includes('Xóa dữ liệu'))!;
+    expect(resetButton().props.disabled).toBe(true);
+
+    await act(async () => { jobs.resolve({ jobs: [] }); await Promise.resolve(); await Promise.resolve(); });
+
+    expect(resetButton().props.disabled).toBe(false);
+    expect(activeStepLabel(view)).toBe('Tài liệu nguồn');
+    view.unmount();
+  });
 });

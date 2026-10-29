@@ -1,5 +1,63 @@
 import type { AiJobRecord } from '../../../onboarding/contracts';
 import type { AdminTemplateDetail } from '../../../onboarding/templates';
+import type { AiPublishTarget } from './ai-publish-batch';
+import type { AiTemplateRun } from './ai-template-batch';
+
+export interface AiGeneratorResetTemplateRef {
+  readonly templateId: string;
+  readonly version: number;
+}
+
+function templateRef(value: unknown): AiGeneratorResetTemplateRef | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  return typeof record.templateId === 'string' && record.templateId.trim()
+    && typeof record.version === 'number' && Number.isInteger(record.version) && record.version > 0
+    ? { templateId: record.templateId, version: record.version }
+    : undefined;
+}
+
+function reviewRef(review: AdminTemplateDetail | null | undefined): AiGeneratorResetTemplateRef | undefined {
+  return review ? { templateId: review.id, version: review.version } : undefined;
+}
+
+export function collectAiGeneratorResetTemplateRefs(
+  runs: readonly AiTemplateRun[],
+  publishTargets: readonly AiPublishTarget[],
+): readonly AiGeneratorResetTemplateRef[] {
+  const candidates = [
+    ...runs.flatMap((run) => [
+      reviewRef(run.review),
+      templateRef(run.publicationTarget),
+      templateRef(run.job?.result),
+    ]),
+    ...publishTargets.flatMap((target) => [
+      reviewRef(target.review),
+      reviewRef(target.preparedReview),
+      reviewRef(target.publishedTemplate),
+    ]),
+  ];
+  return [...new Map(candidates
+    .filter((ref): ref is AiGeneratorResetTemplateRef => Boolean(ref))
+    .map((ref) => [`${ref.templateId}:${ref.version}`, ref])).values()];
+}
+
+export async function loadAiGeneratorResetReviews(input: {
+  readonly refs: readonly AiGeneratorResetTemplateRef[];
+  readonly getReview: (ref: AiGeneratorResetTemplateRef) => Promise<AdminTemplateDetail>;
+  readonly isMissing: (error: unknown) => boolean;
+}): Promise<readonly AdminTemplateDetail[]> {
+  const refs = new Map(input.refs.map((ref) => [`${ref.templateId}:${ref.version}`, ref]));
+  const reviews: AdminTemplateDetail[] = [];
+  for (const ref of refs.values()) {
+    try {
+      reviews.push(await input.getReview(ref));
+    } catch (error) {
+      if (!input.isMissing(error)) throw error;
+    }
+  }
+  return reviews;
+}
 
 export interface AiGeneratorServerResetInput {
   readonly jobs: readonly AiJobRecord[];
