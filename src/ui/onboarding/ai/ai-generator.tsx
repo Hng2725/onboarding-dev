@@ -39,6 +39,7 @@ import {
 } from './ai-gateway-native-chat';
 import { pumpAiJob } from './ai-pump';
 import {
+  hasActiveQuestionGeneration,
   pumpWithQuestionRecovery,
   shouldBoundNativeQuestionPoll,
   shouldUseNativeForPump,
@@ -1203,6 +1204,7 @@ export function AiGeneratorPage({
           workerId: 'onboarding-ai-' + crypto.randomUUID(),
           signal: controller.signal,
           onProgress: recordProgress,
+          ...(hasActiveQuestionGeneration(current) ? { recoverPreDispatchFailure: true } : {}),
           ...(boundedQuestionRecovery ? { maxPollMs: QUESTION_RECOVERY_NATIVE_TIMEOUT_MS } : {}),
         });
       },
@@ -1344,7 +1346,7 @@ export function AiGeneratorPage({
   async function resumeModuleJob() {
     if (!templateJob) return;
     setBusy(true); setNotice(null);
-    try { const job = await pump(templateJob, aiJobPrefersNative(templateJob)); setTemplateJob(job); await openCompletedModuleReview(job); }
+    try { const job = await pump(templateJob); setTemplateJob(job); await openCompletedModuleReview(job); }
     catch (caught) { if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' }); }
     finally { setBusy(false); }
   }
@@ -1409,7 +1411,6 @@ export function AiGeneratorPage({
         responsibilities,
         runs: templateRuns,
         generateOne: async (current) => {
-          const preferNative = aiJobPrefersNative(current.job);
           let job = current.job?.status === 'running'
             ? current.job
             : current.job?.status === 'failed'
@@ -1426,7 +1427,7 @@ export function AiGeneratorPage({
           if (roomId) {
             writeAiResumeKey('onboarding:ai:template:' + roomId + ':' + current.kind, job.jobId);
           }
-          job = await pump(job, preferNative);
+          job = await pump(job);
           setTemplateJob(job);
           if (job.pipelineVersion === 'module_v2' && (job.status !== 'completed' || !job.result)) throw new ModuleReviewPending();
           const output = job.result as { templateId?: unknown; version?: unknown } | undefined;

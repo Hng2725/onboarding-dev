@@ -305,6 +305,7 @@ export interface SubmitAiOutputInput extends JobWorkerInput {
 export interface ReportAiFailureInput extends JobWorkerInput {
   readonly callId: string;
   readonly kind: 'dispatch_unknown' | 'failed' | 'timeout';
+  readonly provider?: AiProvider;
   readonly message?: string;
   readonly providerErrorCode?: string;
   readonly providerPhase?: string;
@@ -1969,7 +1970,7 @@ export function createAiJobService(
     async reportAiFailure(actor, input) {
       requireAdmin(actor);
       const row = await requireOwnedJob(actor, input.jobId);
-      if (input.providerErrorCode === 'DISPATCH_NOT_STARTED') {
+      if (input.providerErrorCode === 'DISPATCH_NOT_STARTED' && !input.provider) {
         const call = row.calls.find((item) => item.callId === input.callId);
         if (!call || call.leaseHolderId !== input.workerId || !call.dispatchClaimedAt) throw new AiJobServiceError('JOB_LEASE_LOST', 'The dispatch claim belongs to another holder.');
         if (call.attemptRef || call.dispatchUnknown) throw new AiJobServiceError('JOB_CALL_MISMATCH', 'A started or uncertain attempt cannot be abandoned.');
@@ -1998,6 +1999,12 @@ export function createAiJobService(
           'The failed call is not the current call.',
         );
       }
+      if (input.provider && current.provider && current.provider !== input.provider) {
+        throw new AiJobServiceError(
+          'JOB_CALL_MISMATCH',
+          'The failed AI call already belongs to a different provider.',
+        );
+      }
       // A delayed definitive rejection still belongs to this unresolved claim.
       // Clock expiry alone cannot discard that evidence or authorize another reporter.
       const matchingBusyClaim = input.kind === 'failed' && input.providerErrorCode === 'PROJECT_BUSY'
@@ -2016,6 +2023,7 @@ export function createAiJobService(
       const calls = row.calls.map((candidate) => candidate.callId === current.callId ? {
         ...candidate,
         status: 'failed' as const,
+        ...(input.provider ? { provider: input.provider } : {}),
         errors: [message],
         ...(providerErrorCode ? { providerErrorCode } : {}),
         ...(providerPhase ? { providerPhase } : {}),

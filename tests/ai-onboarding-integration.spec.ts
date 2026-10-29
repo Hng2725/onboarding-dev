@@ -200,14 +200,14 @@ describe('AI onboarding integration', () => {
 
     const sandboxStep = await jobs.nextStep(admin, { jobId: fixture.jobId, workerId });
     if (sandboxStep.kind !== 'ai_call') throw new Error('Expected Sandbox question call');
-    await jobs.recordDispatch(admin, {
-      jobId: fixture.jobId, workerId, callId: sandboxStep.callId,
-      attemptRef: 'sandbox-attempt', provider: 'sandbox',
-    });
     let job = await jobs.reportAiFailure(admin, {
       jobId: fixture.jobId, workerId, callId: sandboxStep.callId, kind: 'failed',
+      provider: 'sandbox', providerErrorCode: 'AI_PERMISSION_DENIED',
     });
     expect(job.moduleRuns![0]).toMatchObject({ questionState: 'failed', questionVersion: 3 });
+    expect(job.calls.find((call) => call.callId === sandboxStep.callId)).toMatchObject({
+      status: 'failed', provider: 'sandbox', providerErrorCode: 'AI_PERMISSION_DENIED',
+    });
 
     job = await jobs.retryModule(admin, {
       jobId: fixture.jobId,
@@ -217,14 +217,14 @@ describe('AI onboarding integration', () => {
     });
     const nativeStep = await jobs.nextStep(admin, { jobId: fixture.jobId, workerId });
     if (nativeStep.kind !== 'ai_call') throw new Error('Expected Native question call');
-    await jobs.recordDispatch(admin, {
-      jobId: fixture.jobId, workerId, callId: nativeStep.callId,
-      attemptRef: 'native-chat:session:message', provider: 'native_chat',
-    });
     job = await jobs.reportAiFailure(admin, {
       jobId: fixture.jobId, workerId, callId: nativeStep.callId, kind: 'failed',
+      provider: 'native_chat', providerErrorCode: 'DISPATCH_NOT_STARTED',
     });
     expect(job.moduleRuns![0]).toMatchObject({ questionState: 'failed', questionVersion: 4 });
+    expect(job.calls.find((call) => call.callId === nativeStep.callId)).toMatchObject({
+      status: 'failed', provider: 'native_chat', providerErrorCode: 'DISPATCH_NOT_STARTED',
+    });
 
     job = await jobs.useQuestionFallback(admin, {
       jobId: fixture.jobId,

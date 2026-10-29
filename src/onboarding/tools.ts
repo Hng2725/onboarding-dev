@@ -162,6 +162,15 @@ function requiredProvider(args: Record<string, unknown>): AiProvider {
   return provider as AiProvider;
 }
 
+function optionalProvider(args: Record<string, unknown>): AiProvider | undefined {
+  const provider = optionalString(args, 'provider');
+  if (provider === undefined) return undefined;
+  if (!(AI_PROVIDERS as readonly string[]).includes(provider)) {
+    throw toolError('ARGUMENT_INVALID', 'provider must be sandbox or native_chat.');
+  }
+  return provider as AiProvider;
+}
+
 function optionalString(args: Record<string, unknown>, key: string): string | undefined {
   const value = args[key];
   if (value === undefined || value === null || value === '') return undefined;
@@ -544,6 +553,7 @@ async function dispatchAdminAi(
         workerId: requiredString(args, 'workerId'),
         callId: requiredString(args, 'callId'),
         kind,
+        provider: optionalProvider(args),
         message: optionalString(args, 'message'),
         providerErrorCode: optionalString(args, 'providerErrorCode'),
         providerPhase: optionalString(args, 'providerPhase'),

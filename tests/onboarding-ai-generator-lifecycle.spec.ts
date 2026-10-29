@@ -510,6 +510,57 @@ it('resumes an interrupted module job only on explicit action', async () => {
   view.unmount(); vi.unstubAllGlobals();
 });
 
+it('resumes a later module with Sandbox after an earlier module used Native', async () => {
+  host.appRevision = 0;
+  host.apps[0].rest.mockReset();
+  host.apps[0].uploadFile.mockReset();
+  host.apps[0].rest.mockImplementation(async (request: { path: string }) => {
+    if (request.path === 'agents.sandbox.generate-async') {
+      return { statusCode: 200, body: { attemptId: 'sandbox-module-2' } };
+    }
+    throw new Error('Unexpected REST path: ' + request.path);
+  });
+  host.apps[0].uploadFile.mockRejectedValue(new Error('Native must not be selected'));
+  const storage = new Map([['onboarding:ai:template:room-1:normal', 'template-1']]);
+  vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+  const modules = ['First', 'Second'].map((title, order) => ({ moduleLocalId: `m${order + 1}`, frameKey: order ? 't1-core' : 't1-overview', order, title, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: ['s'], responsibilityIndexes: [] }));
+  const job = {
+    ...failedTemplateJob,
+    templateKind: 'normal' as const,
+    roleProfile: undefined,
+    status: 'running' as const,
+    pipelineVersion: 'module_v2' as const,
+    outline: { revision: 1, modules, flags: [], taskCoverage: [] },
+    outlineApprovedRevision: 1,
+    moduleRuns: [
+      { outline: modules[0], outlineRevision: 1, lessonState: 'approved' as const, lessonVersion: 1, questionState: 'approved' as const, questionVersion: 1 },
+      { outline: modules[1], outlineRevision: 1, lessonState: 'approved' as const, lessonVersion: 1, questionState: 'drafting' as const, questionVersion: 1 },
+    ],
+    calls: [{
+      callId: 'm1-native', stage: 'B' as const, operationId: 'm1-native', status: 'failed' as const,
+      provider: 'native_chat' as const, attemptRef: 'native-chat:old:message',
+      moduleLocalId: 'm1', moduleTarget: 'questions' as const, moduleVersion: 1,
+    }],
+  };
+  const api = { adminAi: vi.fn(async (action: string) => {
+    if (action === 'list_sources') return { sources: [] };
+    if (action === 'list_jobs') return { jobs: [inventoryJob, job] };
+    if (action === 'next_step') return { kind: 'ai_call', callId: 'm2-questions', operationId: 'm2-questions', prompt: 'Create questions' };
+    if (action === 'record_dispatch') throw new Error('Stop after provider selection');
+    if (action === 'report_ai_failure') throw new Error('Stop after provider selection');
+    throw new Error('Unexpected action: ' + action);
+  }) };
+  let view!: TestRenderer.ReactTestRenderer;
+  await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+
+  const resume = view.root.findAllByType('button').find((item) => item.children.join('').includes('Tiếp tục xử lý'))!;
+  await act(async () => { resume.props.onClick(); await Promise.resolve(); });
+
+  expect(host.apps[0].rest).toHaveBeenCalledWith(expect.objectContaining({ path: 'agents.sandbox.generate-async' }));
+  expect(host.apps[0].uploadFile).not.toHaveBeenCalled();
+  view.unmount(); vi.unstubAllGlobals();
+});
+
 it('automatically recovers a failed Sandbox question through Native and grounded fallback', async () => {
   const storage = new Map([['onboarding:ai:template:room-1:normal', 'template-1']]);
   vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });

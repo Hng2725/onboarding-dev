@@ -39,6 +39,8 @@ export interface PumpAiJobOptions {
   readonly sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   readonly nowMs?: () => number;
   readonly maxPollMs?: number;
+  /** Treat a proven no-dispatch failure as terminal so question recovery can select the next provider. */
+  readonly recoverPreDispatchFailure?: boolean;
 }
 
 function abortReason(signal?: AbortSignal): unknown {
@@ -132,6 +134,8 @@ export async function pumpAiJob(options: PumpAiJobOptions): Promise<AiJobRecord>
         const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
         const notStarted = code === 'DISPATCH_NOT_STARTED';
         const known = notStarted || code === 'PROJECT_BUSY' || code === 'AI_PERMISSION_DENIED';
+        const releaseBeforeDispatch = notStarted
+          && (Boolean(options.signal?.aborted) || !options.recoverPreDispatchFailure);
         // Unknown dispatches remain fenced on close. Positive non-dispatch evidence
         // can safely release the claim even when the signal is already aborted.
         if (options.signal?.aborted && !known) throw abortReason(options.signal);
@@ -140,11 +144,12 @@ export async function pumpAiJob(options: PumpAiJobOptions): Promise<AiJobRecord>
           workerId: options.workerId,
           callId: step.callId,
           kind: known ? 'failed' : 'dispatch_unknown',
+          ...(known && !releaseBeforeDispatch ? { provider: options.provider } : {}),
           ...(known ? { providerErrorCode: code, message: error instanceof Error ? error.message : String(code) } : {}),
         });
         options.onProgress?.(job);
         throwIfAborted(options.signal);
-        if (known && !notStarted && job.status === 'running') continue work;
+        if (known && (!notStarted || options.recoverPreDispatchFailure) && job.status === 'running') continue work;
         throw error;
       }
       const dispatchedRef = attemptRef;

@@ -45,6 +45,31 @@ describe('AI browser pump', () => {
     expect(adminAi).toHaveBeenCalledWith('report_ai_failure', expect.objectContaining({ kind: 'failed', providerErrorCode: 'AI_PERMISSION_DENIED' }));
   });
 
+  it.each([
+    ['sandbox', 'AI_PERMISSION_DENIED'],
+    ['native_chat', 'DISPATCH_NOT_STARTED'],
+  ] as const)('persists %s on a terminal pre-dispatch %s failure and returns the recoverable job', async (provider, code) => {
+    const recoverable = { jobId: 'job-1', status: 'running', calls: [{ callId: 'A1', status: 'failed', provider }] };
+    const adminAi = vi.fn()
+      .mockResolvedValueOnce({ kind: 'ai_call', callId: 'A1', operationId: 'job-1:A1', prompt: 'p' })
+      .mockResolvedValueOnce(recoverable)
+      .mockResolvedValueOnce({ kind: 'awaiting_admin', job: recoverable });
+    const gateway: AiGateway = {
+      dispatch: vi.fn().mockRejectedValue(new AiGatewayError(code, 'Provider unavailable before dispatch')),
+      status: vi.fn(),
+    };
+
+    await expect(pumpAiJob({
+      api: { adminAi }, gateway, provider, jobId: 'job-1', workerId: 'tab-a',
+      ...(code === 'DISPATCH_NOT_STARTED' ? { recoverPreDispatchFailure: true } : {}),
+    })).resolves.toEqual(recoverable);
+    expect(adminAi).toHaveBeenCalledWith('report_ai_failure', expect.objectContaining({
+      kind: 'failed',
+      provider,
+      providerErrorCode: code,
+    }));
+  });
+
   it('returns awaiting_admin without dispatching or polling', async () => {
     const job = { jobId: 'job-1', status: 'running' };
     const adminAi = vi.fn().mockResolvedValue({ kind: 'awaiting_admin', job });
