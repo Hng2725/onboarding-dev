@@ -40,17 +40,20 @@ function declarationValues(block: string, property: string): readonly string[] {
 }
 
 function mobileGeneratorBlock(): string {
-  const marker = '@media (max-width: 700px)';
+  return mediaBlock('@media (max-width: 700px)', '.ai-generator-backdrop');
+}
+
+function mediaBlock(marker: string, requiredSelector: string): string {
   let offset = 0;
   while (offset < stylesheet.length) {
     const mediaOffset = stylesheet.indexOf(marker, offset);
     if (mediaOffset < 0) break;
     const openingBrace = stylesheet.indexOf('{', mediaOffset + marker.length);
     const block = balancedBlock(stylesheet, openingBrace);
-    if (block.includes('.ai-generator-backdrop')) return block;
+    if (block.includes(requiredSelector)) return block;
     offset = openingBrace + block.length + 2;
   }
-  throw new Error('AI Generator mobile media block not found');
+  throw new Error(`Media block not found: ${marker} containing ${requiredSelector}`);
 }
 
 describe('AI Generator compact modal density', () => {
@@ -79,6 +82,7 @@ describe('AI Generator compact modal density', () => {
 
     const fields = rule(".ai-generator-panel input:not([type='checkbox']), .ai-generator-panel select, .ai-generator-panel textarea");
     expect(declarationValues(fields, 'font-size')).toEqual(['13px']);
+    expect(declarationValues(rule('.ai-generator-panel small'), 'font-size')).toEqual(['12px']);
   });
 
   it('keeps long review content usable without widening the modal', () => {
@@ -93,6 +97,12 @@ describe('AI Generator compact modal density', () => {
     expect(declarationValues(review, 'overflow')).toEqual(['auto']);
     expect(declarationValues(rule('.ai-outline-review > .ai-review-scroll'), 'max-height')).toEqual(['56dvh']);
     expect(declarationValues(rule('.ai-module-actions'), 'flex-wrap')).toEqual(['wrap']);
+  });
+
+  it('stacks source columns before the compact body would clip controls', () => {
+    const tablet = mediaBlock('@media (max-width: 780px)', '.ai-source-layout');
+
+    expect(declarationValues(rule('.ai-source-layout', tablet), 'grid-template-columns')).toEqual(['1fr']);
   });
 
   it('preserves the full-screen single-column mobile layout', () => {

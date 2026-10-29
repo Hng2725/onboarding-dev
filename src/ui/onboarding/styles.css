@@ -509,6 +509,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .ai-generator-panel .button { min-height: 34px; padding: 0 12px; font-size: 13px; line-height: 1.25; white-space: normal; }
 .ai-generator-panel button { min-height: 34px; font-size: 13px; }
 .ai-generator-panel input:not([type='checkbox']), .ai-generator-panel select, .ai-generator-panel textarea { box-sizing: border-box; min-height: 34px; font-size: 13px; }
+.ai-generator-panel small { font-size: 12px; }
 .ai-source-metadata { display: grid; grid-template-columns: 1.5fr .8fr .8fr; gap: 12px; margin-bottom: 16px; padding: 15px; border: 1px solid var(--on-border); border-radius: 13px; background: var(--on-bg); }
 .ai-source-layout { display: grid; grid-template-columns: minmax(290px,.8fr) minmax(420px,1.2fr); gap: 16px; }
 .ai-source-upload,.ai-source-list { padding: 18px; border: 1px solid var(--on-border); border-radius: 14px; background: var(--on-surface); }
@@ -903,6 +904,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .assignment-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .learning-layout { grid-template-columns: 210px minmax(0,1fr); }
   .learning-main { padding: 25px; }
+}
+
+@media (max-width: 780px) {
+  .ai-source-layout { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 700px) {
