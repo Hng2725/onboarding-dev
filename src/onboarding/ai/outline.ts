@@ -65,15 +65,18 @@ function mergeModules(modules: readonly TemplateOutlineModule[]): TemplateOutlin
 /**
  * Brings an outline's module list into the template kind's module range: pads with empty
  * `insufficient` modules (Vietnamese frame-label titles) up to the minimum, merges the tail into
- * the last module above the maximum, then reassigns `order` and positional `frameKey`.
+ * the last module above the maximum, then reassigns `order` and positional `frameKey`. Only live
+ * modules are normalized; tombstones are appended unchanged and their IDs are never reused.
  */
 export function normalizeOutlineModuleCount(modules: readonly TemplateOutlineModule[], input: { jobId: string; templateKind: EmployeeType }): TemplateOutlineModule[] {
   const frames: readonly string[] = input.templateKind === 'normal' ? NORMAL_FRAMES : ADVANCED_FRAMES;
   const range = input.templateKind === 'normal' ? AI_GENERATION_LIMITS.normalModuleRange : AI_GENERATION_LIMITS.advancedModuleRange;
-  const sorted = modules.map((module, index) => ({ module, index })).sort((a, b) => a.module.order - b.module.order || a.index - b.index).map((item) => item.module);
+  const live = modules.filter((module) => !module.tombstoned);
+  const tombstones = modules.filter((module) => module.tombstoned);
+  const sorted = live.map((module, index) => ({ module, index })).sort((a, b) => a.module.order - b.module.order || a.index - b.index).map((item) => item.module);
   const list = sorted.length > range.max ? [...sorted.slice(0, range.max - 1), mergeModules(sorted.slice(range.max - 1))] : [...sorted];
   const usedTitles = new Set(list.map((m) => normalizeForMatch(m.title.trim())));
-  const usedIds = new Set(list.map((m) => m.moduleLocalId));
+  const usedIds = new Set(modules.map((m) => m.moduleLocalId));
   for (let position = list.length; position < range.min; position += 1) {
     const frameKey = frames[position];
     const candidates = [...frames.slice(position), ...frames.slice(0, position)].map(outlineFrameLabel);
@@ -85,7 +88,7 @@ export function normalizeOutlineModuleCount(modules: readonly TemplateOutlineMod
     usedIds.add(id);
     list.push({ moduleLocalId: id, frameKey, order: position, title, description: '', estimatedMinutes: 10, objectives: [], featureIds: [], sourceSectionIds: [], responsibilityIndexes: [], coverage: 'insufficient', gapNote: GAP_NOTE });
   }
-  return list.map((module, order) => ({ ...module, order, frameKey: frames[order] }));
+  return [...list.map((module, order) => ({ ...module, order, frameKey: frames[order] })), ...tombstones];
 }
 
 /** Groups features by the inventory's own summary modules, in summary order. */
@@ -144,7 +147,7 @@ function buildAdvancedModules(jobId: string, inventory: FeatureInventory, featur
     let best = 2;
     let bestScore = 0;
     frames.forEach((frame, index) => {
-      const textForFrame = `${frame.replace(/t[12]-/u, '').replace(/-/gu, ' ')} ${outlineFrameLabel(frame)} ${indexes[index].map((i) => responsibilities[i]).join(' ')}`;
+      const textForFrame = `${frame.replace(/t[12]-/u, '').replace(/-/gu, ' ')} ${indexes[index].map((i) => responsibilities[i]).join(' ')}`;
       const current = score(text, textForFrame);
       if (current > bestScore) { best = index; bestScore = current; }
     });

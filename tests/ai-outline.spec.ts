@@ -106,15 +106,29 @@ describe('outline source and required-frame safeguards', () => {
     const marked = { ...missing, flags: [{ ...missing.flags[0], location: { frameKey: 't1-core' } }] };
     expect(validateTemplateOutline(marked, { templateKind: 'normal', responsibilities }).some((e) => e.code === 'REQUIRED_FRAME')).toBe(false);
   });
-  it('does not treat unrelated zero-score features as sources for default frames', () => {
-    const unrelated = { ...inventory, systemSummary: { ...inventory.systemSummary, sourceRefs: [] }, features: [{ ...inventory.features[0], name: 'Banana', module: 'Orchard', purpose: 'Harvest fruit' }] };
-    for (const kind of ['normal', 'advanced'] as const) {
-      const outline = build(kind, unrelated);
-      const frame = kind === 'normal' ? 't1-core' : 't2-task-1';
-      const module = outline.modules.find((m) => m.frameKey === frame)!;
+  it('puts an unrelated normal feature in the first summary group with its refs', () => {
+    const unrelated = { ...inventory, systemSummary: { ...inventory.systemSummary, modules: ['Kế hoạch 30 ngày', 'Phân loại dữ liệu'], sourceRefs: [] }, features: [{ ...inventory.features[0], name: 'Banana', module: 'Orchard', purpose: 'Harvest fruit' }] };
+    const outline = build('normal', unrelated);
+    expect(outline.modules[0]).toMatchObject({ title: 'Kế hoạch 30 ngày', featureIds: ['f1'], sourceSectionIds: ['s2'], coverage: 'sufficient' });
+    for (const module of outline.modules.slice(1)) {
       expect(module.sourceSectionIds).toEqual([]);
       expect(outline.flags.some((f) => f.type === 'missing' && f.severity === 'blocking' && f.location.moduleLocalId === module.moduleLocalId)).toBe(true);
     }
+  });
+  it('does not treat unrelated zero-score features as sources for advanced task frames', () => {
+    const unrelated = { ...inventory, systemSummary: { ...inventory.systemSummary, sourceRefs: [] }, features: [{ ...inventory.features[0], name: 'Banana', module: 'Orchard', purpose: 'Harvest fruit' }] };
+    const outline = build('advanced', unrelated);
+    const module = outline.modules.find((m) => m.frameKey === 't2-task-1')!;
+    expect(module.sourceSectionIds).toEqual([]);
+    expect(outline.flags.some((f) => f.type === 'missing' && f.severity === 'blocking' && f.location.moduleLocalId === module.moduleLocalId)).toBe(true);
+  });
+  it('scores advanced Vietnamese features against responsibilities, not frame labels', () => {
+    const tasks = ['Lập báo cáo tuần', 'Duyệt quyền'];
+    const data: FeatureInventory = { ...inventory, systemSummary: { ...inventory.systemSummary, sourceRefs: [] }, features: [{ ...inventory.features[0], name: 'Báo cáo công việc', module: 'Công việc', purpose: 'Tổng hợp', sourceRefs: [{ sectionId: 'vn', quote: 'Báo cáo công việc' }] }] };
+    const outline = buildTemplateOutline({ jobId: 'vn', templateKind: 'advanced', inventory: data, responsibilities: tasks });
+    const slot = outline.modules.find((m) => m.responsibilityIndexes.includes(0))!;
+    expect(slot).toMatchObject({ frameKey: 't2-task-1', title: 'Lập báo cáo tuần', featureIds: ['f1'], sourceSectionIds: ['vn'], coverage: 'sufficient' });
+    expect(outline.modules.find((m) => m.frameKey === 't2-collab')).toMatchObject({ featureIds: [], coverage: 'insufficient' });
   });
 });
 
@@ -200,6 +214,19 @@ describe('normalizeOutlineModuleCount', () => {
     expect(result.map((m) => m.frameKey)).toEqual(['t2-role', 't2-permissions', 't2-task-1', 't2-task-2', 't2-task-3']);
     expect(result.map((m) => m.order)).toEqual([0, 1, 2, 3, 4]);
     expect(result.slice(1).every((m) => m.coverage === 'insufficient' && !/^t[12]-/.test(m.title))).toBe(true);
+    expect(new Set(result.map((m) => m.moduleLocalId)).size).toBe(5);
+  });
+  it('normalizes live modules only and keeps tombstones unchanged at the end', () => {
+    const padId = base[1].moduleLocalId;
+    const tombstone = { ...base[1], frameKey: 't1-access', order: 0, tombstoned: true };
+    const result = normalizeOutlineModuleCount([tombstone, { ...base[0], order: 1 }], { jobId: 'n', templateKind: 'normal' });
+    expect(result).toHaveLength(5);
+    expect(result.slice(0, 4).every((m) => !m.tombstoned)).toBe(true);
+    expect(result.slice(0, 4).map((m) => m.frameKey)).toEqual(['t1-overview', 't1-access', 't1-navigation', 't1-core']);
+    expect(result.slice(0, 4).map((m) => m.order)).toEqual([0, 1, 2, 3]);
+    expect(result[0].moduleLocalId).toBe(base[0].moduleLocalId);
+    expect(result[4]).toEqual(tombstone);
+    expect(result.slice(0, 4).map((m) => m.moduleLocalId)).not.toContain(padId);
     expect(new Set(result.map((m) => m.moduleLocalId)).size).toBe(5);
   });
 });
