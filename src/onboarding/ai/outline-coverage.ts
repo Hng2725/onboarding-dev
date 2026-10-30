@@ -1,5 +1,5 @@
 // Browser-safe: imported by the outline UI, so no node-only modules here.
-import type { EmployeeType, SourceRecord, TemplateOutline, TemplateOutlineModule } from '../contracts';
+import type { AiCallRecord, AiJobRecord, EmployeeType, SourceRecord, TemplateOutline, TemplateOutlineModule } from '../contracts';
 import { normalizeForMatch } from './grounding';
 import { AI_GENERATION_LIMITS } from './limits';
 
@@ -47,4 +47,31 @@ export function outlineReadiness(
     if (input.responsibilities.some((_, index) => !assigned.has(index))) reasons.push('Còn nhiệm vụ chưa gắn module');
   }
   return { ready: reasons.length === 0, reasons };
+}
+
+/** Gap note of a module whose new-file supplement skipped a batch AI could not read. */
+export const SUPPLEMENT_FAILED_NOTE = 'AI chưa đọc được tài liệu bổ sung. Hãy thử lại hoặc chọn đoạn thủ công.';
+
+const SUPPLEMENT_ROOT_CALL = /^supplement-(\d+)-b\d+$/;
+
+/**
+ * The new-file source whose latest, settled supplement request for this module skipped batches,
+ * so "Thử lại" can re-read just those through `supplement_module_document`. Mirrors the
+ * server's skipped-batch check: a root S call of the request without a stored result.
+ */
+export function retryableSupplementSourceId(
+  job: Pick<AiJobRecord, 'outline' | 'calls' | 'stageOutputs'>,
+  moduleLocalId: string,
+): string | undefined {
+  const module = job.outline?.modules.find((item) => !item.tombstoned && item.moduleLocalId === moduleLocalId);
+  if (!module || module.gapNote !== SUPPLEMENT_FAILED_NOTE) return undefined;
+  const roots = job.calls.filter((call) => call.stage === 'S' && !call.repairOf && call.supplementModuleLocalId === moduleLocalId
+    && SUPPLEMENT_ROOT_CALL.test(call.callId));
+  const requestOf = (call: AiCallRecord) => Number(SUPPLEMENT_ROOT_CALL.exec(call.callId)![1]);
+  const latest = Math.max(0, ...roots.map(requestOf));
+  if (!latest || job.stageOutputs['applied:supplement-' + String(latest)] !== true) return undefined;
+  const request = roots.filter((call) => requestOf(call) === latest);
+  const sourceId = request.find((call) => call.supplementSourceId)?.supplementSourceId;
+  const skipped = request.some((call) => job.stageOutputs['result:' + call.callId] === undefined);
+  return sourceId && skipped ? sourceId : undefined;
 }

@@ -245,6 +245,7 @@ Chỉ khi template đã được xuất bản và lưu JSON thành công, app m�
 
 ### Tải tài liệu bổ sung mà module vẫn “Cần bổ sung”
 
+- Nếu module ghi “AI chưa đọc được tài liệu bổ sung…”, bấm **Thử lại** ở module đó: AI chỉ đọc lại phần của file mới chưa đọc được, không cần tải lại file.
 - Đọc ghi chú thiếu của module để biết cần tài liệu gì.
 - Tải thêm tài liệu đúng nội dung, hoặc chọn đoạn từ tài liệu đã có.
 - Chỉ dùng **Vẫn dùng tài liệu hiện có** khi chắc chắn tài liệu hiện có đã đủ.

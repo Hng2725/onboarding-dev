@@ -2,7 +2,7 @@ import { useState, type ChangeEvent } from 'react';
 
 import type { AiJobRecord, OutlineEdit, TemplateOutlineModule } from '../../../onboarding/contracts';
 import { AI_GENERATION_LIMITS } from '../../../onboarding/ai/limits';
-import { isModuleCovered, moduleHasUsableSources } from '../../../onboarding/ai/outline-coverage';
+import { isModuleCovered, moduleHasUsableSources, retryableSupplementSourceId } from '../../../onboarding/ai/outline-coverage';
 import { outlineModuleDisplayTitle } from '../../../onboarding/ai/frame-labels';
 import { ADVANCED_FRAMES, NORMAL_FRAMES } from '../../../onboarding/ai/validate';
 
@@ -29,6 +29,8 @@ export interface AiStepCoverageProps {
   onUploadFor(moduleLocalId: string, file: File): void;
   onPickSections(moduleLocalId: string, sourceIds: string[], sectionIds: string[]): void;
   onOverride(moduleLocalId: string): void;
+  /** Re-reads the batches a new-file supplement skipped, from the source it recorded. */
+  onRetrySupplement(moduleLocalId: string, sourceId: string): void;
   onAddModule(title: string, description: string): void;
 }
 
@@ -98,6 +100,7 @@ export function AiStepCoverage({
   onUploadFor,
   onPickSections,
   onOverride,
+  onRetrySupplement,
   onAddModule,
 }: AiStepCoverageProps) {
   const [panel, setPanel] = useState<OpenPanel>(() => initialPickerModuleId
@@ -145,6 +148,7 @@ export function AiStepCoverage({
               ? 'Module bắt buộc của lộ trình'
               : null;
           const open = panel && panel.moduleLocalId === module.moduleLocalId ? panel.kind : null;
+          const retrySourceId = covered || reading ? undefined : retryableSupplementSourceId(job, module.moduleLocalId);
           return (
             <li className={'ai-coverage-module' + (covered || reading ? '' : ' warn')} key={module.moduleLocalId}>
               <span className="ai-coverage-order">{index + 1}</span>
@@ -169,6 +173,10 @@ export function AiStepCoverage({
                 <div className="ai-coverage-gap">
                   <p>{module.gapNote?.trim() || DEFAULT_GAP_NOTE}</p>
                   <div className="ai-coverage-gap-actions">
+                    {retrySourceId && (
+                      <button className="button button-secondary button-sm" type="button" disabled={locked}
+                        onClick={() => onRetrySupplement(module.moduleLocalId, retrySourceId)}>Thử lại</button>
+                    )}
                     <label className={'button button-secondary button-sm ai-coverage-upload' + (locked ? ' disabled' : '')}>
                       Tải tài liệu bổ sung
                       <input

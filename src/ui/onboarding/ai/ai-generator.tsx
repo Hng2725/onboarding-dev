@@ -2267,6 +2267,7 @@ export function AiGeneratorPage({
                       onOverride={(moduleLocalId) => void moduleAction('set_coverage_override', {
                         expectedRevision: coverageJob.outline!.revision, moduleLocalId, override: true,
                       })}
+                      onRetrySupplement={(moduleLocalId, sourceId) => void coverageAction('supplement_module_document', { moduleLocalId, sourceId })}
                       onAddModule={(title, description) => void coverageAction('add_outline_module', { title, description })}
                     />
                   )

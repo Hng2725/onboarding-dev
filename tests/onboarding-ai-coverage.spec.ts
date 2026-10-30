@@ -36,6 +36,7 @@ vi.mock('../src/ui/onboarding/roomfiles', async (importOriginal) => ({
 import { aiCallDisplayLabel, AiGeneratorPage } from '../src/ui/onboarding/ai/ai-generator';
 import { AiStepCoverage, type ModuleSourceCatalog } from '../src/ui/onboarding/ai/ai-step-coverage';
 import { vietnameseErrorMessage } from '../src/ui/onboarding/ai/ai-labels';
+import { retryableSupplementSourceId, SUPPLEMENT_FAILED_NOTE } from '../src/onboarding/ai/outline-coverage';
 
 const css = readFileSync(fileURLToPath(new URL('../src/ui/onboarding/ai/ai-generator.css', import.meta.url)), 'utf8');
 
@@ -453,5 +454,75 @@ describe('labels for coverage work', () => {
       .toBe('Module chưa có đoạn tài liệu dùng được.');
     expect(vietnameseErrorMessage(Object.assign(new Error('Outline revision conflict.'), { code: 'OPERATION_CONFLICT' }))).toBe('Dữ liệu vừa thay đổi. Hãy thử lại.');
     expect(vietnameseErrorMessage(Object.assign(new Error('x'), { code: 'COVERAGE_INCOMPLETE' }))).toBe('Còn module chưa đủ tài liệu.');
+  });
+});
+
+describe('retrying a skipped supplement', () => {
+  const failedModule = moduleAt(4, { sourceSectionIds: [], coverage: 'insufficient', gapNote: SUPPLEMENT_FAILED_NOTE });
+  const sCall = (callId: string, status: 'completed' | 'failed' | 'invalid' | 'pending', batch: number, patch: Record<string, unknown> = {}) => ({
+    callId, stage: 'S', operationId: 'template-1:' + callId, status, planTarget: 'supplement', supplementModuleLocalId: 'm4',
+    supplementSourceId: 'source-9', supplementBatch: batch, ...patch,
+  });
+  const skippedJob = (patch: Partial<AiJobRecord> = {}) => templateJob([0, 1, 2, 3].map((index) => moduleAt(index)).concat(failedModule), {
+    sourceIds: ['handbook', 'source-9'],
+    calls: [
+      { callId: 'plan-1', stage: 'P', operationId: 'template-1:plan-1', status: 'completed', planTarget: 'plan' },
+      sCall('supplement-1-b1', 'completed', 1), sCall('supplement-1-b2', 'failed', 2), sCall('supplement-1-b2-retry1', 'failed', 2),
+    ] as AiJobRecord['calls'],
+    stageOutputs: {
+      'supplement:1': { moduleLocalId: 'm4', sourceId: 'source-9', batches: [['source-9#s1'], ['source-9#s2']] },
+      'result:supplement-1-b1': { attachments: [], coverageUpdates: [] },
+      'applied:supplement-1': true,
+    },
+    ...patch,
+  });
+
+  it('finds the source whose last supplement request for the module skipped batches', () => {
+    expect(retryableSupplementSourceId(skippedJob(), 'm4')).toBe('source-9');
+    expect(retryableSupplementSourceId(skippedJob(), 'm0')).toBeUndefined();
+    const read = skippedJob();
+    expect(retryableSupplementSourceId({ ...read, stageOutputs: { ...read.stageOutputs, 'result:supplement-1-b2': { attachments: [], coverageUpdates: [] } } }, 'm4')).toBeUndefined();
+    const otherNote = skippedJob();
+    expect(retryableSupplementSourceId({ ...otherNote, outline: { ...otherNote.outline!, modules: otherNote.outline!.modules.map((module) => module.moduleLocalId === 'm4' ? { ...module, gapNote: 'Thiếu tài liệu.' } : module) } }, 'm4')).toBeUndefined();
+  });
+
+  it('offers Thử lại on the module and hands over the recorded source', () => {
+    const { view, props } = renderCoverage(skippedJob(), { onRetrySupplement: vi.fn<(moduleLocalId: string, sourceId: string) => void>() });
+    const row = rows(view)[4];
+    act(() => { buttonByText(row, 'Thử lại').props.onClick(); });
+    expect(props.onRetrySupplement).toHaveBeenCalledWith('m4', 'source-9');
+    expect(buttonsByText(rows(view)[0], 'Thử lại')).toHaveLength(0);
+  });
+
+  it('re-reads the skipped batches with supplement_module_document and pumps them', async () => {
+    const source = {
+      id: 'source-row', roomId: 'room-1', sourceId: 'handbook', kind: 'document' as const, fileName: 'Sổ tay hội nhập.pdf',
+      mimeType: 'application/pdf', checksum: 'c', systemName: 'PrivOS', status: 'ready' as const, textLength: 2000,
+      createdBy: 'admin-1', createdAt: '2026-10-29T00:00:00.000Z', updatedAt: '2026-10-29T00:00:00.000Z',
+    };
+    const inventory = {
+      id: 'inventory-row', roomId: 'room-1', jobId: 'inventory-1', kind: 'inventory', status: 'completed', sourceIds: ['handbook', 'source-9'],
+      promptVersion: 'test', calls: [], stageOutputs: {}, result: { features: [], glossary: [], conflicts: [] }, operationId: 'inv',
+      planPending: false, createdBy: 'admin-1', createdAt: '2026-10-29T07:00:00.000Z', updatedAt: '2026-10-29T07:01:00.000Z',
+    } as unknown as AiJobRecord;
+    const job = skippedJob();
+    const queued = { ...job, planPending: true, calls: [...job.calls, sCall('supplement-2-b2', 'pending', 2)] } as AiJobRecord;
+    const api = { adminAi: vi.fn(async (action: string) => {
+      if (action === 'list_sources') return { sources: [source, { ...source, id: 'source-row-9', sourceId: 'source-9', fileName: 'Thử việc.pdf' }] };
+      if (action === 'list_jobs') return { jobs: [inventory, job] };
+      if (action === 'list_module_sources') return { sources: catalog };
+      if (action === 'supplement_module_document') return { job: queued };
+      if (action === 'next_step') return { kind: 'awaiting_admin', job: { ...queued, planPending: false } };
+      throw new Error('Unexpected action: ' + action);
+    }) };
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => {
+      view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined }));
+    });
+    views.push(view);
+    expect(activeStep(view)).toBe('Kiểm tra độ phủ');
+    await act(async () => { buttonByText(rows(view)[4], 'Thử lại').props.onClick(); });
+    expect(api.adminAi).toHaveBeenCalledWith('supplement_module_document', { jobId: 'template-1', expectedRevision: 3, moduleLocalId: 'm4', sourceId: 'source-9' });
+    expect(api.adminAi).toHaveBeenCalledWith('next_step', expect.objectContaining({ jobId: 'template-1' }));
   });
 });

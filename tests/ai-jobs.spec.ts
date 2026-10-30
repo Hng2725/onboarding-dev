@@ -15,7 +15,7 @@ import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
 import { completePlan } from './helpers/complete-plan';
 import { useManualReview } from './helpers/manual-review';
-import { isModuleCovered } from '../src/onboarding/ai/outline-coverage';
+import { isModuleCovered, retryableSupplementSourceId } from '../src/onboarding/ai/outline-coverage';
 
 const admin: OnboardingActor = { userId: 'admin-1', roomId: 'room-a', access: 'admin' };
 const otherAdmin: OnboardingActor = { userId: 'admin-2', roomId: 'room-b', access: 'admin' };
@@ -1611,6 +1611,8 @@ describe('AI job service', () => {
       await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).resolves.toMatchObject({ kind: 'ai_call', callId: 'supplement-1-b2' });
       const skipped = await service.reportAiFailure(admin, { jobId: job.jobId, workerId: 'tab-a', callId: 'supplement-1-b2', kind: 'failed', message: 'boom' });
       expect(skipped.outline!.modules.find((m) => m.moduleLocalId === target.moduleLocalId)).toMatchObject({ sourceSectionIds: ['source-3#s1'], gapNote: FAILED_NOTE });
+      // The UI offers Thử lại for exactly this module and source.
+      expect(retryableSupplementSourceId(skipped, target.moduleLocalId)).toBe('source-3');
 
       const retried = await service.supplementModuleDocument(admin, { jobId: job.jobId, expectedRevision: skipped.outline!.revision, moduleLocalId: target.moduleLocalId, sourceId: 'source-3' });
       expect(retried.sourceIds).toEqual(['source-1', 'source-3']);
@@ -1625,6 +1627,7 @@ describe('AI job service', () => {
         coverageUpdates: [{ moduleLocalId: target.moduleLocalId, coverage: 'sufficient', gapNote: '' }],
       }) });
       const module = done.outline!.modules.find((m) => m.moduleLocalId === target.moduleLocalId)!;
+      expect(retryableSupplementSourceId(done, target.moduleLocalId)).toBeUndefined();
       expect(module).toMatchObject({ sourceSectionIds: ['source-3#s1', 'source-3#s34'], coverage: 'sufficient' });
       expect(isModuleCovered(module, usableIds(['source-3#s1', 'source-3#s34']))).toBe(true);
       await expect(service.supplementModuleDocument(admin, { jobId: job.jobId, expectedRevision: done.outline!.revision, moduleLocalId: target.moduleLocalId, sourceId: 'source-3' }))
