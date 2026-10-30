@@ -152,6 +152,32 @@ function stableId(prefix: string, ...parts: readonly string[]): string {
   return prefix + '-' + digest;
 }
 
+/** Identifies a generated flag across approvals, whose materialized IDs change. */
+function flagKey(flag: GeneratedTemplate['flags'][number]): string {
+  return JSON.stringify([
+    flag.type,
+    flag.location.moduleLocalId ?? '',
+    flag.location.blockLocalId ?? '',
+    flag.location.questionLocalId ?? '',
+    flag.message,
+  ]);
+}
+
+/** Resolved or dismissed flags of the latest materialized version, by their stable key. */
+async function previousFlagDecisions(
+  store: OnboardingStore,
+  actor: OnboardingActor,
+  templateId: string,
+): Promise<Map<string, VerificationFlag>> {
+  const rows = (await store.query<StoreRecord & { templateVersion: number; flags?: readonly VerificationFlag[] }>(
+    actor.roomId, 'onboarding_template_content', { filter: { templateId }, limit: 1000 },
+  )).records;
+  const latest = [...rows].sort((left, right) => right.templateVersion - left.templateVersion)[0];
+  return new Map((latest?.flags ?? [])
+    .filter((flag) => flag.key && flag.status !== 'open')
+    .map((flag) => [flag.key!, flag] as const));
+}
+
 function required(value: string, label: string): string {
   const normalized = value.trim();
   if (!normalized) throw new AiMaterializationError('AI_CONTENT_INVALID', label + ' is required.');
@@ -260,36 +286,44 @@ async function materializeValidatedTemplate(
     });
   });
 
-  const flags: VerificationFlag[] = input.generated.flags.map((flag, index) => ({
-    id: stableId(
-      'ai-flag',
-      identityScope,
-      flag.type,
-      flag.location.moduleLocalId ?? '',
-      flag.location.blockLocalId ?? '',
-      flag.location.questionLocalId ?? '',
-      flag.location.featureId ?? '',
-      String(index),
-    ),
-    type: flag.type,
-    severity: flag.severity,
-    message: flag.message,
-    questionForAdmin: flag.questionForAdmin,
-    location: {
-      ...(flag.location.moduleLocalId
-        ? { moduleId: moduleIds.get(flag.location.moduleLocalId) }
-        : {}),
-      ...(flag.location.blockLocalId
-        ? { blockId: blockIds.get(scoped(flag.location.moduleLocalId ?? '', flag.location.blockLocalId)) }
-        : {}),
-      ...(flag.location.questionLocalId
-        ? { questionId: questionIds.get(scoped(flag.location.moduleLocalId ?? '', flag.location.questionLocalId)) }
-        : {}),
-      ...(flag.location.featureId ? { featureId: flag.location.featureId } : {}),
-    },
-    evidence: grounded(flag.evidence, input.sources, 'Flag ' + String(index + 1), false),
-    status: 'open',
-  }));
+  // Re-materializing an approval keeps the Admin's flag decisions for flags that still exist.
+  const previousFlags = input.approvedJob ? await previousFlagDecisions(store, actor, templateId) : new Map<string, VerificationFlag>();
+  const flags: VerificationFlag[] = input.generated.flags.map((flag, index) => {
+    const key = flagKey(flag);
+    const previous = previousFlags.get(key);
+    return {
+      id: stableId(
+        'ai-flag',
+        identityScope,
+        flag.type,
+        flag.location.moduleLocalId ?? '',
+        flag.location.blockLocalId ?? '',
+        flag.location.questionLocalId ?? '',
+        flag.location.featureId ?? '',
+        String(index),
+      ),
+      type: flag.type,
+      severity: flag.severity,
+      message: flag.message,
+      questionForAdmin: flag.questionForAdmin,
+      location: {
+        ...(flag.location.moduleLocalId
+          ? { moduleId: moduleIds.get(flag.location.moduleLocalId) }
+          : {}),
+        ...(flag.location.blockLocalId
+          ? { blockId: blockIds.get(scoped(flag.location.moduleLocalId ?? '', flag.location.blockLocalId)) }
+          : {}),
+        ...(flag.location.questionLocalId
+          ? { questionId: questionIds.get(scoped(flag.location.moduleLocalId ?? '', flag.location.questionLocalId)) }
+          : {}),
+        ...(flag.location.featureId ? { featureId: flag.location.featureId } : {}),
+      },
+      evidence: previous ? previous.evidence : grounded(flag.evidence, input.sources, 'Flag ' + String(index + 1), false),
+      ...(input.approvedJob ? { key } : {}),
+      status: previous ? previous.status : 'open',
+      ...(previous?.resolution ? { resolution: previous.resolution } : {}),
+    };
+  });
   const pendingBlocks = new Set(flags
     .filter((flag) => flag.severity === 'warning' && flag.status === 'open')
     .map((flag) => flag.location.blockId)

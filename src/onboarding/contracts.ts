@@ -144,6 +144,8 @@ export interface VerificationFlag {
     readonly featureId?: string;
   };
   readonly evidence: readonly SourceRef[];
+  /** Module drafts only: identifies the flag across re-materializations, whose IDs change. */
+  readonly key?: string;
   readonly status: 'open' | 'resolved' | 'dismissed';
   readonly resolution?: {
     readonly action: 'choose_option' | 'add_note' | 'upload_doc' | 'remove' | 'accept';

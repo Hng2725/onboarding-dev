@@ -4,6 +4,7 @@ import type { OnboardingActor } from '../src/onboarding/auth';
 import type { AiJobRecord, AiModuleDraftRun } from '../src/onboarding/contracts';
 import { createAiJobService, type AiJobService } from '../src/onboarding/ai/jobs';
 import { createTemplateService } from '../src/onboarding/templates';
+import { createAiReviewService } from '../src/onboarding/ai/review';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
 import { completePlan } from './helpers/complete-plan';
@@ -322,5 +323,56 @@ describe('autopilot next_step cost', () => {
     expect(step).toMatchObject({ kind: 'ai_call', moduleTarget: 'questions' });
     const sourceReads = query.mock.calls.filter(([, collection]) => collection === 'onboarding_sources');
     expect(sourceReads.length).toBeLessThanOrEqual(2);
+  });
+});
+
+describe('flag resolutions across re-materialization', () => {
+  const BLOCKING = 'Tài liệu chưa nêu hạn chót xử lý đơn.';
+  const flagged: Responder = (run, target, attempt) => {
+    if (target !== 'lesson' || run.outline.order !== 0) return valid(run, target, attempt);
+    const lesson = JSON.parse(lessonOutput(run));
+    return JSON.stringify({ ...lesson, flags: [{ type: 'missing', severity: 'blocking', message: BLOCKING, questionForAdmin: 'Hạn chót là bao lâu?', evidence: [] }] });
+  };
+
+  async function resolvedTemplate(operationId: string) {
+    const { store, service, job } = await autopilotJob(operationId);
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: job.outline!.revision });
+    const done = (await pump(service, job.jobId, flagged)).step!.job;
+    const result = done.result as { templateId: string; version: number };
+    const review = createAiReviewService(store, createTemplateService(store));
+    const detail = await review.getReview(admin, result.templateId, result.version);
+    const flag = detail.flags.find((item) => item.message === BLOCKING)!;
+    expect(flag).toMatchObject({ severity: 'blocking', status: 'open' });
+    await review.resolveFlag(admin, { templateId: result.templateId, version: result.version, flagId: flag.id, action: 'add_note', note: 'Hạn chót là 2 ngày làm việc.' });
+    return { service, review, done, result };
+  }
+
+  async function edit(service: AiJobService, done: AiJobRecord, order: number) {
+    const run = done.moduleRuns!.find((item) => item.outline.order === order)!;
+    await service.updateModuleLesson(admin, {
+      jobId: done.jobId, moduleLocalId: run.outline.moduleLocalId, expectedVersion: run.lessonVersion,
+      module: { ...run.lessonDraft!, title: 'Bài học đã sửa ' + String(order) },
+    });
+    const { step } = await pump(service, done.jobId);
+    expect(step).toMatchObject({ kind: 'done' });
+    return step!.job.result as { templateId: string; version: number };
+  }
+
+  it('keeps a resolved blocking flag resolved after another module is edited and re-materialized', async () => {
+    const { service, review, done, result } = await resolvedTemplate('flags-carry');
+    const after = await edit(service, done, 1);
+    const detail = await review.getReview(admin, after.templateId, after.version);
+    const flag = detail.flags.find((item) => item.message === BLOCKING)!;
+    expect(flag).toMatchObject({ status: 'resolved', resolution: { action: 'add_note', note: 'Hạn chót là 2 ngày làm việc.' } });
+    expect(detail.content.modules.find((module) => module.moduleId === flag.location.moduleId)).toBeTruthy();
+    expect(after.templateId).toBe(result.templateId);
+  });
+
+  it('drops the resolution when editing the flagged module removes the flag', async () => {
+    const { service, review, done } = await resolvedTemplate('flags-drop');
+    const after = await edit(service, done, 0);
+    const detail = await review.getReview(admin, after.templateId, after.version);
+    expect(detail.flags.filter((item) => item.message === BLOCKING)).toEqual([]);
+    expect(detail.flags.every((item) => item.status === 'open' && item.resolution === undefined)).toBe(true);
   });
 });
