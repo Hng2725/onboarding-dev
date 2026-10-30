@@ -22,6 +22,7 @@ export function FlagPanel({
   onResolve,
   allowRemove = true,
   onEdit,
+  compact = false,
 }: {
   flags: readonly VerificationFlag[];
   busy: boolean;
@@ -31,6 +32,8 @@ export function FlagPanel({
    */
   allowRemove?: boolean;
   onEdit?: (flag: VerificationFlag) => void;
+  /** Just the flags, without the panel heading: used inline above a module's content. */
+  compact?: boolean;
   onResolve: (
     flag: VerificationFlag,
     action: FlagResolutionAction,
@@ -47,10 +50,12 @@ export function FlagPanel({
   });
   return (
     <aside className="ai-flag-panel">
-      <header>
-        <div><span className="section-kicker">KIỂM CHỨNG</span><h3>Cờ cần rà soát</h3></div>
-        <span>{flags.filter((flag) => flag.status === 'open').length} đang mở</span>
-      </header>
+      {!compact && (
+        <header>
+          <div><span className="section-kicker">KIỂM CHỨNG</span><h3>Cờ cần rà soát</h3></div>
+          <span>{flags.filter((flag) => flag.status === 'open').length} đang mở</span>
+        </header>
+      )}
       {ordered.length === 0 && <div className="ai-flag-empty"><CheckOutlined /><span>Không có cờ cần xử lý.</span></div>}
       {ordered.map((flag) => (
         <article className={'ai-flag ai-flag-' + flag.severity + ' ai-flag-' + flag.status} key={flag.id}>

@@ -97,6 +97,7 @@ export function AiStepReview({
   const [confirming, setConfirming] = useState(false);
   const [confirmingRewrite, setConfirmingRewrite] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [warningsOpen, setWarningsOpen] = useState(false);
 
   const run = runs.find((item) => item.outline.moduleLocalId === selectedId) ?? runs[0];
   const locked = busy || updating;
@@ -108,7 +109,7 @@ export function AiStepReview({
   const reviewModules = review?.modules ?? [];
   const reviewModuleFor = (item: AiModuleDraftRun) => reviewModules.find((module) => module.key === item.outline.frameKey);
   const knownModuleIds = new Set(reviewModules.map((module) => module.id));
-  // A flag pinned to no module of the draft belongs to the whole template: every module shows it.
+  // A flag pinned to no module of the draft belongs to the whole template: the first module shows it.
   const templateFlags = flags.filter((flag) => flag.status === 'open' && !(flag.location.moduleId && knownModuleIds.has(flag.location.moduleId)));
   const openFlagsFor = (item: AiModuleDraftRun) => {
     const moduleId = reviewModuleFor(item)?.id;
@@ -122,13 +123,17 @@ export function AiStepReview({
   const questionDraft = run.questionDraft ?? [];
   const isEditing = editing === editKey(run, tab) && (tab === 'lesson' ? lesson !== null : true);
   const issue = attentionFor(run);
-  const moduleFlags = [...openFlagsFor(run), ...templateFlags];
+  // Template-level flags appear once, with the first module, never repeated on every module.
+  const moduleFlags = [...openFlagsFor(run), ...(run === runs[0] ? templateFlags : [])];
+  const blockingFlags = moduleFlags.filter((flag) => flag.severity === 'blocking');
+  const warningFlags = moduleFlags.filter((flag) => flag.severity !== 'blocking');
   const lessonApproved = run.lessonState === 'approved';
   const drafting = run.lessonState === 'drafting' || run.questionState === 'drafting';
   const questionCountValid = questions.length >= MIN_QUESTIONS && questions.length <= MAX_QUESTIONS;
 
   function selectModule(id: string) {
     setSelectedId(id);
+    setWarningsOpen(false);
     setEditing(null);
     setConfirming(false);
     setConfirmingRewrite(false);
@@ -199,7 +204,7 @@ export function AiStepReview({
                 >
                   <span>{item.outline.order + 1}. {outlineModuleDisplayTitle(item.outline)}</span>
                   <small>{count} câu</small>
-                  {open > 0 && <em title="Cờ đang mở">{open}</em>}
+                  {open > 0 && <em title={open + ' cảnh báo'} aria-label={open + ' cảnh báo'}>{open}</em>}
                 </button>
               );
             })}
@@ -247,15 +252,18 @@ export function AiStepReview({
               )}
             </div>
           )}
-          {/* Module drafts cannot drop content from the materialized draft; the Admin edits the module instead. */}
-          {moduleFlags.length > 0 && (
-            <FlagPanel
-              flags={moduleFlags}
-              busy={locked || drafting}
-              onResolve={onResolveFlag}
-              allowRemove={false}
-              onEdit={editFromFlag}
-            />
+          {/* Warnings fold into one bar; blocking flags stay expanded. Module drafts cannot drop
+              content from the materialized draft, so the Admin edits the module instead. */}
+          {warningFlags.length > 0 && (
+            <button className="ai-flag-bar warn" type="button" aria-expanded={warningsOpen} onClick={() => setWarningsOpen((value) => !value)}>
+              {warningFlags.length} cảnh báo · {warningsOpen ? 'Ẩn' : 'Xem'}
+            </button>
+          )}
+          {warningsOpen && warningFlags.length > 0 && (
+            <FlagPanel flags={warningFlags} busy={locked || drafting} onResolve={onResolveFlag} allowRemove={false} onEdit={editFromFlag} compact />
+          )}
+          {blockingFlags.length > 0 && (
+            <FlagPanel flags={blockingFlags} busy={locked || drafting} onResolve={onResolveFlag} allowRemove={false} onEdit={editFromFlag} compact />
           )}
 
           <div className="ai-final-review-content" role="tabpanel">

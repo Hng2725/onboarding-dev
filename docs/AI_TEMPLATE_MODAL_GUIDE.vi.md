@@ -167,7 +167,7 @@ Nút **Tạo template** ở chân modal chỉ mở khi **mọi module đã đư�
 
 ### Bước 4 — Xem lại & xuất bản
 
-Màn hình gồm danh sách module, nội dung module đang chọn (tab **Bài học** và **Câu hỏi**), bảng **Cờ cần rà soát** và thiết lập template.
+Màn hình gồm danh sách module, nội dung module đang chọn (tab **Bài học** và **Câu hỏi**), các cờ của module đó và thiết lập template. Số trên mỗi module trong danh sách là số cờ còn mở.
 
 #### Xem và chỉnh sửa nội dung
 
@@ -186,7 +186,9 @@ Cờ là điểm AI không chắc (thiếu thông tin, mâu thuẫn, nguồn ké
 - **Chỉnh sửa**: mở đúng module để sửa nội dung liên quan.
 - **Loại bỏ nội dung** **không khả dụng** với bản nháp AI này: nội dung được sửa qua job nên không xóa trực tiếp trên bản nháp.
 
-Cờ bắt buộc (mức chặn) phải được xử lý trước khi xuất bản.
+Ngay dưới tab, cảnh báo được gom thành một dải **“N cảnh báo · Xem”**; bấm để mở danh sách. Cờ bắt buộc (mức chặn, màu đỏ) luôn hiện sẵn phía trên nội dung. Cờ chung của cả template chỉ hiện ở module đầu tiên.
+
+Cờ bắt buộc (mức chặn) phải được xử lý trước khi xuất bản. Cờ đã xử lý vẫn giữ trạng thái khi app dựng lại bản nháp sau một lần chỉnh sửa module khác; nếu chỉnh sửa làm cờ không còn, cờ đó biến mất.
 
 #### Thiết lập template
 
@@ -262,7 +264,7 @@ Chỉ khi template đã được xuất bản và lưu JSON thành công, app m�
 
 ### Không bấm được xuất bản
 
-- Xử lý toàn bộ cờ bắt buộc ở bảng **Cờ cần rà soát**.
+- Xử lý toàn bộ cờ bắt buộc (màu đỏ) ở từng module; module nào còn cờ có số hiển thị trong danh sách module.
 - Chờ app cập nhật xong (“Đang cập nhật…”); mỗi module cần 3–5 câu hỏi.
 
 ### Xuất bản lỗi giữa chừng

@@ -39,10 +39,17 @@ export function CitationChips({
   sourceNames?: ReadonlyMap<string, string>;
 }) {
   if (refs.length === 0) return null;
+  // Several quotes from one section are one chip; its tooltip lists every quote.
+  const sections = new Map<string, { ref: RawRef; quotes: string[] }>();
+  for (const ref of refs) {
+    const entry = sections.get(ref.sectionId);
+    if (!entry) sections.set(ref.sectionId, { ref, quotes: [ref.quote] });
+    else if (!entry.quotes.includes(ref.quote)) entry.quotes.push(ref.quote);
+  }
   return (
     <span className="ai-cite-list">
-      {refs.map((ref, index) => (
-        <span className="ai-cite" key={ref.sectionId + ':' + String(index)} title={ref.quote}>{citationLabel(ref, index, sourceNames)}</span>
+      {[...sections.values()].map(({ ref, quotes }, index) => (
+        <span className="ai-cite" key={ref.sectionId} title={quotes.join('\n')}>{citationLabel(ref, index, sourceNames)}</span>
       ))}
     </span>
   );

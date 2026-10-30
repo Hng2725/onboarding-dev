@@ -83,6 +83,30 @@ export function materializedModuleFingerprint(detail: { readonly modules: Templa
   });
 }
 
+const DESCRIPTION_MAX_CHARS = 300;
+
+/**
+ * Vietnamese name and description of a module template: the job title, else
+ * 'Hội nhập <system> – <kind>'; the inventory's system purpose, else a generic line.
+ */
+export function defaultModuleTemplateText(input: {
+  readonly templateKind: 'normal' | 'advanced';
+  readonly title?: string;
+  readonly sources: readonly Pick<SourceRecord, 'systemName'>[];
+  readonly inventory: unknown;
+}): { readonly title: string; readonly description: string } {
+  const systemName = input.sources.map((source) => source.systemName?.trim()).find(Boolean) || 'nhân viên mới';
+  const kind = input.templateKind === 'advanced' ? 'Nâng cao' : 'Thông thường';
+  const summary = input.inventory && typeof input.inventory === 'object'
+    ? (input.inventory as { systemSummary?: { purpose?: unknown } }).systemSummary
+    : undefined;
+  const purpose = typeof summary?.purpose === 'string' ? summary.purpose.trim().slice(0, DESCRIPTION_MAX_CHARS).trim() : '';
+  return {
+    title: input.title?.trim() || 'Hội nhập ' + systemName + ' – ' + kind,
+    description: purpose || 'Lộ trình onboarding được tạo từ tài liệu nội bộ.',
+  };
+}
+
 async function currentModuleInput(store: OnboardingStore, actor: OnboardingActor, jobId: string): Promise<ValidatedMaterializationInput> {
   const row = (await store.query<StoreRecord & AiJobRecord>(actor.roomId, 'onboarding_ai_jobs', { filter: { jobId }, limit: 1 })).records[0];
   const invalid = () => new AiMaterializationError('AI_CONTENT_INVALID', 'Every current outline module requires its latest approved lesson and three to five matching approved questions.');
@@ -119,8 +143,8 @@ async function currentModuleInput(store: OnboardingStore, actor: OnboardingActor
     jobId, approvedJob: job, promptVersion: job.promptVersion, templateKind: job.templateKind!, sources,
     ...(job.roleProfile ? { roleProfile: { responsibilities: job.roleProfile.responsibilities } } : {}),
     generated: {
-      title: job.title?.trim() || (job.templateKind === 'normal' ? 'Template 1' : 'Template 2'),
-      description: 'Onboarding', generationNotes: [], taskCoverage: job.outline!.taskCoverage,
+      ...defaultModuleTemplateText({ templateKind: job.templateKind!, title: job.title, sources, inventory: job.stageOutputs.__inventory }),
+      generationNotes: [], taskCoverage: job.outline!.taskCoverage,
       modules: runs.map((run) => ({ ...run.lessonDraft!, questions: run.questionDraft! })),
       flags: [...job.outline!.flags, ...runs.flatMap((run) => [...(run.lessonFlags ?? []), ...(run.questionFlags ?? [])].map((flag) => ({ ...flag, location: { ...flag.location, moduleLocalId: run.outline.moduleLocalId } })))],
     },

@@ -27,6 +27,8 @@ import type { AiJobRecord, AiModuleDraftRun } from '../src/onboarding/contracts'
 import { createAiJobService, type AiJobService } from '../src/onboarding/ai/jobs';
 import { createTemplateService } from '../src/onboarding/templates';
 import { createAiReviewService } from '../src/onboarding/ai/review';
+import { defaultModuleTemplateText } from '../src/onboarding/ai/materialize';
+import { vietnameseErrorMessage } from '../src/ui/onboarding/ai/ai-labels';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
 import { completePlan } from './helpers/complete-plan';
@@ -424,5 +426,54 @@ describe('a questions prompt that cannot be built', () => {
     const { step } = await pump(service, job.jobId);
     expect(step).toMatchObject({ kind: 'failed', job: { status: 'failed' } });
     expect(step!.job.errorMessage).toMatch(/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i);
+    // The generator banner shows the server's Vietnamese reason, not a generic code text.
+    expect(vietnameseErrorMessage(Object.assign(new Error(step!.job.errorMessage), { code: step!.job.errorCode }))).toBe(step!.job.errorMessage);
+  });
+});
+
+describe('default name of a module template', () => {
+  it('names an untitled template in Vietnamese from the system name and describes it from the inventory', async () => {
+    const { store, service, job } = await autopilotJob('autopilot-default-name');
+    expect(job.title).toBeUndefined();
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: job.outline!.revision });
+    const done = (await pump(service, job.jobId)).step!.job;
+    const result = done.result as { templateId: string; version: number };
+    const detail = await createTemplateService(store).getAdminDetail(admin, result.templateId, result.version);
+    expect(detail.title).toBe('Hội nhập Order System – Thông thường');
+    expect(detail.description).toBe('Orders');
+  });
+
+  it('falls back to generic Vietnamese text without a system name or purpose', () => {
+    expect(defaultModuleTemplateText({ templateKind: 'advanced', sources: [], inventory: undefined })).toEqual({
+      title: 'Hội nhập nhân viên mới – Nâng cao',
+      description: 'Lộ trình onboarding được tạo từ tài liệu nội bộ.',
+    });
+    expect(defaultModuleTemplateText({ templateKind: 'normal', title: '  Hội nhập kho  ', sources: [], inventory: { systemSummary: { purpose: 'x'.repeat(400) } } }))
+      .toEqual({ title: 'Hội nhập kho', description: 'x'.repeat(300) });
+  });
+});
+
+describe('Vietnamese conflict messages', () => {
+  it('rejects an unknown module and an outline edit during a live AI call in Vietnamese', async () => {
+    const { service, job } = await autopilotJob('autopilot-vi-messages');
+    const supplement = (moduleLocalId: string) => service.supplementModuleSources(admin, {
+      jobId: job.jobId, expectedRevision: job.outline!.revision, moduleLocalId, sourceIds: ['source-1'], sectionIds: ['source-1#s1'],
+    });
+    const document = (moduleLocalId: string) => service.supplementModuleDocument(admin, {
+      jobId: job.jobId, expectedRevision: job.outline!.revision, moduleLocalId, sourceId: 'source-2',
+    });
+    await expect(supplement('khong-co')).rejects.toMatchObject({ code: 'OPERATION_CONFLICT', message: 'Không tìm thấy module.' });
+    await expect(document('khong-co')).rejects.toMatchObject({ code: 'OPERATION_CONFLICT', message: 'Không tìm thấy module.' });
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: job.outline!.revision });
+    await expect(service.updateModuleLesson(admin, { jobId: job.jobId, moduleLocalId: 'khong-co', expectedVersion: 0, module: {} as never }))
+      .rejects.toMatchObject({ code: 'OPERATION_CONFLICT', message: 'Không tìm thấy module.' });
+    const step = await service.nextStep(admin, { jobId: job.jobId, workerId });
+    expect(step.kind).toBe('ai_call');
+    await service.recordDispatch(admin, { jobId: job.jobId, workerId, callId: (step as { callId: string }).callId, attemptRef: 'attempt-live', provider: 'sandbox' });
+    await expect(supplement(job.outline!.modules[0].moduleLocalId)).rejects.toMatchObject({ code: 'OPERATION_CONFLICT', message: 'AI đang xử lý, vui lòng chờ.' });
+    await expect(document(job.outline!.modules[0].moduleLocalId)).rejects.toMatchObject({ code: 'OPERATION_CONFLICT', message: 'AI đang xử lý, vui lòng chờ.' });
+    // The UI shows these Vietnamese conflict texts as they are.
+    expect(vietnameseErrorMessage(Object.assign(new Error('AI đang xử lý, vui lòng chờ.'), { code: 'OPERATION_CONFLICT' }))).toBe('AI đang xử lý, vui lòng chờ.');
+    expect(vietnameseErrorMessage(Object.assign(new Error('Không tìm thấy module.'), { code: 'OPERATION_CONFLICT' }))).toBe('Không tìm thấy module.');
   });
 });

@@ -132,7 +132,7 @@ export function AiStepCoverage({
       <div className="ai-coverage-summary" role="group" aria-label="Tóm tắt độ phủ">
         <div className="ai-coverage-stat"><b>{modules.length}</b><span>module đề xuất</span></div>
         <div className="ai-coverage-stat ok"><b>{coveredCount}</b><span>đủ tài liệu</span></div>
-        <div className="ai-coverage-stat warn"><b>{modules.length - coveredCount}</b><span>cần bổ sung</span></div>
+        <div className={'ai-coverage-stat' + (modules.length > coveredCount ? ' warn' : '')}><b>{modules.length - coveredCount}</b><span>cần bổ sung</span></div>
         <div className="ai-coverage-stat"><b>~{minutes}</b><span>phút học</span></div>
       </div>
 

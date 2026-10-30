@@ -170,6 +170,19 @@ describe('AiStepReview', () => {
     expect(buttonsByText(view.root, 'AI viết lại')).toHaveLength(1);
   });
 
+  it('shows one citation chip per cited section within a block', () => {
+    const lesson = lessonFor(0);
+    const repeated = { ...lesson, blocks: [{ ...lesson.blocks[0], sourceRefs: [
+      { sectionId: 'handbook#s1', quote: 'Trong 30 ngày đầu' },
+      { sectionId: 'handbook#s1', quote: 'nhân viên mới cần hiểu' },
+      { sectionId: 'handbook#s2', quote: 'Nhận máy' },
+    ] }] };
+    const { view } = renderReview({ job: moduleJob([doneRun(0, 5, { lessonDraft: repeated }), doneRun(1, 4)]) });
+    const chips = view.root.findAll((node) => String(node.props.className ?? '') === 'ai-cite');
+    expect(chips.map(text)).toEqual(['Sổ tay · mục 1', 'Sổ tay · mục 2']);
+    expect(chips[0].props.title).toBe('Trong 30 ngày đầu\nnhân viên mới cần hiểu');
+  });
+
   it('switches modules and shows questions with Vietnamese levels in the Câu hỏi tab', () => {
     const { view } = renderReview();
     act(() => moduleButtons(view)[1].props.onClick());
@@ -264,6 +277,55 @@ describe('AiStepReview', () => {
     act(() => panel.findByProps({ 'aria-label': 'Ghi chú xác minh' }).props.onChange({ target: { value: 'Gọi 1900 1234.' } }));
     act(() => buttonsByText(panel, 'Lưu ghi chú')[0].props.onClick());
     expect(props.onResolveFlag).toHaveBeenCalledWith(expect.objectContaining({ id: 'flag-1' }), 'add_note', 'Gọi 1900 1234.');
+  });
+
+  function warningFlag(id: string, moduleId?: string): VerificationFlag {
+    return {
+      id, type: 'ambiguous', severity: 'warning', status: 'open', message: 'Cảnh báo ' + id + '.',
+      questionForAdmin: 'Kiểm tra lại?', location: moduleId ? { moduleId } : {}, evidence: [],
+    } as VerificationFlag;
+  }
+  const flagPanels = (view: TestRenderer.ReactTestRenderer) => view.root.findAll((node) => String(node.props.className ?? '') === 'ai-flag-panel');
+  const flagBar = (view: TestRenderer.ReactTestRenderer) => view.root.findAll((node) => node.type === 'button' && String(node.props.className ?? '').includes('ai-flag-bar'));
+
+  it('folds warnings into one compact amber bar that expands on click', () => {
+    const { view } = renderReview({ review: reviewFor([warningFlag('w1', 'ai-mod-0'), warningFlag('w2', 'ai-mod-0')]) });
+    expect(flagPanels(view)).toHaveLength(0);
+    const bar = flagBar(view);
+    expect(bar).toHaveLength(1);
+    expect(text(bar[0])).toBe('2 cảnh báo · Xem');
+    expect(bar[0].props.className).toContain('warn');
+    expect(bar[0].props['aria-expanded']).toBe(false);
+    act(() => bar[0].props.onClick());
+    const [panel] = flagPanels(view);
+    expect(text(panel)).toContain('Cảnh báo w1.');
+    expect(text(panel)).toContain('Cảnh báo w2.');
+    expect(text(panel)).not.toContain('Cờ cần rà soát');
+    expect(text(flagBar(view)[0])).toBe('2 cảnh báo · Ẩn');
+  });
+
+  it('always shows blocking flags expanded above the content, warnings stay in the bar', () => {
+    const { view } = renderReview({ review: reviewFor([blockingFlag('ai-mod-0'), warningFlag('w1', 'ai-mod-0')]) });
+    const panels = flagPanels(view);
+    expect(panels).toHaveLength(1);
+    expect(text(panels[0])).toContain('Thiếu số điện thoại hỗ trợ.');
+    expect(text(panels[0])).not.toContain('Cảnh báo w1.');
+    expect(text(flagBar(view)[0])).toBe('1 cảnh báo · Xem');
+  });
+
+  it('shows a template-level flag once, on the first module only', () => {
+    const { view } = renderReview({ review: reviewFor([warningFlag('t1')]) });
+    expect(text(flagBar(view)[0])).toBe('1 cảnh báo · Xem');
+    act(() => moduleButtons(view)[1].props.onClick());
+    expect(flagBar(view)).toHaveLength(0);
+    expect(flagPanels(view)).toHaveLength(0);
+  });
+
+  it('labels the module list flag badge with its warning count', () => {
+    const { view } = renderReview({ review: reviewFor([warningFlag('w1', 'ai-mod-1'), warningFlag('w2', 'ai-mod-1')]) });
+    const badge = moduleButtons(view)[1].findByType('em');
+    expect(badge.props['aria-label']).toBe('2 cảnh báo');
+    expect(badge.props.title).toBe('2 cảnh báo');
   });
 
   it('never offers Loại bỏ nội dung for a module draft; the flag Chỉnh sửa opens the module editor instead', () => {

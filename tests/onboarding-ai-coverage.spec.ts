@@ -149,6 +149,14 @@ describe('AiStepCoverage', () => {
     expect(css.replace(/\s+/g, ' ')).toContain('.ai-coverage-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr))');
   });
 
+  it('keeps the cần bổ sung number neutral when nothing needs supplementing', () => {
+    const { view } = renderCoverage(templateJob([0, 1, 2, 3].map((index) => moduleAt(index))));
+    const summary = view.root.find((node) => node.type === 'div' && String(node.props.className).split(' ').includes('ai-coverage-summary'));
+    const cells = summary.children as ReactTestInstance[];
+    expect(text(cells[2])).toBe('0cần bổ sung');
+    expect(String(cells[2].props.className)).toBe('ai-coverage-stat');
+  });
+
   it('lists modules with order, title, a readable source line and a coverage chip', () => {
     const overridden = moduleAt(3, { coverage: 'insufficient', coverageOverride: true });
     const { view } = renderCoverage(templateJob([moduleAt(0), moduleAt(1), moduleAt(2), overridden, insufficient]));

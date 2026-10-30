@@ -346,7 +346,11 @@ const CATALOG_FAILED_NOTE = 'AI chưa tìm được đoạn phù hợp. Hãy t�
 const SUPPLEMENT_CALL = /^supplement-(\d+)-b(\d+)/;
 const AUTOPILOT_APPROVER = 'autopilot';
 const PAUSED_ERROR = 'Tạm dừng bởi Admin.';
-const QUESTION_FALLBACK_FAILED = 'Không tạo được câu hỏi cho một module: bài học chưa có đoạn nội dung có dẫn chứng. Hãy chỉnh sửa bài học rồi thử lại.';
+/** Shown as is by the UI: the code has no generic Vietnamese text of its own. */
+const QUESTION_FALLBACK_FAILED = 'Không tạo được câu hỏi cho một module: bài học chưa có đoạn nội dung có dẫn chứng từ tài liệu nguồn.';
+/** OPERATION_CONFLICT texts the UI shows as they are (Vietnamese server text wins over the generic one). */
+const MODULE_NOT_FOUND = 'Không tìm thấy module.';
+const AI_CALL_ACTIVE = 'AI đang xử lý, vui lòng chờ.';
 const FALLBACK_LESSON_WARNING = 'Bài học được dựng trực tiếp từ tài liệu nguồn, nên rà soát cách diễn đạt.';
 
 /** Added once to a fallback lesson that autopilot approves, so the Admin rereads its wording. */
@@ -1517,7 +1521,7 @@ export function createAiJobService(
   }
   function requireRun(row: AiJobDbRecord, moduleLocalId: string): AiModuleDraftRun {
     const run = row.moduleRuns!.find((r) => r.outline.moduleLocalId === moduleLocalId && !r.outline.tombstoned);
-    if (!run) throw new AiJobServiceError('OPERATION_CONFLICT', 'Active module not found.');
+    if (!run) throw new AiJobServiceError('OPERATION_CONFLICT', MODULE_NOT_FOUND);
     if (row.outlineApprovedRevision !== row.outline!.revision) throw new AiJobServiceError('OPERATION_CONFLICT', 'Approve the current outline first.');
     return run;
   }
@@ -1576,12 +1580,12 @@ export function createAiJobService(
     const row = await requireModuleJob(actor, input.jobId);
     assertPlanSettled(row);
     assertOutlineRevision(row, input.expectedRevision);
-    if (row.calls.some(aiCallMayBeLive)) throw new AiJobServiceError('OPERATION_CONFLICT', 'An AI call is still active.');
+    if (row.calls.some(aiCallMayBeLive)) throw new AiJobServiceError('OPERATION_CONFLICT', AI_CALL_ACTIVE);
     return row;
   }
   function requireActiveModule(row: AiJobDbRecord, moduleLocalId: string): TemplateOutlineModule {
     const module = row.outline!.modules.find((item) => !item.tombstoned && item.moduleLocalId === moduleLocalId);
-    if (!module) throw new AiJobServiceError('OPERATION_CONFLICT', 'Active module not found.');
+    if (!module) throw new AiJobServiceError('OPERATION_CONFLICT', MODULE_NOT_FOUND);
     return module;
   }
   /** A request's root calls (one per batch it ran), in batch order. */
@@ -2077,7 +2081,7 @@ export function createAiJobService(
           if (!(fallbackError instanceof AiJobServiceError)) throw fallbackError;
           row = await updateJob(actor, row, {
             calls, moduleRuns: replaceRun(row, { ...run, questionState: 'failed' }), status: 'failed',
-            errorCode: 'AI_OUTPUT_INVALID', errorMessage: QUESTION_FALLBACK_FAILED, ...RELEASED_LEASE,
+            errorCode: 'QUESTION_FALLBACK_UNAVAILABLE', errorMessage: QUESTION_FALLBACK_FAILED, ...RELEASED_LEASE,
           });
           return { kind: 'failed', job: jobFrom(row, actor.roomId) };
         }
@@ -2240,7 +2244,8 @@ export function createAiJobService(
       assertPlanSettled(row);
       assertOutlineRevision(row, input.expectedRevision);
       const run = row.moduleRuns!.find((item) => !item.outline.tombstoned && item.outline.moduleLocalId === input.moduleLocalId);
-      if (!run || row.calls.some(aiCallMayBeLive)) throw new AiJobServiceError('OPERATION_CONFLICT', 'Module is unavailable or an AI call is still active.');
+      if (!run) throw new AiJobServiceError('OPERATION_CONFLICT', MODULE_NOT_FOUND);
+      if (row.calls.some(aiCallMayBeLive)) throw new AiJobServiceError('OPERATION_CONFLICT', AI_CALL_ACTIVE);
       if (!Array.isArray(input.sourceIds) || !input.sourceIds.length || new Set(input.sourceIds).size !== input.sourceIds.length || !Array.isArray(input.sectionIds) || !input.sectionIds.length || new Set(input.sectionIds).size !== input.sectionIds.length) throw new AiJobServiceError('OPERATION_CONFLICT', 'Select unique sources and sections.');
       const sources = await loadSources(actor.roomId, input.sourceIds);
       const sections = sources.flatMap((source) => source.sections ?? []);
