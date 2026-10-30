@@ -94,6 +94,7 @@ const MAX_IDLE_GENERATION_PASSES = 2;
 
 export const OUTLINE_RECHECK_NOTICE = 'Lộ trình cần kiểm tra lại trước khi tạo tiếp.';
 export const AUTOPILOT_MISSING_NOTICE = 'Chưa bật được chế độ AI tự động cho job này.';
+const CATALOG_LOAD_FAILED = 'Không tải được danh sách tài liệu.';
 
 /** Changes whenever a pump pass moved the job; an unchanged fingerprint means it stalled. */
 function generationFingerprint(job: AiJobRecord): string {
@@ -829,8 +830,10 @@ export function AiGeneratorPage({
   const busy = operation !== null;
   const [editingOutline, setEditingOutline] = useState(false);
   const [outlineFocusModuleId, setOutlineFocusModuleId] = useState<string | null>(null);
-  /** `list_module_sources` of one job; null until it has loaded for the current job. */
-  const [moduleSourceCatalog, setModuleSourceCatalog] = useState<{ readonly jobId: string; readonly sources: ModuleSourceCatalog } | null>(null);
+  /** `list_module_sources` of one job; null until it has loaded (or failed) for the current job. */
+  const [moduleSourceCatalog, setModuleSourceCatalog] = useState<{ readonly jobId: string; readonly sources: ModuleSourceCatalog | null } | null>(null);
+  /** Bumped by the catalog's Thử lại to load it again. */
+  const [catalogReload, setCatalogReload] = useState(0);
   const [selectedTemplateKind, setSelectedTemplateKind] = useState<EmployeeType | null>(null);
   const [notice, setNotice] = useState<InlineNoticeMessage | null>(null);
   /**
@@ -1003,10 +1006,11 @@ export function AiGeneratorPage({
     if (catalogJobId) {
       void api.adminAi<{ sources: ModuleSourceCatalog }>('list_module_sources', { jobId: catalogJobId })
         .then((result) => { if (active) setModuleSourceCatalog({ jobId: catalogJobId, sources: result.sources }); })
-        .catch(() => { if (active) setModuleSourceCatalog({ jobId: catalogJobId, sources: [] }); });
+        // A failed load is not an empty catalog: coverage stays unknown until it loads.
+        .catch(() => { if (active) setModuleSourceCatalog({ jobId: catalogJobId, sources: null }); });
     }
     return () => { active = false; };
-  }, [api, catalogJobId, templateJob?.outline?.revision, templateJob?.sourceIds?.length, sources]);
+  }, [api, catalogJobId, templateJob?.outline?.revision, templateJob?.sourceIds?.length, sources, catalogReload]);
 
   useEffect(() => {
     let active = true;
@@ -2075,10 +2079,11 @@ export function AiGeneratorPage({
     : null;
   const showOutline = Boolean(coverageJob);
   const coverageCatalog = moduleSourceCatalog && moduleSourceCatalog.jobId === coverageJob?.jobId ? moduleSourceCatalog.sources : null;
+  const catalogFailed = Boolean(moduleSourceCatalog && moduleSourceCatalog.jobId === coverageJob?.jobId && !moduleSourceCatalog.sources);
   const usableSectionIds = useMemo(() => new Set((coverageCatalog ?? []).flatMap((source) => source.sections
     .filter((section) => section.usable).map((section) => section.id))), [coverageCatalog]);
   const sourceNames = useMemo(() => new Map(sources.map((source) => [source.sourceId, source.fileName] as const)), [sources]);
-  const coverageReadiness = coverageJob?.outline && !coverageJob.planPending
+  const coverageReadiness = coverageJob?.outline && !coverageJob.planPending && coverageCatalog
     ? outlineReadiness(coverageJob.outline, usableSectionIds, {
         templateKind: coverageJob.templateKind ?? 'normal',
         responsibilities: coverageJob.roleProfile?.responsibilities ?? [],
@@ -2143,7 +2148,7 @@ export function AiGeneratorPage({
       hint = coverageJob.planPending
         ? readingSupplement ? 'AI đang đọc tài liệu bổ sung…' : 'AI đang lập lộ trình…'
         : !coverageCatalog
-          ? 'Đang kiểm tra độ phủ…'
+          ? catalogFailed ? null : 'Đang kiểm tra độ phủ…'
           : coverageReadiness?.ready ? null : coverageReadiness?.reasons[0] ?? null;
       primary = {
         label: approving ? 'Đang bắt đầu…' : 'Tạo template',
@@ -2249,7 +2254,18 @@ export function AiGeneratorPage({
             <div className="ai-step-coverage">
               {coverageJob ? (
                 coverageJob.outline && !coverageJob.planPending && !coverageCatalog
-                  ? <AiCoverageSkeleton label="Đang kiểm tra độ phủ…" />
+                  ? (
+                    <>
+                      {catalogFailed && (
+                        <div className="ai-coverage-load-error" role="alert">
+                          <span>{CATALOG_LOAD_FAILED}</span>
+                          <button className="button button-secondary button-sm" type="button"
+                            onClick={() => { setModuleSourceCatalog(null); setCatalogReload((count) => count + 1); }}>Thử lại</button>
+                        </div>
+                      )}
+                      <AiCoverageSkeleton label="Đang kiểm tra độ phủ…" />
+                    </>
+                  )
                   : (
                     <AiStepCoverage
                       key={coverageJob.jobId}

@@ -526,3 +526,47 @@ describe('retrying a skipped supplement', () => {
     expect(api.adminAi).toHaveBeenCalledWith('next_step', expect.objectContaining({ jobId: 'template-1' }));
   });
 });
+
+describe('Kiểm tra độ phủ when the source catalog does not load', () => {
+  it('shows one Vietnamese line with Thử lại instead of reporting every module as uncovered', async () => {
+    const source = {
+      id: 'source-row', roomId: 'room-1', sourceId: 'handbook', kind: 'document' as const, fileName: 'Sổ tay hội nhập.pdf',
+      mimeType: 'application/pdf', checksum: 'c', systemName: 'PrivOS', status: 'ready' as const, textLength: 2000,
+      createdBy: 'admin-1', createdAt: '2026-10-29T00:00:00.000Z', updatedAt: '2026-10-29T00:00:00.000Z',
+    };
+    const inventory = {
+      id: 'inventory-row', roomId: 'room-1', jobId: 'inventory-1', kind: 'inventory', status: 'completed', sourceIds: ['handbook'],
+      promptVersion: 'test', calls: [], stageOutputs: {}, result: { features: [], glossary: [], conflicts: [] }, operationId: 'inv',
+      planPending: false, createdBy: 'admin-1', createdAt: '2026-10-29T07:00:00.000Z', updatedAt: '2026-10-29T07:01:00.000Z',
+    } as unknown as AiJobRecord;
+    const job = templateJob([0, 1, 2, 3].map((index) => moduleAt(index)));
+    let loads = 0;
+    const api = { adminAi: vi.fn(async (action: string) => {
+      if (action === 'list_sources') return { sources: [source] };
+      if (action === 'list_jobs') return { jobs: [inventory, job] };
+      if (action === 'list_module_sources') {
+        if (loads++ === 0) throw new Error('tools/call timeout');
+        return { sources: catalog };
+      }
+      throw new Error('Unexpected action: ' + action);
+    }) };
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => {
+      view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined }));
+    });
+    views.push(view);
+    expect(activeStep(view)).toBe('Kiểm tra độ phủ');
+    expect(allText(view).split('Không tải được danh sách tài liệu.')).toHaveLength(2);
+    expect(allText(view)).not.toContain('Cần bổ sung');
+    expect(view.root.findAll((node) => node.props['aria-label'] === 'Lộ trình module')).toHaveLength(0);
+    expect(view.root.findAll((node) => node.props['aria-busy'] === 'true').length).toBeGreaterThan(0);
+    const primary = view.root.findByType('footer').findAll((node) => node.type === 'button' && String(node.props.className).includes('button-primary'))[0];
+    expect(primary.props.disabled).toBe(true);
+    const retry = view.root.findAll((node) => node.type === 'button' && text(node).trim() === 'Thử lại');
+    expect(retry).toHaveLength(1);
+    await act(async () => { retry[0].props.onClick(); });
+    expect(loads).toBe(2);
+    expect(allText(view)).not.toContain('Không tải được danh sách tài liệu.');
+    expect(rows(view)).toHaveLength(4);
+  });
+});
