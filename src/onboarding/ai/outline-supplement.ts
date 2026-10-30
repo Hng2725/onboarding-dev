@@ -4,6 +4,9 @@ import { bounded, escapeXml, jsonLines, VIETNAMESE_OUTPUT_RULE, type AiPromptReq
 /** Catalog mode never sends more than this many characters of a section. */
 export const SUPPLEMENT_EXCERPT_CHARS = 300;
 
+/** System-context bytes a new-file S call keeps free for the target and outline summary. */
+export const SUPPLEMENT_OUTLINE_RESERVE_BYTES = 20_000;
+
 export interface SupplementPromptModule {
   readonly moduleLocalId: string;
   readonly order: number;

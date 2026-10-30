@@ -33,7 +33,7 @@ import { materializeAiTemplate, materializeModuleTemplate } from './materialize'
 import { buildTemplateOutline, applyTemplateOutlineEdits, GAP_NOTE } from './outline';
 import { moduleHasUsableSources, outlineReadiness, usableSectionIds } from './outline-coverage';
 import { buildOutlinePlanPrompt, buildOutlinePlanRepairPrompt, validateOutlinePlanOutput, type OutlinePlanValidationInput } from './outline-plan';
-import { buildSupplementPrompt, buildSupplementRepairPrompt, SUPPLEMENT_EXCERPT_CHARS, validateSupplementOutput, type SupplementCoverageUpdate, type SupplementOutput, type SupplementPromptInput } from './outline-supplement';
+import { buildSupplementPrompt, buildSupplementRepairPrompt, SUPPLEMENT_EXCERPT_CHARS, SUPPLEMENT_OUTLINE_RESERVE_BYTES, validateSupplementOutput, type SupplementCoverageUpdate, type SupplementOutput, type SupplementPromptInput } from './outline-supplement';
 import { batchSources, planBatches as planSourceBatches, SourceBatchError } from './source-batches';
 import { buildFallbackLesson } from './fallback-lessons';
 import { buildFallbackQuestions } from './fallback-questions';
@@ -863,9 +863,9 @@ export function createAiJobService(
     return sources as SourceRecord[];
   }
 
-  function planBatches(sources: readonly SourceRecord[]): readonly (readonly string[])[] {
+  function planBatches(sources: readonly SourceRecord[], reserveBytes?: number): readonly (readonly string[])[] {
     try {
-      return planSourceBatches(sources);
+      return planSourceBatches(sources, reserveBytes === undefined ? {} : { reserveBytes });
     } catch (error) {
       if (error instanceof SourceBatchError) throw new AiJobServiceError(error.code, error.message);
       throw error;
@@ -2239,7 +2239,7 @@ export function createAiJobService(
       if (sourceIds.length > AI_GENERATION_LIMITS.maxSourcesPerRoom) throw new AiJobServiceError('SOURCE_NOT_FOUND', 'Too many selected sources.');
       // Room-scoped lookup: a source from another room, or one not ready, is not found.
       const [source] = await loadSources(actor.roomId, [sourceId]);
-      const batches = planBatches([source]);
+      const batches = planBatches([source], SUPPLEMENT_OUTLINE_RESERVE_BYTES);
       const request = nextSupplementNumber(row);
       // Batch numbers stay those of the file, so a retried batch reads the same sections.
       const batchNumbers = known ? retryBatches.filter((batch) => batch <= batches.length) : batches.map((_batch, index) => index + 1);

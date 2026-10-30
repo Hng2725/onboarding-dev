@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import { AI_GENERATION_LIMITS } from '../src/onboarding/ai/limits';
-import { buildSupplementPrompt, buildSupplementRepairPrompt, validateSupplementOutput } from '../src/onboarding/ai/outline-supplement';
+import { buildSupplementPrompt, buildSupplementRepairPrompt, SUPPLEMENT_OUTLINE_RESERVE_BYTES, validateSupplementOutput } from '../src/onboarding/ai/outline-supplement';
+import { batchSources, planBatches } from '../src/onboarding/ai/source-batches';
+import type { SourceRecord } from '../src/onboarding/contracts';
 import { VIETNAMESE_OUTPUT_RULE } from '../src/onboarding/ai/prompts';
 
 const modules = [
@@ -88,5 +90,35 @@ describe('supplement output validation', () => {
     expect(validateSupplementOutput([], allowed).ok).toBe(false);
     expect(validateSupplementOutput({ attachments: 'x' }, allowed).ok).toBe(false);
     expect(validateSupplementOutput({ attachments: [], coverageUpdates: 'x' }, allowed).ok).toBe(false);
+  });
+});
+
+describe('supplement batches of a Vietnamese source', () => {
+  it('sizes batches by UTF-8 bytes so every built S prompt passes bounded()', () => {
+    const paragraph = 'Nhân viên mới cần đọc kỹ quy định bảo mật & "dữ liệu nội bộ" trước khi truy cập hệ thống. ';
+    const text = paragraph.repeat(Math.ceil(2_000 / paragraph.length)).slice(0, 2_000);
+    const sections = Array.from({ length: 60 }, (_, index) => ({
+      id: 'so-tay#s' + String(index + 1), headingPath: ['Sổ tay', 'Mục ' + String(index + 1) + ' – Quy định chung'], text,
+    }));
+    expect(sections.reduce((total, section) => total + section.text.length, 0)).toBeGreaterThanOrEqual(120_000);
+    const source = {
+      id: 'row', roomId: 'room', sourceId: 'so-tay', kind: 'document', fileName: 'so-tay.pdf', checksum: 'c', systemName: 'PrivOS',
+      status: 'ready', sections, textLength: 120_000, createdBy: 'admin', createdAt: 'now', updatedAt: 'now',
+    } as unknown as SourceRecord;
+    const modules = Array.from({ length: 8 }, (_, index) => ({
+      moduleLocalId: 'm' + String(index), order: index, title: 'Bài ' + String(index + 1) + ': Quy trình làm việc đầu tiên',
+      description: 'Giới thiệu quy trình, công cụ và đầu mối hỗ trợ dành cho nhân viên mới trong tuần đầu.',
+      objectives: ['Nắm được quy trình', 'Biết đầu mối hỗ trợ', 'Áp dụng vào công việc'],
+      sectionHeadings: Array.from({ length: 5 }, (_unused, heading) => 'Sổ tay > Mục ' + String(heading + 1) + ' – Quy định chung'),
+    }));
+    const batches = planBatches([source], { reserveBytes: SUPPLEMENT_OUTLINE_RESERVE_BYTES });
+    expect(batches.length).toBeGreaterThan(1);
+    batches.forEach((batch, index) => {
+      expect(() => buildSupplementPrompt({
+        mode: 'new_file', targetModuleLocalId: 'm0', modules,
+        sections: batchSources([source], batch).flatMap((item) => item.sections ?? []),
+        batch: { index: index + 1, total: batches.length },
+      })).not.toThrow();
+    });
   });
 });

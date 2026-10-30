@@ -11,12 +11,24 @@ export class SourceBatchError extends Error {
   }
 }
 
+/** XML escaping and wrapping grow the text a little; sizes are checked in UTF-8 bytes. */
+const ESCAPE_MARGIN = 1.15;
+
+export interface PlanBatchesOptions {
+  /** Bytes of the system context kept free for what the call adds besides the sections. */
+  readonly reserveBytes?: number;
+}
+
 /**
  * Splits the sources' sections, in order, into batches of section IDs that each fit one AI
- * call's system context. Throws when the total text exceeds the job limit or there are no
- * sections at all.
+ * call's system context, measured in UTF-8 bytes like bounded(). Throws when the total text
+ * exceeds the job limit or there are no sections at all.
  */
-export function planBatches(sources: readonly SourceRecord[]): readonly (readonly string[])[] {
+export function planBatches(
+  sources: readonly SourceRecord[],
+  options: PlanBatchesOptions = {},
+): readonly (readonly string[])[] {
+  const budget = AI_GENERATION_LIMITS.maxSystemContextChars - 1_000 - (options.reserveBytes ?? 0);
   const sections = sources.flatMap((source) => source.sections ?? []);
   const totalBytes = Buffer.byteLength(sections.map((section) => section.text).join('\n'), 'utf8');
   if (totalBytes > AI_GENERATION_LIMITS.maxJobTextBytes) {
@@ -26,11 +38,10 @@ export function planBatches(sources: readonly SourceRecord[]): readonly (readonl
   let current: string[] = [];
   let currentSize = 0;
   for (const section of sections) {
-    const estimatedSize = section.text.length + section.id.length + 500;
-    if (
-      current.length > 0
-      && currentSize + estimatedSize > AI_GENERATION_LIMITS.maxSystemContextChars - 1_000
-    ) {
+    const rawBytes = Buffer.byteLength(section.text, 'utf8') + Buffer.byteLength(section.id, 'utf8')
+      + Buffer.byteLength(section.headingPath.join(' > '), 'utf8');
+    const estimatedSize = Math.ceil(rawBytes * ESCAPE_MARGIN) + 500;
+    if (current.length > 0 && currentSize + estimatedSize > budget) {
       batches.push(current);
       current = [];
       currentSize = 0;
