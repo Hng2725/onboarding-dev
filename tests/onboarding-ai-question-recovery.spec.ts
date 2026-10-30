@@ -75,6 +75,14 @@ describe('question recovery planning', () => {
     expect(shouldBoundNativeQuestionPoll(job({ provider: 'sandbox', state: 'drafting' }), false, false)).toBe(false);
   });
 
+  it('uses the fallback for a failed questions call that never reached a provider', () => {
+    const base = job({ provider: 'sandbox' });
+    const unsent = { ...base, calls: base.calls.map(({ provider: _provider, attemptRef: _attempt, ...call }) => call) };
+    expect(planQuestionRecovery(unsent, true)).toEqual({
+      kind: 'use_fallback', moduleLocalId: outline.moduleLocalId, expectedVersion: 1,
+    });
+  });
+
   it('retries a failed Sandbox question once with Native when available', () => {
     expect(planQuestionRecovery(job({ provider: 'sandbox' }), true)).toEqual({
       kind: 'retry_native', moduleLocalId: outline.moduleLocalId, expectedVersion: 1,

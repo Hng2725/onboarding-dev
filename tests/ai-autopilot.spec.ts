@@ -1,4 +1,26 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+/** Lets a test make building a module's questions prompt throw, or the question fallback impossible. */
+const faults = vi.hoisted(() => ({ questionPromptOrder: -1, noQuestionFallback: false }));
+vi.mock('../src/onboarding/ai/module-draft', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/onboarding/ai/module-draft')>();
+  return {
+    ...actual,
+    buildModuleQuestionPrompt: (input: Parameters<typeof actual.buildModuleQuestionPrompt>[0]) => {
+      if (input.module.order === faults.questionPromptOrder) throw new Error('AI prompt exceeds the allowed character limit.');
+      return actual.buildModuleQuestionPrompt(input);
+    },
+  };
+});
+vi.mock('../src/onboarding/ai/fallback-questions', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/onboarding/ai/fallback-questions')>();
+  return {
+    ...actual,
+    buildFallbackQuestions: (input: Parameters<typeof actual.buildFallbackQuestions>[0]) => faults.noQuestionFallback
+      ? { kind: 'manual_required' as const, reason: 'NO_GROUNDED_LESSON_BLOCK' as const }
+      : actual.buildFallbackQuestions(input),
+  };
+});
 
 import type { OnboardingActor } from '../src/onboarding/auth';
 import type { AiJobRecord, AiModuleDraftRun } from '../src/onboarding/contracts';
@@ -374,5 +396,33 @@ describe('flag resolutions across re-materialization', () => {
     const detail = await review.getReview(admin, after.templateId, after.version);
     expect(detail.flags.filter((item) => item.message === BLOCKING)).toEqual([]);
     expect(detail.flags.every((item) => item.status === 'open' && item.resolution === undefined)).toBe(true);
+  });
+});
+
+describe('a questions prompt that cannot be built', () => {
+  afterEach(() => { faults.questionPromptOrder = -1; faults.noQuestionFallback = false; });
+
+  it('applies the grounded question fallback on the server and lets autopilot approve it', async () => {
+    const { service, job } = await autopilotJob('autopilot-question-prompt');
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: job.outline!.revision });
+    faults.questionPromptOrder = 1;
+    const { step, order } = await pump(service, job.jobId);
+    expect(order).not.toContain('questions:2');
+    expect(step).toMatchObject({ kind: 'done', job: { status: 'completed' } });
+    const run = step!.job.moduleRuns!.find((item) => item.outline.order === 1)!;
+    expect(run).toMatchObject({ questionState: 'approved', questionProvenance: 'fallback' });
+    expect(audit(step!.job).filter((entry) => entry.target === 'questions' && entry.moduleLocalId === run.outline.moduleLocalId)).toEqual([
+      expect.objectContaining({ approvedBy: 'autopilot', provenance: 'fallback' }),
+    ]);
+  });
+
+  it('fails the job with a Vietnamese error when no fallback can be built either', async () => {
+    const { service, job } = await autopilotJob('autopilot-question-dead-end');
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: job.outline!.revision });
+    faults.questionPromptOrder = 1;
+    faults.noQuestionFallback = true;
+    const { step } = await pump(service, job.jobId);
+    expect(step).toMatchObject({ kind: 'failed', job: { status: 'failed' } });
+    expect(step!.job.errorMessage).toMatch(/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i);
   });
 });

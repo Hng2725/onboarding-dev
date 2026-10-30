@@ -89,6 +89,8 @@ export function planQuestionRecovery(
         ? { kind: 'retry_native', ...decision }
         : { kind: 'use_fallback', ...decision };
     }
+    // The prompt could not even be built: another provider would fail the same way.
+    if (calls.every((call) => !call.provider)) return { kind: 'use_fallback', ...decision };
   }
   return null;
 }

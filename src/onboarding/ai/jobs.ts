@@ -346,6 +346,7 @@ const CATALOG_FAILED_NOTE = 'AI chưa tìm được đoạn phù hợp. Hãy t�
 const SUPPLEMENT_CALL = /^supplement-(\d+)-b(\d+)/;
 const AUTOPILOT_APPROVER = 'autopilot';
 const PAUSED_ERROR = 'Tạm dừng bởi Admin.';
+const QUESTION_FALLBACK_FAILED = 'Không tạo được câu hỏi cho một module: bài học chưa có đoạn nội dung có dẫn chứng. Hãy chỉnh sửa bài học rồi thử lại.';
 const FALLBACK_LESSON_WARNING = 'Bài học được dựng trực tiếp từ tài liệu nguồn, nên rà soát cách diễn đạt.';
 
 /** Added once to a fallback lesson that autopilot approves, so the Admin rereads its wording. */
@@ -1530,6 +1531,17 @@ export function createAiJobService(
   function questionAudit(run: AiModuleDraftRun): StoreRecord {
     return { target: 'questions', version: run.questionVersion, lessonVersion: run.lessonVersion, questions: run.questionDraft, provenance: run.questionProvenance, flags: run.questionFlags ?? [] };
   }
+  /** Source-grounded questions built from the approved lesson, validated like an AI draft. */
+  async function groundedFallbackQuestions(actor: OnboardingActor, row: AiJobDbRecord, run: AiModuleDraftRun): Promise<readonly GeneratedQuestion[]> {
+    const fallback = buildFallbackQuestions({ lesson: run.lessonDraft! });
+    if (fallback.kind !== 'draft') throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Grounded lesson content is required for question fallback.');
+    const validation = validateModuleQuestionOutput({ questions: fallback.questions, flags: [] }, {
+      ...(await moduleContext(actor, row, run)).input,
+      lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance,
+    });
+    if (!validation.ok) throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Fallback questions are invalid or ungrounded.');
+    return validation.value.questions;
+  }
   async function saveRun(actor: OnboardingActor, row: AiJobDbRecord, run: AiModuleDraftRun, audit?: StoreRecord): Promise<AiJobRecord> {
     const history = (row.stageOutputs.__moduleAudit ?? []) as readonly StoreRecord[];
     const calls = obsoleteCalls(row, new Set([run.outline.moduleLocalId]));
@@ -2054,7 +2066,25 @@ export function createAiJobService(
     try { request = await promptFor(actor, row, call); }
     catch (error) {
       const run = moduleForCall(row, call);
-      row = await updateJob(actor, row, { calls: row.calls.map((item) => item.callId === call!.callId ? { ...item, status: 'failed', errors: validationMessages(error) } : item), moduleRuns: replaceRun(row, call.moduleTarget === 'lesson' ? await fallbackRun(actor, row, run) : { ...run, questionState: 'failed' }), ...RELEASED_LEASE });
+      const calls = row.calls.map((item) => item.callId === call!.callId ? { ...item, status: 'failed' as const, errors: validationMessages(error) } : item);
+      if (call.moduleTarget === 'questions' && row.autoApprove === true) {
+        // No provider ever ran, so the client has nothing to recover: autopilot applies the
+        // grounded fallback itself (approved on the next pass), or stops the job when it cannot.
+        let questions: readonly GeneratedQuestion[];
+        try {
+          questions = await groundedFallbackQuestions(actor, row, run);
+        } catch (fallbackError) {
+          if (!(fallbackError instanceof AiJobServiceError)) throw fallbackError;
+          row = await updateJob(actor, row, {
+            calls, moduleRuns: replaceRun(row, { ...run, questionState: 'failed' }), status: 'failed',
+            errorCode: 'AI_OUTPUT_INVALID', errorMessage: QUESTION_FALLBACK_FAILED, ...RELEASED_LEASE,
+          });
+          return { kind: 'failed', job: jobFrom(row, actor.roomId) };
+        }
+        row = await updateJob(actor, row, { calls, moduleRuns: replaceRun(row, updateQuestions(run, run.questionVersion, questions, 'fallback')), ...RELEASED_LEASE });
+        return nextModuleStep(actor, row, workerId);
+      }
+      row = await updateJob(actor, row, { calls, moduleRuns: replaceRun(row, call.moduleTarget === 'lesson' ? await fallbackRun(actor, row, run) : { ...run, questionState: 'failed' }), ...RELEASED_LEASE });
       return nextModuleStep(actor, row, workerId);
     }
     return callStep(actor, row, call, workerId, request);
@@ -2322,14 +2352,7 @@ export function createAiJobService(
       if (!lessonApproved(run) || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion !== run.questionVersion || run.questionState === 'drafting') {
         throw new AiJobServiceError('OPERATION_CONFLICT', 'Question version conflict or an active call prevents fallback.');
       }
-      const fallback = buildFallbackQuestions({ lesson: run.lessonDraft! });
-      if (fallback.kind !== 'draft') throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Grounded lesson content is required for question fallback.');
-      const validation = validateModuleQuestionOutput({ questions: fallback.questions, flags: [] }, {
-        ...(await moduleContext(actor, row, run)).input,
-        lesson: run.lessonDraft!, lessonVersion: run.lessonVersion, lessonProvenance: run.lessonProvenance,
-      });
-      if (!validation.ok) throw new AiJobServiceError('AI_OUTPUT_INVALID', 'Fallback questions are invalid or ungrounded.');
-      return saveRun(actor, row, updateQuestions(run, input.expectedVersion, validation.value.questions, 'fallback'));
+      return saveRun(actor, row, updateQuestions(run, input.expectedVersion, await groundedFallbackQuestions(actor, row, run), 'fallback'));
     },
     async updateModuleQuestions(actor, input) {
       const row = await requireModuleJob(actor, input.jobId);
