@@ -71,6 +71,58 @@ function retryAfter(error: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+/** How often, and for how long, a job that completed without its result yet is re-read. */
+export const RECONCILE_POLL_MS = 3_000;
+export const RECONCILE_MAX_MS = 60_000;
+
+/**
+ * A rejection without a server code (e.g. the host's `tools/call timeout`) says nothing about
+ * the job: the server may still have finished the step.
+ */
+export function isTransportFailure(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const record = error as { name?: unknown; code?: unknown; data?: unknown };
+  if (record.name === 'AbortError') return false;
+  if (typeof record.code === 'string') return false;
+  const data = record.data && typeof record.data === 'object' ? record.data as { code?: unknown } : undefined;
+  return typeof data?.code !== 'string';
+}
+
+export interface ReconcileJobOptions {
+  readonly getJob: () => Promise<AiJobRecord>;
+  readonly sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  readonly nowMs?: () => number;
+  readonly signal?: AbortSignal;
+}
+
+/**
+ * Re-reads the job after a transport failure instead of pumping it again. Returns a completed
+ * job with its result, or a running job to keep pumping; undefined when the job failed, the
+ * read failed, or a completed job still had no result after RECONCILE_MAX_MS.
+ */
+export async function reconcileJobAfterTransportFailure(options: ReconcileJobOptions): Promise<AiJobRecord | undefined> {
+  const sleep = options.sleep ?? defaultSleep;
+  const nowMs = options.nowMs ?? Date.now;
+  const startedAt = nowMs();
+  for (;;) {
+    let job: AiJobRecord;
+    try {
+      job = await options.getJob();
+    } catch {
+      return undefined;
+    }
+    if (job.status === 'running') return job;
+    if (job.status !== 'completed') return undefined;
+    if (job.result !== undefined && job.result !== null) return job;
+    if (nowMs() - startedAt + RECONCILE_POLL_MS > RECONCILE_MAX_MS) return undefined;
+    try {
+      await sleep(RECONCILE_POLL_MS, options.signal);
+    } catch {
+      return undefined;
+    }
+  }
+}
+
 export async function pumpAiJob(options: PumpAiJobOptions): Promise<AiJobRecord> {
   const sleep = options.sleep ?? defaultSleep;
   const nowMs = options.nowMs ?? Date.now;

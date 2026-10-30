@@ -143,11 +143,24 @@ export function parseToolResult<T>(result: ToolResult): T {
 
 const RECOVERY_PREFIX = 'onboarding:recovery:';
 
+/** The SDK gives a tool call 30 s; these AI actions can write many records in one call. */
+export const LONG_AI_CALL_TIMEOUT_MS = 120_000;
+
+const LONG_AI_ACTIONS: ReadonlySet<string> = new Set([
+  'next_step', 'submit_ai_output', 'approve_outline', 'update_module_lesson', 'update_module_questions',
+  'retry_module', 'use_question_fallback', 'supplement_module_document', 'supplement_module_sources',
+  'add_outline_module', 'list_module_sources', 'get_review', 'update_review',
+]);
+
 export class OnboardingApi {
   constructor(private readonly app: McpApp) {}
 
-  private async call<T>(name: string, args: Record<string, unknown>): Promise<T> {
-    return parseToolResult<T>(await this.app.callServerTool({ name, arguments: args }));
+  private async call<T>(name: string, args: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+    return parseToolResult<T>(await this.app.callServerTool({
+      name,
+      arguments: args,
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    }));
   }
 
   async bootstrap(): Promise<BootstrapResult> {
@@ -165,7 +178,11 @@ export class OnboardingApi {
   }
 
   adminAi<T>(action: string, args: Record<string, unknown> = {}): Promise<T> {
-    return this.call('onboarding_admin_ai', { ...args, action });
+    return this.call(
+      'onboarding_admin_ai',
+      { ...args, action },
+      LONG_AI_ACTIONS.has(action) ? LONG_AI_CALL_TIMEOUT_MS : undefined,
+    );
   }
 
   learning<T>(action: string, args: Record<string, unknown> = {}): Promise<T> {

@@ -1,4 +1,5 @@
 import { validateAdminOutline } from './outline-validation';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 
 import type { OnboardingActor } from '../auth';
@@ -780,6 +781,28 @@ export function createAiJobService(
 ): AiJobService {
   const now = options.now ?? (() => new Date().toISOString());
   const templates = createTemplateService(store, { now });
+  const stepSourceCache = new AsyncLocalStorage<Map<string, Promise<SourceRecord | undefined>>>();
+
+  /**
+   * A completed module job whose draft still exists and whose sources are unchanged needs no
+   * sync, approval or materialization: next_step answers done at once.
+   */
+  async function completedModuleTemplateCurrent(actor: OnboardingActor, row: AiJobDbRecord): Promise<boolean> {
+    const result = row.result as { templateId?: unknown; version?: unknown } | null | undefined;
+    if (row.status !== 'completed' || !row.outline || !row.moduleRuns || row.outlineApprovedRevision !== row.outline.revision
+      || !result || typeof result.templateId !== 'string' || typeof result.version !== 'number') return false;
+    const records = await store.query<StoreRecord>(actor.roomId, 'onboarding_templates', {
+      filter: { templateId: result.templateId, version: result.version },
+      limit: 1,
+    });
+    if (records.records.length === 0) return false;
+    for (const run of row.moduleRuns) {
+      if (run.outline.tombstoned) continue;
+      // A changed source reopens the job through the normal path (syncModuleSources).
+      if ((await moduleContext(actor, row, run)).fingerprint !== run.sourceFingerprint) return false;
+    }
+    return true;
+  }
 
   async function findJob(roomId: string, jobId: string): Promise<AiJobDbRecord | undefined> {
     const result = await store.query<AiJobDbRecord>(roomId, 'onboarding_ai_jobs', {
@@ -809,6 +832,19 @@ export function createAiJobService(
   }
 
   async function sourceById(roomId: string, sourceId: string): Promise<SourceRecord | undefined> {
+    // Within one next_step every module check reads the same job sources: load each once.
+    const cache = stepSourceCache.getStore();
+    if (!cache) return readSource(roomId, sourceId);
+    const key = roomId + '\u0000' + sourceId;
+    let pending = cache.get(key);
+    if (!pending) {
+      pending = readSource(roomId, sourceId);
+      cache.set(key, pending);
+    }
+    return pending;
+  }
+
+  async function readSource(roomId: string, sourceId: string): Promise<SourceRecord | undefined> {
     const result = await store.query<SourceDbRecord>(roomId, 'onboarding_sources', {
       filter: { sourceId },
       limit: 1,
@@ -2363,9 +2399,12 @@ export function createAiJobService(
     async nextStep(actor, input) {
       requireAdmin(actor);
       const workerId = required(input.workerId, 'Worker ID');
-      try {
+      return stepSourceCache.run(new Map(), async () => { try {
         let row = await requireOwnedJob(actor, input.jobId);
-        if (row.pipelineVersion === 'module_v2' && row.kind === 'template' && !['cancelled', 'failed'].includes(row.status)) return await nextModuleStep(actor, row, workerId);
+        if (row.pipelineVersion === 'module_v2' && row.kind === 'template' && !['cancelled', 'failed'].includes(row.status)) {
+          if (await completedModuleTemplateCurrent(actor, row)) return { kind: 'done', job: jobFrom(row, actor.roomId) };
+          return await nextModuleStep(actor, row, workerId);
+        }
         if (row.status === 'completed' || row.status === 'cancelled') {
           return { kind: 'done', job: jobFrom(row, actor.roomId) };
         }
@@ -2402,7 +2441,7 @@ export function createAiJobService(
       } catch (error) {
         if (!isAiLeaseConflict(error)) throw error;
         return { kind: 'wait', job: jobFrom(await requireOwnedJob(actor, input.jobId), actor.roomId) };
-      }
+      } });
     },
 
     async recordDispatch(actor, input) {

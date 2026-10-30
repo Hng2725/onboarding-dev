@@ -18,6 +18,9 @@ describe('ai labels', () => {
     expect(message).toBe('Không thể áp dụng thao tác này cho bản nháp. Hãy chỉnh sửa trực tiếp module.');
     expect(message).not.toContain('REVIEW_INVALID');
   });
+  it('explains an SDK tool-call timeout as a slow server', () => {
+    expect(vietnameseErrorMessage(new Error('tools/call timeout'))).toBe('Máy chủ phản hồi chậm. Hãy bấm Thử lại.');
+  });
   it('labels every block kind and question level in Vietnamese', () => {
     expect(BLOCK_KIND_LABELS.concept).toBe('Khái niệm');
     expect(QUESTION_LEVEL_LABELS.procedure).toBe('Quy trình');

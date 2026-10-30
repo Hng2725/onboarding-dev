@@ -520,6 +520,58 @@ describe('AI tạo nội dung in the generator', () => {
     expect(workers.size).toBe(2);
   });
 
+  it('opens the review instead of a red banner when the final next_step times out but the job completed', async () => {
+    const job = templateJob([doneRun(0), run(1)]);
+    const done = templateJob([doneRun(0), doneRun(1)], { status: 'completed', result: { templateId: 'draft-1', version: 1 } });
+    let timedOut = false;
+    const api = apiFor(job, {
+      next_step: () => { timedOut = true; throw new Error('tools/call timeout'); },
+      get_job: () => ({ job: timedOut ? done : job }),
+    });
+    const view = await renderPage(api);
+    expect(actions(api).filter((action) => action === 'next_step')).toHaveLength(1);
+    expect(api.adminAi).toHaveBeenCalledWith('get_job', { jobId: 'template-1' });
+    expect(view.root.findAll((node) => String(node.props.className ?? '').startsWith('ai-generating-banner'))).toHaveLength(0);
+    expect(activeStep(view)).toBe('Xem lại & xuất bản');
+  });
+
+  it('polls a timed-out job that completed without its result yet, without pumping it again', async () => {
+    const job = templateJob([doneRun(0), run(1)]);
+    const finishing = templateJob([doneRun(0), doneRun(1)], { status: 'completed' });
+    const done = { ...finishing, result: { templateId: 'draft-1', version: 1 } };
+    const step = deferred<unknown>();
+    let reads = 0;
+    const api = apiFor(job, {
+      next_step: () => step.promise,
+      get_job: () => ({ job: reads++ === 0 ? finishing : done }),
+    });
+    const view = await renderPage(api);
+    vi.useFakeTimers();
+    try {
+      await act(async () => { step.resolve(Promise.reject(new Error('tools/call timeout'))); await vi.advanceTimersByTimeAsync(0); });
+      expect(reads).toBe(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+    } finally {
+      vi.useRealTimers();
+    }
+    await act(async () => { await Promise.resolve(); });
+    expect(reads).toBe(2);
+    expect(actions(api).filter((action) => action === 'next_step')).toHaveLength(1);
+    expect(view.root.findAll((node) => String(node.props.className ?? '').startsWith('ai-generating-banner'))).toHaveLength(0);
+    expect(activeStep(view)).toBe('Xem lại & xuất bản');
+  });
+
+  it('shows the Vietnamese timeout banner only when reconciling the job fails too', async () => {
+    const job = templateJob([doneRun(0), run(1)]);
+    const api = apiFor(job, {
+      next_step: () => { throw new Error('tools/call timeout'); },
+      get_job: () => { throw new Error('tools/call timeout'); },
+    });
+    const view = await renderPage(api);
+    const banner = view.root.findByProps({ className: 'ai-generating-banner error' });
+    expect(text(banner)).toContain('Máy chủ phản hồi chậm. Hãy bấm Thử lại.');
+  });
+
   it('opens a restored completed job on its review without pumping', async () => {
     const done = templateJob([doneRun(0), doneRun(1)], { status: 'completed', result: { templateId: 'draft-1', version: 1 } });
     const api = apiFor(done);

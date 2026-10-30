@@ -1456,10 +1456,9 @@ describe('AI job service', () => {
       const sections = Array.from({ length: 1_500 }, (_, i) => ({ id: 'source-1#s' + String(i + 1), headingPath: ['Mục ' + String(i) + ' ' + 'x'.repeat(120)], text: 'Bấm nút Gửi duyệt để chuyển đơn số ' + String(i) + '.' }));
       await store.update(admin.roomId, 'onboarding_sources', source.id, { sections });
       const query = store.query.bind(store);
-      let reads = 0;
       const spy = vi.spyOn(store, 'query').mockImplementation(async (room, collection, options) => {
-        // syncModuleSources reads each module's source first; fail the planner's own read.
-        if (collection === 'onboarding_sources' && ++reads > job.outline!.modules.length) throw new Error('Store unavailable');
+        // One next_step shares a single read of each source with the planner; fail that read.
+        if (collection === 'onboarding_sources') throw new Error('Store unavailable');
         return query(room, collection, options);
       });
       await expect(service.nextStep(admin, { jobId: job.jobId, workerId: 'tab-a' })).rejects.toThrow('Store unavailable');

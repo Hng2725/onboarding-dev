@@ -82,12 +82,20 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   COVERAGE_INCOMPLETE: 'Còn module chưa đủ tài liệu.',
 };
 
+export const TOOL_CALL_TIMEOUT_MESSAGE = 'Máy chủ phản hồi chậm. Hãy bấm Thử lại.';
+
+/** The host SDK rejects a tool call it waited too long for with a plain, code-less Error. */
+export function isToolCallTimeout(error: unknown): boolean {
+  return error instanceof Error && !errorCode(error) && /tools\/call timeout/i.test(error.message);
+}
+
 /** Codes whose server message, when written in Vietnamese, says more than the generic text. */
 const SPECIFIC_MESSAGE_CODES: ReadonlySet<string> = new Set(['OPERATION_CONFLICT', 'COVERAGE_INCOMPLETE']);
 
 export function vietnameseErrorMessage(error: unknown): string {
   const providerMessage = error instanceof Error ? actionableProviderFailure(error.message) : null;
   if (providerMessage) return providerMessage;
+  if (isToolCallTimeout(error)) return TOOL_CALL_TIMEOUT_MESSAGE;
   const code = errorCode(error);
   if (code && SPECIFIC_MESSAGE_CODES.has(code) && error instanceof Error && hasVietnameseText(error.message)) {
     return error.message.trim();

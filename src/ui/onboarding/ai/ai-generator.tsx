@@ -36,7 +36,7 @@ import {
   isNativeChatAttempt,
 } from './ai-gateway-native-chat';
 import { actionableProviderFailure, errorCode, vietnameseErrorMessage } from './ai-labels';
-import { pumpAiJob } from './ai-pump';
+import { isTransportFailure, pumpAiJob, reconcileJobAfterTransportFailure } from './ai-pump';
 import { pumpWithInventoryRecovery } from './inventory-recovery';
 import {
   pumpWithQuestionRecovery,
@@ -1611,10 +1611,29 @@ export function AiGeneratorPage({
       let seen = generationFingerprint(latest);
       let idlePasses = 0;
       while (generationRunRef.current === run) {
-        latest = await pump(latest);
+        let reconciled = false;
+        try {
+          latest = await pump(latest);
+        } catch (caught) {
+          // A code-less rejection (e.g. the host's 30 s tool-call timeout) says nothing about the
+          // job: the server may have finished it. Read it back before showing any banner.
+          if (!isTransportFailure(caught) || generationRunRef.current !== run) throw caught;
+          const jobId = latest.jobId;
+          const job = await reconcileJobAfterTransportFailure({
+            getJob: async () => (await api.adminAi<{ job: AiJobRecord }>('get_job', { jobId })).job,
+          });
+          if (!job) throw caught;
+          latest = job;
+          recordJob(job);
+          reconciled = true;
+        }
         if (latest.status !== 'running' || !outlineApprovedFor(latest)) break;
         const next = generationFingerprint(latest);
-        if (next !== seen) {
+        if (reconciled) {
+          // Still running after a transport failure: pump again, but it counts as an idle pass.
+          seen = next;
+          if (++idlePasses >= MAX_IDLE_GENERATION_PASSES) break;
+        } else if (next !== seen) {
           seen = next;
           idlePasses = 0;
         } else if (++idlePasses >= MAX_IDLE_GENERATION_PASSES) break;

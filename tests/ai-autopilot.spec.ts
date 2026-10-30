@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { OnboardingActor } from '../src/onboarding/auth';
 import type { AiJobRecord, AiModuleDraftRun } from '../src/onboarding/contracts';
 import { createAiJobService, type AiJobService } from '../src/onboarding/ai/jobs';
+import { createTemplateService } from '../src/onboarding/templates';
 import { MemoryOnboardingStore } from './helpers/onboarding-memory-store';
 import { aiSource, generatedTemplate, seedAiSource } from './helpers/ai-template-fixture';
 import { completePlan } from './helpers/complete-plan';
@@ -274,5 +275,52 @@ describe('AI template autopilot', () => {
     const entries = audit(current).filter((entry) => entry.target === 'lesson' && entry.moduleLocalId === run.outline.moduleLocalId);
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ approvedBy: 'autopilot', provenance: 'manual' });
+  });
+});
+
+describe('autopilot next_step cost', () => {
+  it('answers a completed job whose template exists with done, without re-running approval or materialization', async () => {
+    const { store, service, job } = await autopilotJob('autopilot-done-shortcut');
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: job.outline!.revision });
+    const first = await pump(service, job.jobId);
+    expect(first.step).toMatchObject({ kind: 'done' });
+    const query = vi.spyOn(store, 'query');
+    const update = vi.spyOn(store, 'update');
+    const create = vi.spyOn(store, 'create');
+    const again = await service.nextStep(admin, { jobId: job.jobId, workerId });
+    expect(again).toMatchObject({ kind: 'done', job: { status: 'completed', result: first.step!.job.result } });
+    // Only the source check that would reopen a changed job remains: one read per source.
+    expect(query.mock.calls.filter(([, collection]) => collection === 'onboarding_sources').length).toBeLessThanOrEqual(2);
+    expect(query.mock.calls.filter(([, collection]) => collection === 'onboarding_template_content')).toHaveLength(0);
+    expect(update).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('materializes again when the completed job lost its template', async () => {
+    const { store, service, job } = await autopilotJob('autopilot-done-missing');
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: job.outline!.revision });
+    const first = (await pump(service, job.jobId)).step!.job;
+    const result = first.result as { templateId: string; version: number };
+    await createTemplateService(store).deleteDraft(admin, result.templateId, result.version);
+    const create = vi.spyOn(store, 'create');
+    const again = await service.nextStep(admin, { jobId: job.jobId, workerId });
+    expect(again).toMatchObject({ kind: 'done' });
+    expect(create.mock.calls.some(([, collection]) => collection === 'onboarding_templates')).toBe(true);
+  });
+
+  it('reads each job source once per next_step', async () => {
+    const { store, service, job } = await autopilotJob('autopilot-source-cache');
+    await service.approveOutline(admin, { jobId: job.jobId, expectedRevision: job.outline!.revision });
+    const first = await service.nextStep(admin, { jobId: job.jobId, workerId });
+    expect(first.kind).toBe('ai_call');
+    const current = await service.getJob(admin, job.jobId);
+    const call = current.calls.find((item) => item.callId === (first as { callId: string }).callId)!;
+    const run = current.moduleRuns!.find((item) => item.outline.moduleLocalId === call.moduleLocalId)!;
+    await service.submitAiOutput(admin, { jobId: job.jobId, workerId, callId: call.callId, text: lessonOutput(run) });
+    const query = vi.spyOn(store, 'query');
+    const step = await service.nextStep(admin, { jobId: job.jobId, workerId });
+    expect(step).toMatchObject({ kind: 'ai_call', moduleTarget: 'questions' });
+    const sourceReads = query.mock.calls.filter(([, collection]) => collection === 'onboarding_sources');
+    expect(sourceReads.length).toBeLessThanOrEqual(2);
   });
 });

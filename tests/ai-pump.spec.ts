@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { AiGatewayError, type AiGateway } from '../src/ui/onboarding/ai/ai-gateway-sandbox';
-import { pumpAiJob } from '../src/ui/onboarding/ai/ai-pump';
+import { isTransportFailure, pumpAiJob, reconcileJobAfterTransportFailure } from '../src/ui/onboarding/ai/ai-pump';
 
 describe('AI browser pump', () => {
   it.each(['changed', 'closed'] as const)('relinquishes a new unused heartbeat grant when polling is %s', async (outcome) => {
@@ -560,5 +560,49 @@ describe('AI browser pump', () => {
       providerErrorCode: 'MODEL_PROVIDER_CREDENTIALS_REJECTED',
       providerPhase: 'model-call',
     });
+  });
+});
+
+describe('reconciling a job after a code-less transport failure', () => {
+  const job = (patch: Record<string, unknown>) => ({ jobId: 'job-1', status: 'running', calls: [], ...patch }) as never;
+
+  it('returns a completed job with a result without polling', async () => {
+    const getJob = vi.fn().mockResolvedValue(job({ status: 'completed', result: { templateId: 't', version: 1 } }));
+    const sleep = vi.fn(async () => undefined);
+    await expect(reconcileJobAfterTransportFailure({ getJob, sleep })).resolves.toMatchObject({ status: 'completed' });
+    expect(getJob).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('polls every 3 s a completed job that has no result yet, until the result appears', async () => {
+    let time = 0;
+    const getJob = vi.fn()
+      .mockResolvedValueOnce(job({ status: 'completed' }))
+      .mockResolvedValueOnce(job({ status: 'completed' }))
+      .mockResolvedValue(job({ status: 'completed', result: { templateId: 't', version: 1 } }));
+    const sleep = vi.fn(async (ms: number) => { time += ms; });
+    await expect(reconcileJobAfterTransportFailure({ getJob, sleep, nowMs: () => time })).resolves.toMatchObject({ result: { templateId: 't' } });
+    expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([3_000, 3_000]);
+  });
+
+  it('gives up after about 60 s without a result', async () => {
+    let time = 0;
+    const getJob = vi.fn().mockResolvedValue(job({ status: 'completed' }));
+    const sleep = vi.fn(async (ms: number) => { time += ms; });
+    await expect(reconcileJobAfterTransportFailure({ getJob, sleep, nowMs: () => time })).resolves.toBeUndefined();
+    expect(time).toBeLessThanOrEqual(60_000);
+    expect(getJob.mock.calls.length).toBeGreaterThan(10);
+  });
+
+  it('hands back a running job and nothing for a failed job or a failed get_job', async () => {
+    await expect(reconcileJobAfterTransportFailure({ getJob: async () => job({}) })).resolves.toMatchObject({ status: 'running' });
+    await expect(reconcileJobAfterTransportFailure({ getJob: async () => job({ status: 'failed' }) })).resolves.toBeUndefined();
+    await expect(reconcileJobAfterTransportFailure({ getJob: async () => { throw new Error('tools/call timeout'); } })).resolves.toBeUndefined();
+  });
+
+  it('treats only code-less, non-abort errors as transport failures', () => {
+    expect(isTransportFailure(new Error('tools/call timeout'))).toBe(true);
+    expect(isTransportFailure(Object.assign(new Error('busy'), { code: 'PROJECT_BUSY' }))).toBe(false);
+    expect(isTransportFailure(new DOMException('aborted', 'AbortError'))).toBe(false);
   });
 });
