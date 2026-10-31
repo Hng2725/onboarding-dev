@@ -1,7 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { AiGatewayError, type AiGateway } from '../src/ui/onboarding/ai/ai-gateway-sandbox';
-import { isTransportFailure, pumpAiJob, reconcileJobAfterTransportFailure } from '../src/ui/onboarding/ai/ai-pump';
+import type { AiJobRecord } from '../src/onboarding/contracts';
+import {
+  AI_PUMP_STALLED,
+  AiPumpStalledError,
+  isTransportFailure,
+  jobChangeApplied,
+  pumpAiJob,
+  reconcileJobAfterTransportFailure,
+  TRANSIENT_RETRY_DELAYS_MS,
+  withTransientRetry,
+} from '../src/ui/onboarding/ai/ai-pump';
 
 describe('AI browser pump', () => {
   it.each(['changed', 'closed'] as const)('relinquishes a new unused heartbeat grant when polling is %s', async (outcome) => {
@@ -604,5 +614,247 @@ describe('reconciling a job after a code-less transport failure', () => {
     expect(isTransportFailure(new Error('tools/call timeout'))).toBe(true);
     expect(isTransportFailure(Object.assign(new Error('busy'), { code: 'PROJECT_BUSY' }))).toBe(false);
     expect(isTransportFailure(new DOMException('aborted', 'AbortError'))).toBe(false);
+  });
+});
+
+describe('retrying a transient failure', () => {
+  const timeout = () => new Error('tools/call timeout');
+  const recordSleep = () => {
+    const waits: number[] = [];
+    return { waits, sleep: vi.fn(async (ms: number) => { waits.push(ms); }) };
+  };
+
+  it('waits 2 s and re-sends after a code-less failure, reporting the attempt', async () => {
+    const { waits, sleep } = recordSleep();
+    const run = vi.fn().mockRejectedValueOnce(timeout()).mockResolvedValue('ok');
+    const onRetry = vi.fn();
+    await expect(withTransientRetry({ run, sleep, onRetry })).resolves.toBe('ok');
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(waits).toEqual([2_000]);
+    expect(onRetry).toHaveBeenCalledWith(1, 3);
+  });
+
+  it('reconciles before re-sending and never re-sends a change that already took effect', async () => {
+    const { sleep } = recordSleep();
+    const run = vi.fn().mockRejectedValue(timeout());
+    const reconcile = vi.fn().mockResolvedValue('applied');
+    await expect(withTransientRetry({ run, reconcile, sleep })).resolves.toBe('applied');
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-sends when the reconcile shows nothing changed', async () => {
+    const { sleep } = recordSleep();
+    const run = vi.fn().mockRejectedValueOnce(timeout()).mockResolvedValue('sent');
+    const reconcile = vi.fn().mockResolvedValue(undefined);
+    await expect(withTransientRetry({ run, reconcile, sleep })).resolves.toBe('sent');
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not re-send while the reconcile itself fails; it reconciles again after the next delay', async () => {
+    const { waits, sleep } = recordSleep();
+    const run = vi.fn().mockRejectedValue(timeout());
+    const reconcile = vi.fn().mockRejectedValueOnce(timeout()).mockResolvedValue('applied');
+    await expect(withTransientRetry({ run, reconcile, sleep })).resolves.toBe('applied');
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(waits).toEqual([2_000, 5_000]);
+  });
+
+  it('gives up after 3 retries at 2 s, 5 s and 10 s with the last failure', async () => {
+    const { waits, sleep } = recordSleep();
+    const run = vi.fn().mockRejectedValue(timeout());
+    await expect(withTransientRetry({ run, sleep })).rejects.toThrow('tools/call timeout');
+    expect(run).toHaveBeenCalledTimes(4);
+    expect(waits).toEqual([...TRANSIENT_RETRY_DELAYS_MS]);
+    expect(TRANSIENT_RETRY_DELAYS_MS).toEqual([2_000, 5_000, 10_000]);
+  });
+
+  it('never retries an error that carries a server code', async () => {
+    const { sleep } = recordSleep();
+    const coded = Object.assign(new Error('conflict'), { code: 'OPERATION_CONFLICT' });
+    const run = vi.fn().mockRejectedValue(coded);
+    await expect(withTransientRetry({ run, sleep })).rejects.toBe(coded);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('stops retrying once its run was superseded (pause, reset or close)', async () => {
+    let active = true;
+    const sleep = vi.fn(async () => { active = false; });
+    const run = vi.fn().mockRejectedValue(timeout());
+    await expect(withTransientRetry({ run, sleep, active: () => active })).rejects.toThrow('tools/call timeout');
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('recognising a change that already took effect', () => {
+  const m0 = { moduleLocalId: 'm0', title: 'Tổng quan', sourceSectionIds: ['s#1'], tombstoned: false };
+  const base = {
+    jobId: 'job-1', status: 'running', calls: [], stageOutputs: {}, sourceIds: ['s'],
+    outline: { revision: 3, modules: [m0], flags: [], taskCoverage: [] },
+    moduleRuns: [{ outline: { moduleLocalId: 'm0' }, lessonVersion: 2, questionVersion: 4 }],
+  } as unknown as AiJobRecord;
+  const withOutline = (revision: number, modules: readonly unknown[], patch: Record<string, unknown> = {}) =>
+    ({ ...base, ...patch, outline: { ...base.outline!, revision, modules } }) as unknown as AiJobRecord;
+  const outline = (action: string, args: Record<string, unknown>) => ({ kind: 'outline' as const, action, args: { expectedRevision: 3, ...args } });
+
+  it('needs a revision past the one sent and a module with the new title for add_outline_module', () => {
+    const add = outline('add_outline_module', { title: 'Mẹo sử dụng' });
+    expect(jobChangeApplied(base, base, add)).toBe(false);
+    expect(jobChangeApplied(base, withOutline(4, [m0]), add)).toBe(false);
+    expect(jobChangeApplied(base, withOutline(4, [m0, { moduleLocalId: 'm1', title: 'Mẹo sử dụng' }]), add)).toBe(true);
+    // The sent revision decides, not a stale client snapshot.
+    expect(jobChangeApplied(withOutline(1, [m0]), withOutline(3, [m0, { moduleLocalId: 'm1', title: 'Mẹo sử dụng' }]), add)).toBe(false);
+  });
+
+  it('needs a new supplement request for that module and source for supplement_module_document', () => {
+    const supplement = outline('supplement_module_document', { moduleLocalId: 'm0', sourceId: 'new' });
+    expect(jobChangeApplied(base, base, supplement)).toBe(false);
+    expect(jobChangeApplied(base, { ...base, stageOutputs: { 'supplement:1': { moduleLocalId: 'm1', sourceId: 'new' } } }, supplement)).toBe(false);
+    expect(jobChangeApplied(base, { ...base, stageOutputs: { 'supplement:1': { moduleLocalId: 'm0', sourceId: 'new' } } }, supplement)).toBe(true);
+  });
+
+  it('needs the targeted module changed for update_outline, supplement_module_sources and set_coverage_override', () => {
+    const renamed = withOutline(4, [{ ...m0, title: 'Mới' }]);
+    expect(jobChangeApplied(base, withOutline(4, [m0]), outline('update_outline', { edits: [{ type: 'update', moduleLocalId: 'm0', patch: { title: 'Mới' } }] }))).toBe(false);
+    expect(jobChangeApplied(base, renamed, outline('update_outline', { edits: [{ type: 'update', moduleLocalId: 'm0', patch: { title: 'Mới' } }] }))).toBe(true);
+    expect(jobChangeApplied(base, withOutline(4, [{ ...m0, tombstoned: true }]), outline('update_outline', { edits: [{ type: 'delete', moduleLocalId: 'm0' }] }))).toBe(true);
+    const pick = outline('supplement_module_sources', { moduleLocalId: 'm0', sourceIds: ['s'], sectionIds: ['s#2'] });
+    expect(jobChangeApplied(base, withOutline(4, [m0]), pick)).toBe(false);
+    expect(jobChangeApplied(base, withOutline(4, [{ ...m0, sourceSectionIds: ['s#1', 's#2'] }]), pick)).toBe(true);
+    const override = outline('set_coverage_override', { moduleLocalId: 'm0', override: true });
+    expect(jobChangeApplied(base, withOutline(3, [{ ...m0, coverageOverride: true }]), override)).toBe(false);
+    expect(jobChangeApplied(base, withOutline(4, [{ ...m0, coverageOverride: true }]), override)).toBe(true);
+    expect(jobChangeApplied(base, withOutline(9, [m0]), outline('unknown_action', {}))).toBe(false);
+  });
+
+  it('sees a module change from its lesson or question version', () => {
+    const lesson = { kind: 'module' as const, moduleLocalId: 'm0', target: 'lesson' as const, expectedVersion: 2 };
+    const questions = { kind: 'module' as const, moduleLocalId: 'm0', target: 'questions' as const, expectedVersion: 4 };
+    expect(jobChangeApplied(base, base, lesson)).toBe(false);
+    expect(jobChangeApplied(base, base, questions)).toBe(false);
+    const bumped = { ...base, moduleRuns: [{ ...base.moduleRuns![0], lessonVersion: 3, questionVersion: 5 }] } as AiJobRecord;
+    expect(jobChangeApplied(base, bumped, lesson)).toBe(true);
+    expect(jobChangeApplied(base, bumped, questions)).toBe(true);
+  });
+});
+
+describe('a job the server marked failed', () => {
+  it('rejects with a server code, so it is never retried as a slow server', async () => {
+    const failed = { jobId: 'job-1', status: 'failed', calls: [], errorCode: 'AI_TIMEOUT', errorMessage: 'Timed out.' };
+    const adminAi = vi.fn().mockResolvedValue({ kind: 'failed', job: failed });
+    const gateway: AiGateway = { dispatch: vi.fn(), status: vi.fn(), cancel: vi.fn() };
+    const error = await pumpAiJob({ api: { adminAi }, gateway, provider: 'sandbox', jobId: 'job-1', workerId: 'tab-a' }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'AI_TIMEOUT', message: 'Timed out.' });
+    expect(isTransportFailure(error)).toBe(false);
+    adminAi.mockResolvedValue({ kind: 'failed', job: { ...failed, errorCode: undefined } });
+    await expect(pumpAiJob({ api: { adminAi }, gateway, provider: 'sandbox', jobId: 'job-1', workerId: 'tab-a' })).rejects.toMatchObject({ code: 'AI_JOB_FAILED' });
+  });
+});
+
+describe('a pump the server keeps waiting', () => {
+  const waiting = (updatedAt: string) => ({ jobId: 'job-1', status: 'running', calls: [], updatedAt });
+
+  it('calls onWait on every wait and keeps polling until the server dispatches', async () => {
+    let time = 0;
+    const adminAi = vi.fn()
+      .mockResolvedValueOnce({ kind: 'wait', job: waiting('t0') })
+      .mockResolvedValueOnce({ kind: 'wait', job: waiting('t0') })
+      .mockResolvedValueOnce({ kind: 'awaiting_admin', job: waiting('t1') });
+    const onWait = vi.fn();
+    await expect(pumpAiJob({
+      api: { adminAi }, gateway: { dispatch: vi.fn(), status: vi.fn() }, provider: 'sandbox', jobId: 'job-1', workerId: 'tab-a',
+      nowMs: () => time, sleep: async (ms) => { time += ms; }, onWait, maxIdleWaitMs: 180_000,
+    })).resolves.toMatchObject({ updatedAt: 't1' });
+    expect(onWait).toHaveBeenCalledTimes(2);
+    expect(adminAi).toHaveBeenCalledTimes(3);
+  });
+
+  it('gives up with AI_PUMP_STALLED after maxIdleWaitMs of waits on an unchanged job', async () => {
+    let time = 0;
+    const adminAi = vi.fn().mockResolvedValue({ kind: 'wait', job: waiting('t0') });
+    const result = pumpAiJob({
+      api: { adminAi }, gateway: { dispatch: vi.fn(), status: vi.fn() }, provider: 'sandbox', jobId: 'job-1', workerId: 'tab-a',
+      nowMs: () => time, sleep: async (ms) => { time += ms; }, maxIdleWaitMs: 180_000,
+    });
+    await expect(result).rejects.toBeInstanceOf(AiPumpStalledError);
+    await expect(result).rejects.toMatchObject({ code: AI_PUMP_STALLED, job: { updatedAt: 't0' } });
+    // 3 s apart: the 61st wait is the first one 180 s after the run of waits began.
+    expect(adminAi).toHaveBeenCalledTimes(61);
+  });
+
+  it('restarts the bound whenever the waiting job changes, and waits forever without a bound', async () => {
+    let time = 0;
+    let reads = 0;
+    const adminAi = vi.fn(async () => (++reads > 200
+      ? { kind: 'done', job: waiting('end') }
+      : { kind: 'wait', job: waiting('t' + String(Math.floor(reads / 50))) }));
+    await expect(pumpAiJob({
+      api: { adminAi }, gateway: { dispatch: vi.fn(), status: vi.fn() }, provider: 'sandbox', jobId: 'job-1', workerId: 'tab-a',
+      nowMs: () => time, sleep: async (ms) => { time += ms; }, maxIdleWaitMs: 180_000,
+    })).resolves.toMatchObject({ updatedAt: 'end' });
+    reads = 0;
+    const unchanged = vi.fn(async () => (++reads > 200 ? { kind: 'done', job: waiting('end') } : { kind: 'wait', job: waiting('t0') }));
+    await expect(pumpAiJob({
+      api: { adminAi: unchanged }, gateway: { dispatch: vi.fn(), status: vi.fn() }, provider: 'sandbox', jobId: 'job-1', workerId: 'tab-a',
+      nowMs: () => time, sleep: async (ms) => { time += ms; },
+    })).resolves.toMatchObject({ updatedAt: 'end' });
+  });
+
+  it('keeps a Native question recovery on Native through a PROJECT_BUSY successor, then hands the next lesson back unused', async () => {
+    const running = (updatedAt: string) => ({ jobId: 'job-1', status: 'running', calls: [], updatedAt });
+    const steps = [
+      { kind: 'ai_call', callId: 'module-4', operationId: 'job-1:module-4', prompt: 'p', moduleTarget: 'questions', moduleLocalId: 'm1' },
+      // The server queued a project_busy successor and waits until its nextRetryAt.
+      { kind: 'wait', job: running('busy') },
+      { kind: 'ai_call', callId: 'module-5', operationId: 'job-1:module-5', prompt: 'p', moduleTarget: 'questions', moduleLocalId: 'm1' },
+      { kind: 'ai_call', callId: 'module-6', operationId: 'job-1:module-6', prompt: 'p', moduleTarget: 'lesson', moduleLocalId: 'm2' },
+    ];
+    const handedBack = running('released');
+    const adminAi = vi.fn(async (action: string, args: Record<string, unknown>) => {
+      if (action === 'next_step') return steps.shift();
+      if (action === 'report_ai_failure' && args.providerErrorCode === 'DISPATCH_NOT_STARTED') return handedBack;
+      return running(action + ':' + String(args.callId));
+    });
+    let attempts = 0;
+    const native: AiGateway = {
+      dispatch: vi.fn(async () => ({ attemptRef: 'native-chat:s:m' + String(++attempts) })),
+      status: vi.fn(async (attemptRef: string) => attemptRef.endsWith('m1')
+        ? { state: 'failed' as const, error: 'Another request in this project is still running', errorCode: 'PROJECT_BUSY' }
+        : { state: 'completed' as const, text: '{}' }),
+    };
+    await expect(pumpAiJob({
+      api: { adminAi }, gateway: native, provider: 'native_chat', jobId: 'job-1', workerId: 'tab-a',
+      questionRecoveryOf: { moduleLocalId: 'm1' }, questionPollMs: 90_000, sleep: async () => undefined,
+    })).resolves.toBe(handedBack);
+    // Both question attempts ran on Native inside the one recovery; the lesson was never dispatched.
+    expect(native.dispatch).toHaveBeenCalledTimes(2);
+    expect(adminAi).toHaveBeenCalledWith('report_ai_failure', expect.objectContaining({ callId: 'module-4', kind: 'failed', providerErrorCode: 'PROJECT_BUSY' }));
+    expect(adminAi).toHaveBeenCalledWith('record_dispatch', expect.objectContaining({ callId: 'module-5', provider: 'native_chat' }));
+    expect(adminAi).toHaveBeenCalledWith('submit_ai_output', expect.objectContaining({ callId: 'module-5' }));
+    expect(adminAi).toHaveBeenLastCalledWith('report_ai_failure', {
+      jobId: 'job-1', workerId: 'tab-a', callId: 'module-6', kind: 'failed', providerErrorCode: 'DISPATCH_NOT_STARTED',
+    });
+    expect(adminAi.mock.calls.some(([action, args]) => action === 'record_dispatch' && (args as { callId?: string }).callId === 'module-6')).toBe(false);
+  });
+
+  it('applies the question deadline only to a Native questions call, never to a lesson in the same loop', async () => {
+    const startedAt = '2026-10-24T05:00:00.000Z';
+    const now = Date.parse(startedAt) + 120_000;
+    const done = { jobId: 'job-1', status: 'completed', calls: [], updatedAt: 'done' };
+    let steps = 0;
+    const adminAi = vi.fn(async (action: string) => (action !== 'next_step' ? done
+      : steps++ === 0
+        ? { kind: 'ai_call', callId: 'module-5', operationId: 'job-1:module-5', prompt: 'p', attemptRef: 'native-chat:s:m', provider: 'native_chat', startedAt, moduleTarget: 'lesson', moduleLocalId: 'm2' }
+        : { kind: 'done', job: done }));
+    const status = vi.fn().mockResolvedValueOnce({ state: 'running' }).mockResolvedValue({ state: 'completed', text: '{}' });
+    await expect(pumpAiJob({
+      api: { adminAi }, gateway: { dispatch: vi.fn(), status }, provider: 'native_chat', jobId: 'job-1', workerId: 'tab-a',
+      questionPollMs: 90_000, nowMs: () => now, sleep: async () => undefined,
+    })).resolves.toBe(done);
+    // 120 s into a lesson is far inside its 15-minute deadline: polled, never reported as a timeout.
+    expect(adminAi).not.toHaveBeenCalledWith('report_ai_failure', expect.objectContaining({ kind: 'timeout' }));
+    expect(adminAi).toHaveBeenCalledWith('submit_ai_output', expect.objectContaining({ callId: 'module-5' }));
   });
 });

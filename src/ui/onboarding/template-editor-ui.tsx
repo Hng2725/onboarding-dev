@@ -122,6 +122,15 @@ export function templateDetailCacheKey(
   return `${item.id}@${item.version}@${item.updatedAt}`;
 }
 
+/**
+ * A draft changes in place under the same id and version (an AI draft is re-materialized, its
+ * settings or publication checkpoint are saved) without its list `updatedAt` always moving, so
+ * its cached detail can be stale. Published and archived versions never change.
+ */
+export function templateDetailNeedsReload(item: Pick<TemplateCatalogView, 'status'>): boolean {
+  return item.status === 'draft';
+}
+
 export async function preloadTemplateDetails(
   items: readonly TemplateCatalogView[],
   existing: ReadonlyMap<string, TemplateDetailCacheEntry>,
@@ -237,7 +246,10 @@ export function TemplateDetailPanel({
             <div><dt>Phân loại</dt><dd>{detail.employeeType === 'advanced' ? 'Chuyên sâu' : 'Thông thường'}</dd></div>
             <div><dt>Phiên bản</dt><dd>{detail.version}</dd></div>
             <div><dt>Module</dt><dd>{detail.modules.length}</dd></div>
-            <div><dt>Lượt làm tối đa</dt><dd>{detail.maxAttempts}</dd></div>
+            {/* AI templates limit attempts per module; the template-level field stays at its legacy default. */}
+            {detail.content
+              ? <div><dt>Lượt làm mỗi module</dt><dd>{detail.content.maxAttemptsPerModule ?? 'Không giới hạn'}</dd></div>
+              : <div><dt>Lượt làm tối đa</dt><dd>{detail.maxAttempts}</dd></div>}
           </dl>
           <div className="template-detail-modules">
             {detail.modules.map((module, moduleIndex) => <article key={module.id} className="template-detail-module">

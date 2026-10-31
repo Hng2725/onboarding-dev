@@ -25,8 +25,12 @@ Modal có 4 bước:
 3. AI tạo nội dung
    ↓ AI tự viết bài học và câu hỏi cho mọi module, không cần duyệt từng module
 4. Xem lại & xuất bản
-   ↓ Admin xem lại, chỉnh sửa, xử lý cờ; app tạo PDF + JSON và xuất bản
+   ↓ Admin xem lại, chỉnh sửa; bấm "Lưu template" → template vào thư viện ở trạng thái Bản nháp
+Thư viện template → mở bản nháp (Chỉnh sửa) → Bước 4
+   ↓ Admin xử lý cờ bắt buộc; bấm "Xuất bản template" → app tạo PDF + JSON và xuất bản
 ```
+
+Lượt tạo mới kết thúc bằng **Lưu template**, không xuất bản ngay. Việc xuất bản diễn ra khi Admin mở bản nháp từ thư viện template.
 
 Mỗi lượt chạy chỉ tạo **một** template, **Thông thường** hoặc **Nâng cao**. Không còn lựa chọn “Cả hai”; muốn có cả hai bản, hãy chạy hai lượt riêng.
 
@@ -34,9 +38,9 @@ Mỗi lượt chạy chỉ tạo **một** template, **Thông thường** hoặc
 
 | Thành phần | Trách nhiệm chính |
 |---|---|
-| **Admin** | Thêm và chọn nguồn; chọn loại template; nhập nhiệm vụ (loại Nâng cao); xử lý module “Cần bổ sung”; xem lại, chỉnh sửa, xử lý cờ; thiết lập template; bấm xuất bản. |
+| **Admin** | Thêm và chọn nguồn; chọn loại template; nhập nhiệm vụ (loại Nâng cao); xử lý module “Cần bổ sung”; xem lại, chỉnh sửa, xử lý cờ; thiết lập template; lưu bản nháp; mở bản nháp từ thư viện và bấm xuất bản. |
 | **AI** | Phân tích nguồn; đề xuất module và đánh giá độ phủ; đọc tài liệu bổ sung; viết bài học có dẫn chứng; tạo câu hỏi; phát hiện thiếu dữ liệu hoặc mâu thuẫn; thử sửa đầu ra chưa hợp lệ. |
-| **App** | Kiểm tra file; quản lý job và tiến trình; lưu trạng thái để tiếp tục; điều phối Sandbox/Native/dự phòng an toàn; tạo PDF và JSON; lưu Roomfiles; gọi API xuất bản. |
+| **App** | Kiểm tra file; quản lý job và tiến trình; lưu trạng thái để tiếp tục; tự thử lại khi máy chủ phản hồi chậm; điều phối Sandbox/Native/dự phòng an toàn; tạo PDF và JSON; lưu Roomfiles; gọi API xuất bản. |
 
 ## 4. Chuẩn bị trước khi sử dụng
 
@@ -135,7 +139,7 @@ Với mỗi module chưa đủ, Admin chọn một trong các cách:
 
 - **Sửa**: đổi tên, mô tả, thời lượng, mục tiêu của module.
 - **Bỏ module**: loại module khỏi lộ trình (các module bắt buộc của khung template không thể bỏ).
-- **+ Thêm module**: thêm một module mới vào cùng template (tên, mô tả), sau đó bổ sung tài liệu cho module đó.
+- **Thêm module**: thêm một module mới vào cùng template (tên, mô tả), sau đó bổ sung tài liệu cho module đó.
 
 #### Khi nào bấm được “Tạo template”?
 
@@ -156,6 +160,15 @@ Nút **Tạo template** ở chân modal chỉ mở khi **mọi module đã đư�
 - Khi mở lại modal, app khôi phục job đã lưu và **tự tiếp tục** từ chỗ đang dừng.
 - Giữ modal mở trong lúc AI làm việc nếu muốn hoàn tất nhanh nhất.
 
+#### Khi máy chủ phản hồi chậm
+
+Khi một yêu cầu tới máy chủ không có phản hồi kịp (ví dụ `tools/call timeout`), app **tự thử lại tối đa 3 lần**, sau khoảng 2 giây, 5 giây rồi 10 giây. Trong lúc đó chân modal hiện “Máy chủ phản hồi chậm, đang thử lại… (n/3)” và màn hình giữ nguyên trạng thái đang làm việc, không hiện thông báo lỗi. Cơ chế này áp dụng cho Bước 2 (các thao tác sửa lộ trình, bổ sung tài liệu, thêm module và lượt AI đọc tài liệu sau đó), Bước 3 và các chỉnh sửa module ở Bước 4.
+
+- Trước khi gửi lại một thao tác thay đổi dữ liệu, app đọc lại job: nếu thao tác đã được máy chủ ghi nhận (ví dụ lộ trình đã sang phiên bản mới, bài học đã lưu), app coi như thành công và làm tiếp, **không gửi lại lần hai**.
+- Lỗi có mã từ máy chủ (ví dụ dữ liệu vừa thay đổi, room đang bận) **không** được thử lại tự động; thông báo hiện ngay.
+- Chỉ khi cả 3 lần thử lại đều không thành công, app mới hiện “Máy chủ phản hồi chậm. Hãy bấm Thử lại.” kèm nút **Thử lại**.
+- Tạm dừng, Xóa phiên hoặc đóng modal sẽ dừng ngay các lần thử lại đang chờ.
+
 #### Sandbox và Native AI Chat hoạt động thế nào?
 
 - **Sandbox** là nhà cung cấp chính.
@@ -168,6 +181,13 @@ Nút **Tạo template** ở chân modal chỉ mở khi **mọi module đã đư�
 ### Bước 4 — Xem lại & xuất bản
 
 Màn hình gồm danh sách module, nội dung module đang chọn (tab **Bài học** và **Câu hỏi**), các cờ của module đó và thiết lập template. Số trên mỗi module trong danh sách là số cờ còn mở.
+
+Bước 4 có hai cách kết thúc, tùy cách mở modal:
+
+| Mở modal từ | Nút chính ở chân modal | Kết quả |
+|---|---|---|
+| **Tạo bằng AI** (lượt tạo mới) | **Lưu template** | Template vào thư viện ở trạng thái **Bản nháp**, chưa xuất bản. |
+| Thư viện template → bản nháp AI → **Chỉnh sửa** | **Xuất bản template** | Template được xuất bản và lưu JSON. |
 
 #### Xem và chỉnh sửa nội dung
 
@@ -188,7 +208,7 @@ Cờ là điểm AI không chắc (thiếu thông tin, mâu thuẫn, nguồn ké
 
 Ngay dưới tab, cảnh báo được gom thành một dải **“N cảnh báo · Xem”**; bấm để mở danh sách. Cờ bắt buộc (mức chặn, màu đỏ) luôn hiện sẵn phía trên nội dung. Cờ chung của cả template chỉ hiện ở module đầu tiên.
 
-Cờ bắt buộc (mức chặn) phải được xử lý trước khi xuất bản. Cờ đã xử lý vẫn giữ trạng thái khi app dựng lại bản nháp sau một lần chỉnh sửa module khác; nếu chỉnh sửa làm cờ không còn, cờ đó biến mất.
+Cờ bắt buộc (mức chặn) phải được xử lý trước khi xuất bản, nhưng **không chặn việc lưu bản nháp**: khi lưu, chân modal chỉ nhắc “Còn N cờ bắt buộc — cần xử lý trước khi xuất bản”. Cờ đã xử lý vẫn giữ trạng thái khi app dựng lại bản nháp sau một lần chỉnh sửa module khác; nếu chỉnh sửa làm cờ không còn, cờ đó biến mất.
 
 #### Thiết lập template
 
@@ -196,11 +216,22 @@ Cờ bắt buộc (mức chặn) phải được xử lý trước khi xuất b�
 - **Số lượt mỗi module** — mặc định 2; có thể không giới hạn.
 - **Chế độ học**: `Tuần tự` (học theo thứ tự) hoặc `Tự do` (nhân sự tự chọn module).
 
-#### Xuất bản
+#### Lưu template (lượt tạo mới)
 
-1. Kiểm tra tóm tắt: số module, số câu hỏi, các thiết lập.
-2. Đảm bảo không còn cờ bắt buộc (chân modal hiện “Còn N cờ bắt buộc” nếu còn).
-3. Bấm **Xuất bản template**. Giữ modal mở đến khi app báo hoàn tất. Nếu một bước lỗi, bấm **Thử lại xuất bản** để tiếp tục từ bước chưa xong.
+1. Kiểm tra nội dung và thiết lập.
+2. Bấm **Lưu template**. Chân modal hiện “Đang lưu…”; giữ modal mở đến khi app báo hoàn tất.
+3. App chuẩn bị thư mục Roomfiles → tạo PDF bài học từng module → tải PDF lên → gắn tài liệu vào template → lưu thiết lập. App **không** xuất bản và **không** lưu file JSON ở bước này.
+4. Khi xong, app báo “Đã lưu template vào thư viện ở trạng thái Bản nháp. Mở template để xuất bản khi sẵn sàng.”, tự đóng modal và làm mới thư viện template.
+5. Nếu một bước lỗi, modal vẫn mở và nút chính chuyển thành **Thử lại lưu**; lần thử lại dùng lại các PDF đã tải lên.
+
+Lưu bản nháp được phép ngay cả khi còn cờ bắt buộc.
+
+#### Xuất bản (mở bản nháp từ thư viện)
+
+1. Trong thư viện template, mở template AI có nhãn **Bản nháp** và bấm **Chỉnh sửa**. Modal mở thẳng ở Bước 4.
+2. Kiểm tra tóm tắt: số module, số câu hỏi, các thiết lập. Vẫn có thể chỉnh sửa module như bình thường.
+3. Đảm bảo không còn cờ bắt buộc (chân modal hiện “Còn N cờ bắt buộc” và nút xuất bản bị khóa nếu còn).
+4. Bấm **Xuất bản template**. Giữ modal mở đến khi app báo hoàn tất. Nếu một bước lỗi, bấm **Thử lại xuất bản** để tiếp tục từ bước chưa xong.
 
 App thực hiện tuần tự: chuẩn bị thư mục Roomfiles → tạo PDF bài học từng module → tải PDF lên → gắn tài liệu vào template → xuất bản template → lưu file JSON.
 
@@ -212,16 +243,16 @@ Onboarding-app/Created templates/<tên-template>/
 └── <tên-template>-<id>-v<phiên-bản>.json
 ```
 
-Tiến trình xuất bản có checkpoint. Nếu bị gián đoạn, lần thử lại tiếp tục từ phần chưa hoàn tất và tái sử dụng kết quả đã lưu.
+Tiến trình xuất bản có checkpoint. Nếu bị gián đoạn, lần thử lại tiếp tục từ phần chưa hoàn tất và tái sử dụng kết quả đã lưu. PDF đã tạo khi **Lưu template** được dùng lại khi xuất bản, không tải lên lần nữa. Nếu Admin chỉnh sửa module sau khi lưu, app dựng lại bản nháp và tạo lại PDF bài học khi xuất bản, nên PDF luôn khớp nội dung mới nhất.
 
-#### Sau khi xuất bản thành công
+#### Sau khi lưu hoặc xuất bản thành công
 
-Chỉ khi template đã được xuất bản và lưu JSON thành công, app mới:
+Sau khi **Lưu template** thành công, hoặc chỉ khi template đã được xuất bản và lưu JSON thành công, app mới:
 
 - Tự đóng modal.
 - Xóa trạng thái tạm của phiên vừa hoàn tất và đưa modal về **Bước 1 — Nguồn & loại** cho lần mở sau.
 - Giữ nguyên thư viện **Nguồn đã thêm**.
-- Giữ nguyên template, PDF và JSON đã xuất bản trong Roomfiles.
+- Giữ nguyên template (bản nháp hoặc đã xuất bản), PDF và JSON trong Roomfiles.
 
 ## 6. Đóng, Hủy và Xóa dữ liệu khác nhau thế nào?
 
@@ -229,7 +260,7 @@ Chỉ khi template đã được xuất bản và lưu JSON thành công, app m�
 |---|---|---|
 | **Đóng (×)** | Đóng giao diện. Nếu AI đang tạo nội dung, app hỏi xác nhận rồi **tạm dừng**; mở lại sẽ tự tiếp tục. | Không. |
 | **Hủy job** | Yêu cầu dừng job AI đang chạy và dọn tiến trình nhà cung cấp liên quan. | Không. |
-| **Xóa phiên → Xóa dữ liệu** | Sau khi xác nhận, xóa tiến trình, lộ trình, bài học, câu hỏi và bản nháp chưa xuất bản của phiên hiện tại; quay về Bước 1. | Không. |
+| **Xóa phiên → Xóa dữ liệu** | Sau khi xác nhận, xóa tiến trình, lộ trình, bài học, câu hỏi và bản nháp chưa xuất bản của phiên hiện tại; quay về Bước 1. Bản nháp đã **Lưu template** không còn thuộc phiên nên không bị xóa. | Không. |
 
 **Xóa phiên** không xóa template đã xuất bản. Hộp xác nhận “Xóa dữ liệu tạo template?” được hiển thị trước khi app thực hiện.
 
@@ -262,6 +293,19 @@ Chỉ khi template đã được xuất bản và lưu JSON thành công, app m�
 - Bấm **Thử lại** ở module đó (hoặc ở thông báo chung).
 - Xem **Chi tiết lỗi kỹ thuật**; nếu Sandbox lỗi `worker_failed`, app có thể tự thử Native một lần.
 
+### Hiện “Máy chủ phản hồi chậm, đang thử lại… (n/3)”
+
+- Không cần làm gì: app đang tự thử lại. Giữ modal mở.
+- Nếu sau 3 lần vẫn lỗi, app hiện “Máy chủ phản hồi chậm. Hãy bấm Thử lại.”; chờ ít phút rồi bấm **Thử lại**. Thao tác đã được máy chủ ghi nhận sẽ không bị áp dụng hai lần.
+
+### Không thấy nút “Xuất bản template” ở lượt tạo mới
+
+- Lượt tạo mới chỉ có **Lưu template**. Sau khi lưu, mở bản nháp trong thư viện template (bấm **Chỉnh sửa**) để xuất bản.
+
+### Lưu template lỗi giữa chừng
+
+- Modal vẫn mở; bấm **Thử lại lưu**. PDF đã tải lên được dùng lại.
+
 ### Không bấm được xuất bản
 
 - Xử lý toàn bộ cờ bắt buộc (màu đỏ) ở từng module; module nào còn cờ có số hiển thị trong danh sách module.
@@ -281,9 +325,10 @@ Chỉ khi template đã được xuất bản và lưu JSON thành công, app m�
 - [ ] Ở Bước 2, mọi module đều “Đủ tài liệu” và lộ trình hợp lý.
 - [ ] Đã giữ modal mở (hoặc xác nhận tạm dừng) trong lúc AI tạo nội dung.
 - [ ] Ở Bước 4, đã đọc bài học và kiểm tra câu hỏi, đáp án, giải thích.
-- [ ] Đã xử lý mọi cờ bắt buộc.
 - [ ] Đã kiểm tra ngưỡng đạt, số lượt và chế độ học.
-- [ ] Đã xác nhận PDF/JSON được lưu trong `Onboarding-app/Created templates/<tên-template>` sau khi xuất bản.
+- [ ] Đã bấm **Lưu template** và thấy template trong thư viện với nhãn **Bản nháp**.
+- [ ] Đã mở bản nháp từ thư viện (**Chỉnh sửa**) và xử lý mọi cờ bắt buộc.
+- [ ] Đã bấm **Xuất bản template** và xác nhận PDF/JSON được lưu trong `Onboarding-app/Created templates/<tên-template>`.
 
 ## 9. Nguyên tắc an toàn nội dung
 

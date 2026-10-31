@@ -1,3 +1,12 @@
+import {
+  CheckOutlined,
+  DeleteOutlined,
+  EditOutlined,
+  FileSearchOutlined,
+  PlusOutlined,
+  RedoOutlined,
+  UploadOutlined,
+} from '@ant-design/icons';
 import { useState, type ChangeEvent } from 'react';
 
 import type { AiJobRecord, OutlineEdit, TemplateOutlineModule } from '../../../onboarding/contracts';
@@ -163,10 +172,10 @@ export function AiStepCoverage({
                   </span>}
               <div className="ai-coverage-actions">
                 <button className="button button-ghost button-sm" type="button" disabled={locked} aria-expanded={open === 'edit'}
-                  onClick={() => togglePanel({ moduleLocalId: module.moduleLocalId, kind: 'edit' })}>Sửa</button>
+                  onClick={() => togglePanel({ moduleLocalId: module.moduleLocalId, kind: 'edit' })}><EditOutlined aria-hidden="true" /> Sửa</button>
                 <span title={removeBlock ?? undefined}>
-                  <button className="button button-ghost button-sm" type="button" disabled={locked || Boolean(removeBlock)}
-                    onClick={() => { setPanel(null); onEdit([{ type: 'delete', moduleLocalId: module.moduleLocalId }]); }}>Bỏ module</button>
+                  <button className="button button-danger-ghost button-sm" type="button" disabled={locked || Boolean(removeBlock)}
+                    onClick={() => { setPanel(null); onEdit([{ type: 'delete', moduleLocalId: module.moduleLocalId }]); }}><DeleteOutlined aria-hidden="true" /> Bỏ module</button>
                 </span>
               </div>
               {!covered && !reading && (
@@ -175,10 +184,10 @@ export function AiStepCoverage({
                   <div className="ai-coverage-gap-actions">
                     {retrySourceId && (
                       <button className="button button-secondary button-sm" type="button" disabled={locked}
-                        onClick={() => onRetrySupplement(module.moduleLocalId, retrySourceId)}>Thử lại</button>
+                        onClick={() => onRetrySupplement(module.moduleLocalId, retrySourceId)}><RedoOutlined aria-hidden="true" /> Thử lại</button>
                     )}
                     <label className={'button button-secondary button-sm ai-coverage-upload' + (locked ? ' disabled' : '')}>
-                      Tải tài liệu bổ sung
+                      <UploadOutlined aria-hidden="true" /> Tải tài liệu bổ sung
                       <input
                         type="file"
                         accept=".pdf,.docx,.txt,.md,.markdown"
@@ -192,10 +201,10 @@ export function AiStepCoverage({
                       />
                     </label>
                     <button className="button button-secondary button-sm" type="button" disabled={locked} aria-expanded={open === 'pick'}
-                      onClick={() => togglePanel({ moduleLocalId: module.moduleLocalId, kind: 'pick' })}>Chọn đoạn từ tài liệu đã có</button>
+                      onClick={() => togglePanel({ moduleLocalId: module.moduleLocalId, kind: 'pick' })}><FileSearchOutlined aria-hidden="true" /> Chọn đoạn từ tài liệu đã có</button>
                     {moduleHasUsableSources(module, usableSectionIds) && (
                       <button className="button button-ghost button-sm" type="button" disabled={locked}
-                        onClick={() => onOverride(module.moduleLocalId)}>Vẫn dùng tài liệu hiện có</button>
+                        onClick={() => onOverride(module.moduleLocalId)}><CheckOutlined aria-hidden="true" /> Vẫn dùng tài liệu hiện có</button>
                     )}
                   </div>
                 </div>
@@ -231,7 +240,7 @@ export function AiStepCoverage({
       ) : (
         <span className="ai-coverage-add" title={canAdd ? undefined : `Lộ trình đã có tối đa ${range.max} module`}>
           <button className="button button-ghost" type="button" disabled={locked || !canAdd}
-            onClick={() => setPanel({ moduleLocalId: null, kind: 'add' })}>+ Thêm module</button>
+            onClick={() => setPanel({ moduleLocalId: null, kind: 'add' })}><PlusOutlined aria-hidden="true" /> Thêm module</button>
         </span>
       )}
     </div>

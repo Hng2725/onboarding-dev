@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import TestRenderer, { act, type ReactTestInstance } from 'react-test-renderer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CheckOutlined, DeleteOutlined, EditOutlined, FileSearchOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons';
 
 import type { AiJobRecord, OutlineEdit, TemplateOutlineModule } from '../src/onboarding/contracts';
 
@@ -174,7 +175,7 @@ describe('AiStepCoverage', () => {
       expect(buttonsByText(row, 'Sửa')).toHaveLength(1);
       expect(buttonsByText(row, 'Bỏ module')).toHaveLength(1);
     }
-    expect(buttonByText(view.root, '+ Thêm module')).toBeDefined();
+    expect(buttonByText(view.root, 'Thêm module')).toBeDefined();
   });
 
   it('offers all three actions to an insufficient module with usable sections', () => {
@@ -260,12 +261,37 @@ describe('AiStepCoverage', () => {
 
   it('adds a module from a title and description', () => {
     const { view, props } = renderCoverage(templateJob([0, 1, 2, 3].map((index) => moduleAt(index))));
-    act(() => buttonByText(view.root, '+ Thêm module').props.onClick());
+    act(() => buttonByText(view.root, 'Thêm module').props.onClick());
     const form = view.root.findByProps({ 'aria-label': 'Thêm module' });
     act(() => form.findByProps({ 'aria-label': 'Tên module mới' }).props.onChange({ target: { value: 'Mẹo sử dụng' } }));
     act(() => form.findByProps({ 'aria-label': 'Mô tả module mới' }).props.onChange({ target: { value: 'Các mẹo nhanh.' } }));
     act(() => buttonByText(form, 'Thêm vào lộ trình').props.onClick());
     expect(props.onAddModule).toHaveBeenCalledWith('Mẹo sử dụng', 'Các mẹo nhanh.');
+  });
+
+  it('gives every coverage action its own icon and shows Bỏ module in red', () => {
+    const partial = moduleAt(4, { sourceSectionIds: ['handbook#s4'], coverage: 'insufficient', gapNote: 'Chưa đủ chi tiết.' });
+    const { view } = renderCoverage(templateJob([0, 1, 2, 3].map((index) => moduleAt(index)).concat(partial)));
+    const row = rows(view)[4];
+    expect(buttonByText(row, 'Sửa').findAllByType(EditOutlined)).toHaveLength(1);
+    const remove = buttonByText(row, 'Bỏ module');
+    expect(remove.props.className).toContain('button-danger-ghost');
+    expect(remove.findAllByType(DeleteOutlined)).toHaveLength(1);
+    const upload = row.find((node) => node.type === 'label' && text(node).includes('Tải tài liệu bổ sung'));
+    expect(upload.findAllByType(UploadOutlined)).toHaveLength(1);
+    expect(buttonByText(row, 'Chọn đoạn từ tài liệu đã có').findAllByType(FileSearchOutlined)).toHaveLength(1);
+    expect(buttonByText(row, 'Vẫn dùng tài liệu hiện có').findAllByType(CheckOutlined)).toHaveLength(1);
+    const add = buttonByText(view.root, 'Thêm module');
+    expect(add.findAllByType(PlusOutlined)).toHaveLength(1);
+    expect(text(add)).not.toContain('+');
+    const icons = view.root.findAll((node) => [CheckOutlined, DeleteOutlined, EditOutlined, FileSearchOutlined, PlusOutlined, UploadOutlined].includes(node.type as never));
+    expect(icons.length).toBeGreaterThan(0);
+    expect(icons.every((icon) => icon.props['aria-hidden'] === 'true')).toBe(true);
+  });
+
+  it('styles the danger and accent buttons with theme tokens', () => {
+    expect(css).toMatch(/\.button-danger-ghost[^{]*\{[^}]*var\(--on-danger\)/);
+    expect(css).toMatch(/\.button-accent[^{]*\{[^}]*var\(--on-primary\)/);
   });
 
   it('shows a skeleton while AI plans the outline', () => {
@@ -429,12 +455,180 @@ describe('Kiểm tra độ phủ in the generator', () => {
       next_step: () => ({ kind: 'awaiting_admin', job: { ...added, planPending: false } }),
     });
     const view = await renderPage(api);
-    act(() => buttonByText(view.root, '+ Thêm module').props.onClick());
+    act(() => buttonByText(view.root, 'Thêm module').props.onClick());
     const form = view.root.findByProps({ 'aria-label': 'Thêm module' });
     act(() => form.findByProps({ 'aria-label': 'Tên module mới' }).props.onChange({ target: { value: 'Mẹo sử dụng' } }));
     await act(async () => { buttonByText(form, 'Thêm vào lộ trình').props.onClick(); });
     expect(api.adminAi).toHaveBeenCalledWith('add_outline_module', { jobId: 'template-1', expectedRevision: 3, title: 'Mẹo sử dụng', description: '' });
     expect(api.adminAi).toHaveBeenCalledWith('next_step', expect.objectContaining({ jobId: 'template-1' }));
+  });
+
+  describe('when the server answers slowly', () => {
+    const SLOW = 'Máy chủ phản hồi chậm. Hãy bấm Thử lại.';
+    const timeout = () => new Error('tools/call timeout');
+    const count = (api: { adminAi: { mock: { calls: unknown[][] } } }, action: string) => api.adminAi.mock.calls.filter(([name]) => name === action).length;
+
+    async function addModule(view: TestRenderer.ReactTestRenderer) {
+      act(() => buttonByText(view.root, 'Thêm module').props.onClick());
+      const form = view.root.findByProps({ 'aria-label': 'Thêm module' });
+      act(() => form.findByProps({ 'aria-label': 'Tên module mới' }).props.onChange({ target: { value: 'Mẹo sử dụng' } }));
+      await act(async () => { buttonByText(form, 'Thêm vào lộ trình').props.onClick(); await vi.advanceTimersByTimeAsync(0); });
+    }
+
+    it('retries a timed-out step-2 action after 2 s without a banner and applies it once', async () => {
+      const job = templateJob(covered);
+      const added = { ...job, outline: { ...job.outline!, revision: 4 } } as AiJobRecord;
+      let sent = 0;
+      let applied = 0;
+      const api = apiFor(job, {
+        add_outline_module: () => { if (sent++ === 0) throw timeout(); applied += 1; return { job: added }; },
+        get_job: () => ({ job }),
+      });
+      const view = await renderPage(api);
+      vi.useFakeTimers();
+      try {
+        await addModule(view);
+        expect(text(view.root.findByType('footer'))).toContain('Máy chủ phản hồi chậm, đang thử lại… (1/3)');
+        expect(allText(view)).not.toContain(SLOW);
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(count(api, 'add_outline_module')).toBe(2);
+      expect(applied).toBe(1);
+      expect(count(api, 'get_job')).toBe(1);
+      expect(allText(view)).not.toContain(SLOW);
+      expect(text(view.root.findByType('footer'))).not.toContain('đang thử lại');
+      expect(activeStep(view)).toBe('Kiểm tra độ phủ');
+    });
+
+    it('does not re-send an action whose change get_job already shows, and pumps on', async () => {
+      const job = templateJob(covered);
+      const added = { ...job, planPending: true, outline: { ...job.outline!, revision: 4, modules: [...covered, moduleAt(4, { title: 'Mẹo sử dụng', sourceSectionIds: [] })] },
+        calls: [...job.calls, { callId: 'supplement-1-b1', stage: 'S', operationId: 'x', status: 'pending', planTarget: 'supplement', supplementModuleLocalId: 'm4' }] } as AiJobRecord;
+      const api = apiFor(job, {
+        add_outline_module: () => { throw timeout(); },
+        get_job: () => ({ job: added }),
+        next_step: () => ({ kind: 'awaiting_admin', job: { ...added, planPending: false } }),
+      });
+      const view = await renderPage(api);
+      vi.useFakeTimers();
+      try {
+        await addModule(view);
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(count(api, 'add_outline_module')).toBe(1);
+      expect(count(api, 'next_step')).toBeGreaterThan(0);
+      expect(allText(view)).not.toContain(SLOW);
+    });
+
+    it('shows the error only after three retries at 2 s, 5 s and 10 s', async () => {
+      const job = templateJob(covered);
+      const api = apiFor(job, {
+        add_outline_module: () => { throw timeout(); },
+        get_job: () => ({ job }),
+      });
+      const view = await renderPage(api);
+      vi.useFakeTimers();
+      try {
+        await addModule(view);
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000 + 5_000); });
+        expect(count(api, 'add_outline_module')).toBe(3);
+        expect(text(view.root.findByType('footer'))).toContain('(3/3)');
+        expect(allText(view)).not.toContain(SLOW);
+        await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(count(api, 'add_outline_module')).toBe(4);
+      expect(allText(view)).toContain(SLOW);
+      expect(text(view.root.findByType('footer'))).not.toContain('đang thử lại');
+    });
+
+    it('re-sends when get_job shows a newer revision without the new module, and shows the server conflict', async () => {
+      const job = templateJob(covered);
+      const other = { ...job, outline: { ...job.outline!, revision: 4 } } as AiJobRecord;
+      let sent = 0;
+      const api = apiFor(job, {
+        add_outline_module: () => {
+          if (sent++ === 0) throw timeout();
+          throw Object.assign(new Error('Outline revision conflict.'), { code: 'OPERATION_CONFLICT' });
+        },
+        get_job: () => ({ job: other }),
+      });
+      const view = await renderPage(api);
+      vi.useFakeTimers();
+      try {
+        await addModule(view);
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(count(api, 'add_outline_module')).toBe(2);
+      expect(allText(view)).toContain('Dữ liệu vừa thay đổi. Hãy thử lại.');
+    });
+
+    it('keeps pumping the supplement read after a timed-out pass the job shows still pending', async () => {
+      const job = templateJob(covered);
+      const added = { ...job, planPending: true, outline: { ...job.outline!, revision: 4 },
+        calls: [...job.calls, { callId: 'supplement-1-b1', stage: 'S', operationId: 'x', status: 'pending', planTarget: 'supplement', supplementModuleLocalId: 'm4' }] } as AiJobRecord;
+      const read = { ...added, planPending: false, calls: added.calls.map((call) => ({ ...call, status: 'completed' })) } as AiJobRecord;
+      let steps = 0;
+      const api = apiFor(job, {
+        add_outline_module: () => ({ job: added }),
+        next_step: () => { if (steps++ === 0) throw timeout(); return { kind: 'awaiting_admin', job: read }; },
+        get_job: () => ({ job: added }),
+      });
+      const view = await renderPage(api);
+      vi.useFakeTimers();
+      try {
+        await addModule(view);
+        await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(count(api, 'next_step')).toBe(2);
+      expect(allText(view)).not.toContain(SLOW);
+      expect(text(view.root.findByType('footer'))).not.toContain('AI đang đọc tài liệu bổ sung');
+    });
+
+    it('stops pumping a supplement read after two passes that changed nothing', async () => {
+      const job = templateJob(covered);
+      const added = { ...job, planPending: true, outline: { ...job.outline!, revision: 4 },
+        calls: [...job.calls, { callId: 'supplement-1-b1', stage: 'S', operationId: 'x', status: 'pending', planTarget: 'supplement', supplementModuleLocalId: 'm4' }] } as AiJobRecord;
+      const api = apiFor(job, {
+        add_outline_module: () => ({ job: added }),
+        next_step: () => ({ kind: 'awaiting_admin', job: added }),
+      });
+      const view = await renderPage(api);
+      vi.useFakeTimers();
+      try {
+        await addModule(view);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(count(api, 'next_step')).toBe(2);
+    });
+
+    it('shows a coded server error at once, without retrying', async () => {
+      const job = templateJob(covered);
+      const api = apiFor(job, {
+        add_outline_module: () => { throw Object.assign(new Error('Outline revision conflict.'), { code: 'OPERATION_CONFLICT' }); },
+      });
+      const view = await renderPage(api);
+      vi.useFakeTimers();
+      try {
+        await addModule(view);
+        expect(allText(view)).toContain('Dữ liệu vừa thay đổi. Hãy thử lại.');
+        await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(count(api, 'add_outline_module')).toBe(1);
+      expect(count(api, 'get_job')).toBe(0);
+    });
   });
 
   it('restores a paused autopilot job (approval reset to 0) on Kiểm tra độ phủ', async () => {

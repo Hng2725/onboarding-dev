@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { AiJobRecord, AiModuleDraftRun, AiProvider, TemplateOutlineModule } from '../src/onboarding/contracts';
 import {
+  choosePumpProvider,
   planQuestionRecovery,
   pumpWithQuestionRecovery,
   shouldBoundNativeQuestionPoll,
@@ -66,6 +67,17 @@ describe('question recovery planning', () => {
     expect(shouldUseNativeForPump({ ...moduleJob, kind: 'inventory' }, false, true)).toBe(true);
   });
 
+  it('runs a chosen Native pass on Sandbox while a Native attempt still awaits cleanup proof', () => {
+    const moduleJob = job({ provider: 'native_chat' });
+    const choice = (patch: Partial<Parameters<typeof choosePumpProvider>[0]>) => choosePumpProvider({
+      job: moduleJob, explicitlyPreferred: true, persistedPreference: true, nativeAvailable: true, nativeBlocked: false, ...patch,
+    });
+    expect(choice({})).toBe('native_chat');
+    expect(choice({ nativeBlocked: true })).toBe('sandbox');
+    expect(choice({ nativeAvailable: false })).toBe('sandbox');
+    expect(choice({ explicitlyPreferred: false })).toBe('sandbox');
+  });
+
   it('bounds explicit and adopted Native question attempts', () => {
     const queued = { ...job(), moduleRuns: [run('queued', 2)] };
     expect(shouldBoundNativeQuestionPoll(queued, true, true)).toBe(true);
@@ -119,7 +131,7 @@ describe('bounded question recovery orchestration', () => {
     const nativeFailed = job({ provider: 'native_chat', version: 2, callVersion: 2 });
     const fallbackReady = { ...nativeFailed, moduleRuns: [{ ...run('review_ready', 3), questionProvenance: 'fallback' as const }] };
     const providers: boolean[] = [];
-    const pumpOnce = vi.fn(async (_job: AiJobRecord, preferNative: boolean) => {
+    const pumpOnce = vi.fn(async (_job: AiJobRecord, preferNative: boolean, _recovering?: string) => {
       providers.push(preferNative);
       return preferNative ? nativeFailed : sandboxFailed;
     });
@@ -133,6 +145,8 @@ describe('bounded question recovery orchestration', () => {
 
     expect(result).toBe(fallbackReady);
     expect(providers).toEqual([false, true]);
+    // Only the Native retry pass is scoped to the module whose questions it recovers.
+    expect(pumpOnce.mock.calls.map((call) => call[2])).toEqual([undefined, outline.moduleLocalId]);
     expect(runAction.mock.calls.map(([action]) => action)).toEqual(['retry_module', 'use_question_fallback']);
     expect(runAction).toHaveBeenNthCalledWith(1, 'retry_module', {
       moduleLocalId: outline.moduleLocalId, target: 'questions', expectedVersion: 1,

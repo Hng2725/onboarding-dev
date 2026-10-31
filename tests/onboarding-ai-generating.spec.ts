@@ -1,6 +1,7 @@
 import { createElement } from 'react';
 import TestRenderer, { act, type ReactTestInstance } from 'react-test-renderer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { PauseCircleOutlined, RedoOutlined } from '@ant-design/icons';
 
 import type { AiCallRecord, AiJobRecord, AiModuleDraftRun, TemplateOutlineModule } from '../src/onboarding/contracts';
 import type { AdminTemplateDetail } from '../src/onboarding/templates';
@@ -245,6 +246,18 @@ describe('AiStepGenerating', () => {
     expect(props.onRetry).toHaveBeenCalledTimes(1);
   });
 
+  it('marks every Thử lại with a redo icon', () => {
+    const stuck = templateJob([doneRun(0), run(1, { lessonState: 'approved', lessonVersion: 1, approvedLessonVersion: 1, questionState: 'failed', questionVersion: 2 })]);
+    const { view } = renderStep(stuck, { stalled: true, error: 'Lỗi.' });
+    const retries = buttonsByText(view.root, 'Thử lại');
+    expect(retries).toHaveLength(2);
+    for (const retry of retries) {
+      const icons = retry.findAllByType(RedoOutlined);
+      expect(icons).toHaveLength(1);
+      expect(icons[0].props['aria-hidden']).toBe('true');
+    }
+  });
+
   it('shows one red banner with the error and Thử lại', () => {
     const { view, props } = renderStep(templateJob([run(0)], { status: 'failed' }), { error: 'Nhà cung cấp AI tạm thời không hoàn tất yêu cầu.' });
     const banners = view.root.findAll((node) => String(node.props.className ?? '').startsWith('ai-generating-banner'));
@@ -426,12 +439,36 @@ describe('AI tạo nội dung in the generator', () => {
     expect(footerPrimary(view).props.disabled).toBe(true);
     const pause = buttonsByText(view.root.findByType('footer'), 'Tạm dừng & sửa lộ trình');
     expect(pause).toHaveLength(1);
+    expect(pause[0].findAllByType(PauseCircleOutlined)).toHaveLength(1);
     expect(pause[0].props.disabled).toBe(false);
     await act(async () => { pause[0].props.onClick(); });
     expect(api.adminAi).toHaveBeenCalledWith('pause_autopilot', { jobId: 'template-1' });
     expect(activeStep(view)).toBe('Kiểm tra độ phủ');
     await act(async () => { step.resolve({ kind: 'awaiting_admin', job }); await Promise.resolve(); });
     expect(activeStep(view)).toBe('Kiểm tra độ phủ');
+  });
+
+  it('asks the provider to stop a paused attempt whose cleanup is unknown as well as pending', async () => {
+    const job = templateJob([doneRun(0), run(1)]);
+    const step = deferred<unknown>();
+    const observed: AiCallRecord = { ...moduleCall('module-3', 'm1', 'lesson', 'failed', 0), provider: 'sandbox', attemptRef: 'sandbox-observed', cleanupState: 'unknown' };
+    const pending: AiCallRecord = { ...moduleCall('module-4', 'm1', 'lesson', 'failed', 0), provider: 'sandbox', attemptRef: 'sandbox-pending', cleanupState: 'pending' };
+    const paused = { ...job, outlineApprovedRevision: 0, calls: [...job.calls, observed, pending] };
+    host.app.rest.mockResolvedValue({ status: 'cancelled' });
+    const api = apiFor(job, {
+      next_step: () => step.promise,
+      pause_autopilot: () => ({ job: paused }),
+      record_attempt_cleanup: () => ({ job: paused }),
+    });
+    try {
+      const view = await renderPage(api);
+      await act(async () => { buttonsByText(view.root.findByType('footer'), 'Tạm dừng & sửa lộ trình')[0].props.onClick(); });
+      await act(async () => { await Promise.resolve(); });
+      const reported = api.adminAi.mock.calls.filter(([action]) => action === 'record_attempt_cleanup').map(([, args]) => (args as { callId: string }).callId);
+      expect(reported).toEqual(['module-3', 'module-4']);
+    } finally {
+      host.app.rest.mockReset();
+    }
   });
 
   it('never pumps a job whose autopilot upgrade failed; the banner retries the upgrade first', async () => {
@@ -561,15 +598,314 @@ describe('AI tạo nội dung in the generator', () => {
     expect(activeStep(view)).toBe('Xem lại & xuất bản');
   });
 
-  it('shows the Vietnamese timeout banner only when reconciling the job fails too', async () => {
+  it('shows the Vietnamese timeout banner only when reconciling fails too, after three automatic retries', async () => {
     const job = templateJob([doneRun(0), run(1)]);
+    const first = deferred<unknown>();
+    let steps = 0;
     const api = apiFor(job, {
-      next_step: () => { throw new Error('tools/call timeout'); },
+      next_step: () => (steps++ === 0 ? first.promise : Promise.reject(new Error('tools/call timeout'))),
       get_job: () => { throw new Error('tools/call timeout'); },
     });
     const view = await renderPage(api);
+    const banners = () => view.root.findAll((node) => String(node.props.className ?? '').startsWith('ai-generating-banner'));
+    vi.useFakeTimers();
+    try {
+      await act(async () => { first.resolve(Promise.reject(new Error('tools/call timeout'))); await vi.advanceTimersByTimeAsync(0); });
+      expect(banners()).toHaveLength(0);
+      expect(text(view.root.findByType('footer'))).toContain('Máy chủ phản hồi chậm, đang thử lại… (1/3)');
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000 + 5_000); });
+      expect(banners()).toHaveLength(0);
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(actions(api).filter((action) => action === 'next_step')).toHaveLength(4);
     const banner = view.root.findByProps({ className: 'ai-generating-banner error' });
     expect(text(banner)).toContain('Máy chủ phản hồi chậm. Hãy bấm Thử lại.');
+    expect(text(view.root.findByType('footer'))).not.toContain('đang thử lại');
+  });
+
+  it('shows a job the server marked failed at once, with an enabled Thử lại and no automatic retry', async () => {
+    const job = templateJob([doneRun(0), run(1)]);
+    const failed = { ...job, status: 'failed' as const, errorCode: 'AI_TIMEOUT', errorMessage: 'Timed out.' };
+    const api = apiFor(job, {
+      next_step: () => ({ kind: 'failed', job: failed }),
+      get_job: () => ({ job: failed }),
+    });
+    const view = await renderPage(api);
+    expect(text(view.root.findByType('footer'))).not.toContain('đang thử lại');
+    const banner = view.root.findByProps({ className: 'ai-generating-banner error' });
+    expect(text(banner)).toContain('AI xử lý quá thời gian. Hãy thử lại job.');
+    expect(buttonsByText(banner, 'Thử lại')[0].props.disabled).toBe(false);
+    expect(actions(api).filter((action) => action === 'next_step')).toHaveLength(1);
+  });
+
+  it('does not retry a timed-out pump once get_job shows the job failed', async () => {
+    const job = templateJob([doneRun(0), run(1)]);
+    const failed = { ...job, status: 'failed' as const, errorCode: 'AI_TIMEOUT', errorMessage: 'Timed out.' };
+    const api = apiFor(job, {
+      next_step: () => { throw new Error('tools/call timeout'); },
+      get_job: () => ({ job: failed }),
+    });
+    const view = await renderPage(api);
+    expect(text(view.root.findByType('footer'))).not.toContain('đang thử lại');
+    const banner = view.root.findByProps({ className: 'ai-generating-banner error' });
+    expect(text(banner)).toContain('AI xử lý quá thời gian. Hãy thử lại job.');
+    expect(buttonsByText(banner, 'Thử lại')[0].props.disabled).toBe(false);
+    expect(actions(api).filter((action) => action === 'next_step')).toHaveLength(1);
+    expect(actions(api).filter((action) => action === 'get_job')).toHaveLength(1);
+  });
+
+  it('stops retrying a timed-out pump once the Admin pauses during the wait', async () => {
+    const job = templateJob([doneRun(0), run(1)]);
+    const first = deferred<unknown>();
+    let steps = 0;
+    const api = apiFor(job, {
+      next_step: () => (steps++ === 0 ? first.promise : { kind: 'awaiting_admin', job }),
+      get_job: () => { throw new Error('tools/call timeout'); },
+      pause_autopilot: () => ({ job: { ...job, outlineApprovedRevision: 0 } }),
+    });
+    const view = await renderPage(api);
+    vi.useFakeTimers();
+    try {
+      await act(async () => { first.resolve(Promise.reject(new Error('tools/call timeout'))); await vi.advanceTimersByTimeAsync(0); });
+      await act(async () => { buttonsByText(view.root.findByType('footer'), 'Tạm dừng & sửa lộ trình')[0].props.onClick(); await vi.advanceTimersByTimeAsync(0); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(actions(api).filter((action) => action === 'next_step')).toHaveLength(1);
+    expect(activeStep(view)).toBe('Kiểm tra độ phủ');
+    expect(allText(view)).not.toContain('Máy chủ phản hồi chậm');
+  });
+
+  /**
+   * Live 2026-10-30 04:01 → 04:18: module-4 completed, the next module's Native lesson (module-5)
+   * timed out with its cleanup still pending, and the server answered every next_step with `wait`
+   * (the room fence) until a reopen confirmed the attempt had stopped. The open modal must do that itself.
+   */
+  describe('a Native attempt whose cleanup is still pending', () => {
+    const nativeRef = 'native-chat:session-5:message-5';
+    const planCall: AiCallRecord = { callId: 'plan-1', stage: 'P', operationId: 'template-1:plan-1', status: 'completed', planTarget: 'plan' };
+    const completed4: AiCallRecord = { ...moduleCall('module-4', 'm0', 'questions', 'completed'), provider: 'native_chat', attemptRef: 'native-chat:session-4:message-4', cleanupState: 'confirmed' };
+    const live5: AiCallRecord = { ...moduleCall('module-5', 'm1', 'lesson', 'dispatched', 0), provider: 'native_chat', attemptRef: nativeRef, startedAt: '2026-10-29T08:00:00.000Z' };
+    const fallbackLesson = { lessonState: 'approved' as const, lessonVersion: 1, approvedLessonVersion: 1, lessonProvenance: 'fallback' as const, questionState: 'queued' as const, questionVersion: 0 };
+
+    function jobs(cleanupState: 'pending' | 'unknown' | 'confirmed', revision: number) {
+      const failed5: AiCallRecord = { ...live5, status: 'failed', errors: ['AI_TIMEOUT'], finishedAt: '2026-10-29T08:01:53.000Z', cleanupState };
+      return templateJob([doneRun(0), run(1, fallbackLesson), run(2)], {
+        calls: [planCall, completed4, failed5, moduleCall('module-6', 'm1', 'questions', 'pending', 0)],
+        updatedAt: '2026-10-29T08:0' + String(revision) + ':00.000Z',
+      });
+    }
+
+    function nativeMessage(status: string) {
+      return { messages: [{ _id: 'message-5', sessionId: 'session-5', roomId: 'room-1', type: 'ai', status, content: '{}' }] };
+    }
+
+    afterEach(() => { host.app.rest.mockReset(); });
+
+    it('re-checks the cleanup while the server waits, says so, and dispatches the next call without a remount', async () => {
+      const before = templateJob([doneRun(0), run(1, { lessonState: 'drafting' }), run(2)], { calls: [planCall, completed4, live5] });
+      let cleanup: 'pending' | 'unknown' | 'confirmed' = 'pending';
+      let revision = 2;
+      let nativeChecks = 0;
+      let steps = 0;
+      // The first step is held until fake timers run, so every later wait uses them.
+      const gate = deferred<void>();
+      host.app.rest.mockImplementation(async (request: { path: string }) => {
+        if (request.path === 'ai-messages.list') {
+          nativeChecks += 1;
+          // Still generating at the 90 s deadline and at the first re-check; it finished minutes later (04:05:40).
+          return nativeMessage(nativeChecks <= 2 ? 'processing' : 'completed');
+        }
+        if (request.path === 'agents.sandbox.generate-async') return { attemptId: 'sandbox-6' };
+        if (request.path === 'agents.sandbox.attempt-status') return { status: 'running' };
+        throw new Error('Unexpected REST call: ' + request.path);
+      });
+      const api = apiFor(before, {
+        next_step: async () => {
+          steps += 1;
+          if (steps === 1) {
+            await gate.promise;
+            return { kind: 'ai_call', callId: 'module-5', operationId: 'template-1:module-5', prompt: 'p', attemptRef: nativeRef, provider: 'native_chat', startedAt: live5.startedAt, moduleTarget: 'lesson' };
+          }
+          // The room fence: nothing is dispatched while the Native attempt may still run.
+          if (cleanup !== 'confirmed') return { kind: 'wait', job: jobs(cleanup, revision) };
+          return { kind: 'ai_call', callId: 'module-6', operationId: 'template-1:module-6', prompt: 'p', moduleTarget: 'questions' };
+        },
+        report_ai_failure: () => jobs('pending', revision),
+        record_attempt_cleanup: (args) => {
+          cleanup = args.state as typeof cleanup;
+          revision += 1;
+          return { job: jobs(cleanup, revision) };
+        },
+        record_dispatch: () => ({ ...jobs('confirmed', revision), calls: jobs('confirmed', revision).calls.map((call) => call.callId === 'module-6' ? { ...call, status: 'dispatched', attemptRef: 'sandbox-6', provider: 'sandbox' } : call) }),
+      });
+      const view = await renderPage(api);
+      vi.useFakeTimers();
+      try {
+        await act(async () => { gate.resolve(); await vi.advanceTimersByTimeAsync(4_000); });
+        expect(api.adminAi).toHaveBeenCalledWith('report_ai_failure', expect.objectContaining({ callId: 'module-5', kind: 'timeout' }));
+        expect(allText(view)).toContain('Đang chờ lượt AI trước dừng hẳn…');
+        expect(view.root.findAll((node) => String(node.props.className ?? '').startsWith('ai-generating-banner'))).toHaveLength(0);
+        await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(api.adminAi).toHaveBeenCalledWith('record_attempt_cleanup', expect.objectContaining({ callId: 'module-5', attemptRef: nativeRef, state: 'confirmed' }));
+      // Observing never cancels: the provider simply finished.
+      expect(host.app.rest.mock.calls.some(([request]) => String((request as { path: string }).path).includes('cancel'))).toBe(false);
+      expect(api.adminAi).toHaveBeenCalledWith('record_dispatch', expect.objectContaining({ callId: 'module-6', attemptRef: 'sandbox-6', provider: 'sandbox' }));
+      expect(activeStep(view)).toBe('AI tạo nội dung');
+      expect(view.root.findAll((node) => String(node.props.className ?? '').startsWith('ai-generating-banner'))).toHaveLength(0);
+    });
+
+    it('keeps polling a waiting job, then shows the stalled banner only after about 3 minutes without progress', async () => {
+      const job = templateJob([doneRun(0), run(1)]);
+      const gate = deferred<void>();
+      let steps = 0;
+      const api = apiFor(job, { next_step: async () => { if (steps++ === 0) await gate.promise; return { kind: 'wait', job }; } });
+      const view = await renderPage(api);
+      const banners = () => view.root.findAll((node) => String(node.props.className ?? '').startsWith('ai-generating-banner'));
+      vi.useFakeTimers();
+      try {
+        await act(async () => { gate.resolve(); await vi.advanceTimersByTimeAsync(170_000); });
+        expect(banners()).toHaveLength(0);
+        expect(allText(view)).toContain('Đang chờ lượt AI…');
+        const polls = actions(api).filter((action) => action === 'next_step').length;
+        expect(polls).toBeGreaterThan(40);
+        await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      } finally {
+        vi.useRealTimers();
+      }
+      const banner = view.root.findByProps({ className: 'ai-generating-banner warn' });
+      expect(text(banner)).toContain('AI đang chờ để làm tiếp.');
+      expect(buttonsByText(banner, 'Thử lại')[0].props.disabled).toBe(false);
+      expect(allText(view)).not.toContain('Đang chờ lượt AI…');
+      const polls = actions(api).filter((action) => action === 'next_step').length;
+      await act(async () => { buttonsByText(banner, 'Thử lại')[0].props.onClick(); });
+      expect(actions(api).filter((action) => action === 'next_step').length).toBeGreaterThan(polls);
+    });
+
+    it('does not count a wait whose job keeps changing as a stall', async () => {
+      let revision = 0;
+      const gate = deferred<void>();
+      const api = apiFor(templateJob([doneRun(0), run(1)]), {
+        next_step: async () => {
+          if (revision === 0) await gate.promise;
+          revision += 1;
+          return { kind: 'wait', job: templateJob([doneRun(0), run(1)], { updatedAt: new Date(Date.parse('2026-10-29T08:00:00.000Z') + revision * 1000).toISOString() }) };
+        },
+      });
+      const view = await renderPage(api);
+      vi.useFakeTimers();
+      try {
+        await act(async () => { gate.resolve(); await vi.advanceTimersByTimeAsync(400_000); });
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(view.root.findAll((node) => String(node.props.className ?? '').startsWith('ai-generating-banner'))).toHaveLength(0);
+    });
+  });
+
+  /** Live 2026-10-30: the first reopen during a running job landed on Nguồn & loại with a bare error. */
+  describe('restoring a running job on reopen', () => {
+    const restoreAlert = (view: TestRenderer.ReactTestRenderer) => view.root.findAll((node) => String(node.props.className ?? '').includes('ai-restore-error'));
+
+    it('retries a list_jobs that timed out and resumes the running job without a click', async () => {
+      const job = templateJob([doneRun(0), run(1)]);
+      const gate = deferred<void>();
+      let lists = 0;
+      const api = apiFor(job, {
+        list_jobs: async () => {
+          lists += 1;
+          if (lists === 1) { await gate.promise; throw new Error('tools/call timeout'); }
+          return { jobs: [inventory, job] };
+        },
+        next_step: () => ({ kind: 'awaiting_admin', job }),
+      });
+      const view = await renderPage(api);
+      vi.useFakeTimers();
+      try {
+        await act(async () => { gate.resolve(); await vi.advanceTimersByTimeAsync(0); });
+        expect(text(view.root.findByType('footer'))).toContain('Máy chủ phản hồi chậm, đang thử lại… (1/3)');
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      } finally {
+        vi.useRealTimers();
+      }
+      await act(async () => { await Promise.resolve(); });
+      expect(lists).toBe(2);
+      expect(activeStep(view)).toBe('AI tạo nội dung');
+      expect(actions(api)).toContain('next_step');
+      expect(restoreAlert(view)).toHaveLength(0);
+      expect(allText(view)).not.toContain('Không thể hoàn tất yêu cầu AI.');
+    });
+
+    it('still restores the running job when cleanup reconciliation fails', async () => {
+      const unproven: AiCallRecord = { ...moduleCall('module-2', 'm0', 'lesson', 'failed', 0), provider: 'sandbox', attemptRef: 'sandbox-old', cleanupState: 'pending' };
+      const job = templateJob([doneRun(0), run(1)], { calls: [unproven] });
+      host.app.rest.mockResolvedValue({ status: 'failed' });
+      const api = apiFor(job, {
+        record_attempt_cleanup: () => { throw Object.assign(new Error('Conflict.'), { code: 'OPERATION_CONFLICT' }); },
+        next_step: () => ({ kind: 'awaiting_admin', job }),
+      });
+      try {
+        const view = await renderPage(api);
+        await act(async () => { await Promise.resolve(); });
+        expect(actions(api)).toContain('record_attempt_cleanup');
+        expect(activeStep(view)).toBe('AI tạo nội dung');
+        expect(actions(api)).toContain('next_step');
+        expect(restoreAlert(view)).toHaveLength(0);
+      } finally {
+        host.app.rest.mockReset();
+      }
+    });
+
+    it('opens a completed job whose review failed to load on AI tạo nội dung with Thử lại, not on Nguồn & loại', async () => {
+      const done = templateJob([doneRun(0), doneRun(1)], { status: 'completed', result: { templateId: 'draft-1', version: 1 } });
+      let reviews = 0;
+      const api = apiFor(done, {
+        get_review: () => {
+          reviews += 1;
+          if (reviews === 1) throw Object.assign(new Error('Review store failed.'), { code: 'STORE_UNAVAILABLE' });
+          return { review };
+        },
+        next_step: () => ({ kind: 'done', job: done }),
+      });
+      const view = await renderPage(api);
+      expect(activeStep(view)).toBe('AI tạo nội dung');
+      expect(restoreAlert(view)).toHaveLength(0);
+      const banner = view.root.findByProps({ className: 'ai-generating-banner warn' });
+      await act(async () => { buttonsByText(banner, 'Thử lại')[0].props.onClick(); });
+      expect(activeStep(view)).toBe('Xem lại & xuất bản');
+    });
+
+    it('shows the restore error with a Thử lại that restores again, instead of dropping to Nguồn & loại silently', async () => {
+      const job = templateJob([doneRun(0), run(1)]);
+      let lists = 0;
+      const api = apiFor(job, {
+        list_jobs: () => {
+          lists += 1;
+          if (lists === 1) throw Object.assign(new Error('Store unavailable'), { code: 'STORE_UNAVAILABLE' });
+          return { jobs: [inventory, job] };
+        },
+        next_step: () => ({ kind: 'awaiting_admin', job }),
+      });
+      const view = await renderPage(api);
+      const alert = restoreAlert(view);
+      expect(alert).toHaveLength(1);
+      expect(alert[0].props.role).toBe('alert');
+      expect(text(alert[0])).toContain('Không mở lại được phiên tạo template. Không thể hoàn tất yêu cầu AI.');
+      const retry = buttonsByText(alert[0], 'Thử lại');
+      expect(retry).toHaveLength(1);
+      expect(actions(api)).not.toContain('next_step');
+      await act(async () => { retry[0].props.onClick(); });
+      expect(lists).toBe(2);
+      expect(restoreAlert(view)).toHaveLength(0);
+      expect(activeStep(view)).toBe('AI tạo nội dung');
+      expect(actions(api)).toContain('next_step');
+    });
   });
 
   it('opens a restored completed job on its review without pumping', async () => {

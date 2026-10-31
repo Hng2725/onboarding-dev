@@ -395,6 +395,7 @@ export type AiJobNextStep =
     readonly provider?: AiProvider;
     readonly startedAt?: string;
     readonly moduleTarget?: 'lesson' | 'questions';
+    readonly moduleLocalId?: string;
   }
   | { readonly kind: 'wait'; readonly job: AiJobRecord }
   | { readonly kind: 'awaiting_admin'; readonly job: AiJobRecord }
@@ -1414,6 +1415,7 @@ export function createAiJobService(
       operationId: call.operationId,
       ...request,
       ...(call.moduleTarget ? { moduleTarget: call.moduleTarget } : {}),
+      ...(call.moduleLocalId ? { moduleLocalId: call.moduleLocalId } : {}),
       ...(call.attemptRef ? { attemptRef: call.attemptRef, provider: callProvider(call), startedAt: call.startedAt } : {}),
     };
   }

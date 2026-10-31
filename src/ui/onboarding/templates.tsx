@@ -38,6 +38,7 @@ import {
   newQuestion,
   preloadTemplateDetails,
   templateDetailCacheKey,
+  templateDetailNeedsReload,
   templateEditorTransition,
   type TemplateDetailCacheEntry,
   type TemplateCatalogView,
@@ -46,7 +47,7 @@ import {
   type TemplateStatusFilter,
 } from './template-editor-ui';
 import { usePolling, type PollReason } from './polling';
-import { AiGeneratorPage } from './ai/ai-generator';
+import { AI_DRAFT_SAVED_NOTICE, AiGeneratorPage } from './ai/ai-generator';
 import { ensureOnboardingRoomfiles } from './roomfiles';
 
 export {
@@ -61,6 +62,7 @@ export {
   newQuestion,
   preloadTemplateDetails,
   templateDetailCacheKey,
+  templateDetailNeedsReload,
   templateDetailActions,
   templateDetailActions as templateActions,
   templateEditorTransition,
@@ -252,6 +254,13 @@ export function TemplatesPage({
   const detailLoading = Boolean(detailItem && !detailEntry);
   const detailError = detailActionError ?? detailEntry?.error ?? null;
 
+  /** Opens a card: a draft shows loading and is read again, never the cached copy of an older state. */
+  function openDetail(item: TemplateCatalogView) {
+    setDetailActionError(null);
+    setDetailItem(item);
+    if (templateDetailNeedsReload(item)) void retryDetail(item);
+  }
+
   async function retryDetail(item: TemplateCatalogView) {
     const key = templateDetailCacheKey(item);
     const next = new Map(detailCacheRef.current);
@@ -338,11 +347,11 @@ export function TemplatesPage({
     <InlineNotice notice={notice} onDismiss={() => setNotice(null)} />
     <TemplateLibraryToolbar query={query} status={statusFilter} count={filteredItems.length} total={items.length} onQueryChange={setQuery} onStatusChange={setStatusFilter} />
     {filteredItems.length > 0
-      ? <section className="template-grid">{filteredItems.map((item) => <TemplateCard item={item} key={item.id + '@' + item.version} onOpen={() => { setDetailActionError(null); setDetailItem(item); }} />)}</section>
+      ? <section className="template-grid">{filteredItems.map((item) => <TemplateCard item={item} key={item.id + '@' + item.version} onOpen={() => openDetail(item)} />)}</section>
       : <section className="template-search-empty"><SearchOutlined /><strong>Không tìm thấy template</strong><p>Thử tìm bằng một tên khác.</p></section>}
     {detailItem && <TemplateModalLayer><div className="dialog-backdrop template-detail-backdrop" role="presentation" onMouseDown={() => setDetailItem(null)}><TemplateDetailPanel detail={detail} loading={detailLoading} error={detailError} onClose={() => setDetailItem(null)} onRetry={() => void retryDetail(detailItem)} onAction={(action) => void runDetailAction(action)} /></div></TemplateModalLayer>}
     {/* AiGeneratorPage owns its backdrop: ×, Esc and a backdrop click all go through its close confirmation. */}
-    {aiOpen && <TemplateModalLayer><AiGeneratorPage api={api} canGenerateWithAi={canGenerateWithAi} initialTemplate={reviewTarget} onClose={() => setAiOpen(false)} onComplete={() => { setAiOpen(false); setNotice({ message: 'Đã xuất bản template AI.', tone: 'success' }); void refresh(); }} /></TemplateModalLayer>}
+    {aiOpen && <TemplateModalLayer><AiGeneratorPage api={api} canGenerateWithAi={canGenerateWithAi} initialTemplate={reviewTarget} onClose={() => setAiOpen(false)} onComplete={(outcome) => { setAiOpen(false); setNotice({ message: outcome === 'draft' ? AI_DRAFT_SAVED_NOTICE : 'Đã xuất bản template AI.', tone: 'success' }); void refresh(); }} /></TemplateModalLayer>}
     {pendingDelete && <TemplateModalLayer><ConfirmDialog open title="Xóa template?" description="Chỉ có thể xóa template chưa được gán cho nhân sự." confirmLabel="Xóa template" busy={deleting} busyLabel="Đang xóa…" onCancel={() => { if (!deleting) setPendingDelete(null); }} onConfirm={() => void confirmDelete()} /></TemplateModalLayer>}
   </div>;
 }
@@ -601,7 +610,7 @@ export function LegacyTemplatesPage({ api, onUseTemplate }: { api: OnboardingApi
       onStatusChange={setStatusFilter}
     />
     {filteredItems.length > 0
-      ? <section className="template-grid">{filteredItems.map((item) => <TemplateCard item={item} key={`${item.id}@${item.version}`} onOpen={() => { setDetailActionError(null); setDetailItem(item); }} />)}</section>
+      ? <section className="template-grid">{filteredItems.map((item) => <TemplateCard item={item} key={`${item.id}@${item.version}`} onOpen={() => { setDetailActionError(null); setDetailItem(item); if (templateDetailNeedsReload(item)) void retryDetail(item); }} />)}</section>
       : <section className="template-search-empty"><SearchOutlined /><strong>Không tìm thấy template</strong><p>Thử tìm bằng một tên khác.</p></section>}
 
     {detailItem && <TemplateModalLayer><div className="dialog-backdrop template-detail-backdrop" role="presentation" onMouseDown={() => { setDetailItem(null); setDetailActionError(null); }}><TemplateDetailPanel detail={detail} loading={detailLoading} error={detailError} onClose={() => { setDetailItem(null); setDetailActionError(null); }} onRetry={() => void retryDetail(detailItem)} onAction={(action) => void runDetailAction(action)} /></div></TemplateModalLayer>}

@@ -1,11 +1,14 @@
 import {
   CheckOutlined,
   CloseOutlined,
+  DeleteOutlined,
   LoadingOutlined,
+  PauseCircleOutlined,
   RedoOutlined,
   RobotOutlined,
+  SaveOutlined,
 } from '@ant-design/icons';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { usePrivosApp, usePrivosContext, type McpApp } from '@privos_ai/app-react';
 
 import type {
@@ -36,12 +39,21 @@ import {
   isNativeChatAttempt,
 } from './ai-gateway-native-chat';
 import { actionableProviderFailure, errorCode, vietnameseErrorMessage } from './ai-labels';
-import { isTransportFailure, pumpAiJob, reconcileJobAfterTransportFailure } from './ai-pump';
+import {
+  AI_PUMP_STALLED,
+  failedJobError,
+  isTransportFailure,
+  jobChangeApplied,
+  pumpAiJob,
+  reconcileJobAfterTransportFailure,
+  withTransientRetry,
+  type JobChange,
+} from './ai-pump';
 import { pumpWithInventoryRecovery } from './inventory-recovery';
 import {
+  choosePumpProvider,
   pumpWithQuestionRecovery,
   shouldBoundNativeQuestionPoll,
-  shouldUseNativeForPump,
 } from './question-recovery';
 import { AiReview } from './ai-review';
 import { AiStepSources } from './ai-step-sources';
@@ -92,8 +104,29 @@ const QUESTION_RECOVERY_NATIVE_TIMEOUT_MS = 90_000;
 /** A generation run stops after this many consecutive pump passes that changed nothing. */
 const MAX_IDLE_GENERATION_PASSES = 2;
 
+/** The server may answer `wait` this long with an unchanged job before AI tạo nội dung shows it stalled. */
+export const GENERATION_STALL_MS = 180_000;
+/** While the server waits on an attempt whose cleanup is unproven, it is observed again this often. */
+export const CLEANUP_RECHECK_MS = 15_000;
+/** Status while the room AI is fenced by an earlier attempt that may still run. */
+export const WAITING_FOR_CLEANUP_TEXT = 'Đang chờ lượt AI trước dừng hẳn…';
+/** Leads the restore error, so the Admin knows which request failed. */
+export const RESTORE_FAILED_PREFIX = 'Không mở lại được phiên tạo template. ';
+/** Status while the server waits for the room AI for any other reason (busy provider, another tab). */
+export const WAITING_FOR_AI_TEXT = 'Đang chờ lượt AI…';
+
 export const OUTLINE_RECHECK_NOTICE = 'Lộ trình cần kiểm tra lại trước khi tạo tiếp.';
 export const AUTOPILOT_MISSING_NOTICE = 'Chưa bật được chế độ AI tự động cho job này.';
+/** Shown once a new session saved its template: it waits in the library until it is published. */
+export const AI_DRAFT_SAVED_NOTICE = 'Đã lưu template vào thư viện ở trạng thái Bản nháp. Mở template để xuất bản khi sẵn sàng.';
+
+/** How a generator session ended: a new template saved as a draft, or an opened draft published. */
+export type AiGeneratorOutcome = 'draft' | 'published';
+
+/** Footer status while a code-less failure is retried automatically. */
+export function transientRetryText(attempt: number, total: number): string {
+  return 'Máy chủ phản hồi chậm, đang thử lại… (' + String(attempt) + '/' + String(total) + ')';
+}
 const CATALOG_LOAD_FAILED = 'Không tải được danh sách tài liệu.';
 
 /** Changes whenever a pump pass moved the job; an unchanged fingerprint means it stalled. */
@@ -546,14 +579,26 @@ export function lessonPdfResourceId(moduleId: string): string {
   return `ai-lesson-pdf-${moduleId}`;
 }
 
+const TEMPLATE_UPDATE_FAILED = 'Không thể cập nhật template.';
+/** vietnameseErrorMessage's text for an English error without a code. */
+const GENERIC_AI_ERROR = 'Không thể hoàn tất yêu cầu AI.';
+
+/** What a lesson PDF is rendered from; uploads of a failed Lưu template stay valid while it holds. */
+function lessonPdfKey(review: AdminTemplateDetail): string {
+  return JSON.stringify([review.id, review.version, review.title,
+    review.modules.map(({ resources: _resources, ...module }) => module), review.content?.modules]);
+}
+
 function contextualPublishError(
   review: AdminTemplateDetail,
   error: unknown,
   moduleTitle?: string,
+  fallback = 'Không thể hoàn tất thao tác Roomfiles.',
 ): Error {
-  const detail = error instanceof Error && error.message.trim()
-    ? error.message.trim()
-    : 'Không thể hoàn tất thao tác Roomfiles.';
+  // Never the raw server or SDK text: the Vietnamese message, after the template and module it
+  // concerns; an English error without a code says which step did not finish.
+  const message = vietnameseErrorMessage(error);
+  const detail = message === GENERIC_AI_ERROR ? fallback : message;
   return new Error(`${review.title}${moduleTitle ? ` · ${moduleTitle}` : ''}: ${detail}`);
 }
 
@@ -601,16 +646,23 @@ export function createAiPublishDependencies(
       }));
     },
     async prepareResources(target, checkpoint) {
-      let review = (await input.api.adminAi<{ review: AdminTemplateDetail }>('get_review', { templateId: target.review.id, version: target.review.version })).review;
-      if (aiPublishTargetKey(review) !== aiPublishTargetKey(target.review)) throw new Error('Template đã thay đổi. Hãy kiểm tra bản nháp mới.');
-      const settings = input.settingsByKind?.[target.kind];
-      if (settings && (settings.passingScore !== review.passingScore
-        || settings.learningMode !== review.content?.learningMode
-        || settings.maxAttemptsPerModule !== review.content?.maxAttemptsPerModule)) {
-        review = (await input.api.adminAi<{ review: AdminTemplateDetail }>('update_review', {
-          templateId: review.id, version: review.version, expectedUpdatedAt: review.updatedAt,
-          ops: [{ kind: 'set_settings', ...settings }],
-        })).review;
+      let review = target.review;
+      try {
+        review = (await input.api.adminAi<{ review: AdminTemplateDetail }>('get_review', { templateId: target.review.id, version: target.review.version })).review;
+        if (aiPublishTargetKey(review) !== aiPublishTargetKey(target.review)) throw new Error('Template đã thay đổi. Hãy kiểm tra bản nháp mới.');
+        const settings = input.settingsByKind?.[target.kind];
+        if (settings && (settings.passingScore !== review.passingScore
+          || settings.learningMode !== review.content?.learningMode
+          || settings.maxAttemptsPerModule !== review.content?.maxAttemptsPerModule)) {
+          review = (await input.api.adminAi<{ review: AdminTemplateDetail }>('update_review', {
+            templateId: review.id, version: review.version, expectedUpdatedAt: review.updatedAt,
+            ops: [{ kind: 'set_settings', ...settings }],
+          })).review;
+        }
+      } catch (error) {
+        const contextual = contextualPublishError(review, error, undefined, TEMPLATE_UPDATE_FAILED);
+        report(review, 'updating_review', { error: contextual.message });
+        throw contextual;
       }
       if (review.status === 'published') return review;
       const uploadedResources: Record<string, TemplateResource> = {
@@ -677,7 +729,8 @@ export function createAiPublishDependencies(
           }
           resourceOperations.push({ kind: 'upsert_generated_resource', moduleId: module.id, resource });
         } catch (error) {
-          const contextual = contextualPublishError(review, error, module.title);
+          const contextual = contextualPublishError(review, error, module.title,
+            activeStage === 'creating_pdf' ? 'Không tạo được PDF bài học.' : undefined);
           report(review, activeStage, { ...progress, error: contextual.message });
           throw contextual;
         }
@@ -696,7 +749,7 @@ export function createAiPublishDependencies(
         });
         return result.review;
       } catch (error) {
-        const contextual = contextualPublishError(review, error);
+        const contextual = contextualPublishError(review, error, undefined, TEMPLATE_UPDATE_FAILED);
         report(review, 'updating_review', { error: contextual.message });
         throw contextual;
       }
@@ -712,7 +765,7 @@ export function createAiPublishDependencies(
           expectedUpdatedAt: review.updatedAt,
         })).template;
       } catch (error) {
-        const contextual = contextualPublishError(review, error);
+        const contextual = contextualPublishError(review, error, undefined, TEMPLATE_UPDATE_FAILED);
         report(review, 'publishing', { error: contextual.message });
         throw contextual;
       }
@@ -800,7 +853,7 @@ export function AiGeneratorPage({
   canGenerateWithAi: boolean;
   initialTemplate?: { readonly id: string; readonly version: number };
   onClose: () => void;
-  onComplete: () => void;
+  onComplete: (outcome: AiGeneratorOutcome) => void;
 }) {
   const app = usePrivosApp();
   const context = usePrivosContext();
@@ -826,7 +879,7 @@ export function AiGeneratorPage({
   const [publishProgress, setPublishProgress] = useState<AiPublishFileProgress | null>(null);
   const [activeReviewIndex, setActiveReviewIndex] = useState(0);
   /** The operation in flight; busy labels and the close confirmation depend on which one it is. */
-  const [operation, setOperation] = useState<'upload' | 'analyze' | 'approve' | 'save' | 'publish' | null>(null);
+  const [operation, setOperation] = useState<'upload' | 'analyze' | 'approve' | 'save' | 'publish' | 'saveDraft' | null>(null);
   const busy = operation !== null;
   const [editingOutline, setEditingOutline] = useState(false);
   const [outlineFocusModuleId, setOutlineFocusModuleId] = useState<string | null>(null);
@@ -843,19 +896,38 @@ export function AiGeneratorPage({
   const [generationError, setGenerationError] = useState<{ readonly message: string; readonly fromPrepare: boolean } | null>(null);
   const [stalled, setStalled] = useState(false);
   const [pausing, setPausing] = useState(false);
+  /** Lưu template failed; the primary offers Thử lại lưu until it succeeds or the draft changes. */
+  const [draftSaveFailed, setDraftSaveFailed] = useState(false);
+  /** Lesson PDFs a failed Lưu template already uploaded, for the draft they were rendered from. */
+  const draftSaveResourcesRef = useRef<{ readonly key: string; readonly resources: Readonly<Record<string, TemplateResource>> } | null>(null);
+  /** Set while a code-less failure is being retried automatically; the footer says so. */
+  const [retryStatus, setRetryStatus] = useState<string | null>(null);
   /** Xem lại & xuất bản: a module edit or rewrite is being pumped through the job. */
   const [moduleUpdating, setModuleUpdating] = useState(false);
   const [roomJobs, setRoomJobs] = useState<readonly AiJobRecord[]>([]);
+  /** Read by a pump that started several renders ago; always the latest room jobs. */
+  const roomJobsRef = useRef<readonly AiJobRecord[]>([]);
+  roomJobsRef.current = roomJobs;
+  /** Set while the server answers `wait`: why AI tạo nội dung is not dispatching right now. */
+  const [waitStatus, setWaitStatus] = useState<string | null>(null);
+  /** When the open modal last observed the unproven attempts the server is waiting on. */
+  const cleanupCheckAtRef = useRef<number | null>(null);
   const [checkingCleanup, setCheckingCleanup] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [restoring, setRestoring] = useState(true);
+  /** Bumped by the restore error's Thử lại to run the restore again. */
+  const [restoreAttempt, setRestoreAttempt] = useState(0);
+  /** The restore failed even after its automatic retries; shown with Thử lại until it succeeds. */
+  const [restoreError, setRestoreError] = useState<string | null>(null);
   const [sourcePanelEpoch, setSourcePanelEpoch] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
   const inventoryRecoveryAbortRef = useRef<AbortController | null>(null);
   const cleanupAbortRef = useRef<AbortController | null>(null);
+  /** Aborted by a pause, reset or close: a pending automatic retry stops waiting. */
+  const retryAbortRef = useRef(new AbortController());
   /** Template jobs dropped by a kind change; the next analyse cancels the ones still running. */
   const supersededJobsRef = useRef<AiJobRecord[]>([]);
   /** Bumped by each generation run and by a pause, so a superseded run stops without settling. */
@@ -895,6 +967,7 @@ export function AiGeneratorPage({
   const setReview = useCallback((nextReview: AdminTemplateDetail) => {
     setPublishTargets([]);
     setPublishProgress(null);
+    setDraftSaveFailed(false);
     setTemplateRuns((current) => {
       const kind = nextReview.employeeType;
       const existing = current.find((run) => run.kind === kind);
@@ -982,6 +1055,35 @@ export function AiGeneratorPage({
     return result.sources;
   }, [api]);
 
+  /**
+   * Publication batches still worth reopening. A target whose template is archived or gone is
+   * dropped; a batch whose targets are all dropped or published with their JSON is finished.
+   * A published target still missing its JSON keeps the batch, so only that export is finished.
+   */
+  const unfinishedPublicationBatches = useCallback(async (batches: readonly AiPublicationBatch[]) => {
+    const unfinished: AiPublicationBatch[] = [];
+    /** templateId@version → the review just loaded, so restoring does not load it again. */
+    const reviews = new Map<string, AdminTemplateDetail>();
+    for (const batch of batches) {
+      const states = await Promise.all(batch.targets.map(async (target) => {
+        try {
+          const { review: current } = await api.adminAi<{ review: AdminTemplateDetail }>('get_review', {
+            templateId: target.templateId, version: target.version,
+          });
+          reviews.set(target.templateId + '@' + String(target.version), current);
+          if (current.status === 'archived') return 'gone';
+          return current.status === 'published' && current.content?.publication?.jsonFileId ? 'done' : 'pending';
+        } catch (caught) {
+          // Only a template that no longer exists ends its target; anything else is checked again on restore.
+          return errorCode(caught) === 'TEMPLATE_NOT_FOUND' ? 'gone' : 'pending';
+        }
+      }));
+      if (!states.includes('pending')) continue;
+      unfinished.push({ ...batch, targets: batch.targets.filter((_target, index) => states[index] !== 'gone') });
+    }
+    return { batches: unfinished, reviews };
+  }, [api]);
+
   const loadReview = useCallback(async (
     templateId: string,
     version: number,
@@ -1014,17 +1116,26 @@ export function AiGeneratorPage({
 
   useEffect(() => {
     let active = true;
+    const retryController = new AbortController();
     setRestoring(true);
+    setRestoreError(null);
+    /** A code-less failure (e.g. the host's tool-call timeout) is retried after 2 s, 5 s and 10 s. */
+    const retry = <T,>(run: () => Promise<T>): Promise<T> => withTransientRetry({
+      run,
+      active: () => active,
+      signal: retryController.signal,
+      onRetry: (attempt, total) => { if (active) setRetryStatus(transientRetryText(attempt, total)); },
+    }).finally(() => { if (active) setRetryStatus(null); });
     void (async () => {
       try {
-        const loadedSources = await loadSources();
+        const loadedSources = await retry(loadSources);
         if (initialTemplate) {
-          const loaded = await loadReview(initialTemplate.id, initialTemplate.version);
+          const loaded = await retry(() => loadReview(initialTemplate.id, initialTemplate.version));
           setTemplateSelection(loaded.employeeType);
           // A module-approved AI draft is edited through its own job, like a fresh one.
           if (loaded.jobId && loaded.content?.moduleApproval && loaded.status === 'draft') {
             try {
-              const job = (await api.adminAi<{ job: AiJobRecord }>('get_job', { jobId: loaded.jobId })).job;
+              const job = (await retry(() => api.adminAi<{ job: AiJobRecord }>('get_job', { jobId: loaded.jobId! }))).job;
               const output = job.result as { templateId?: unknown; version?: unknown } | null | undefined;
               // Only the job whose current result is this very draft: its drafts are what the Admin sees.
               if (active && job.pipelineVersion === 'module_v2' && job.moduleRuns?.length && job.createdBy === userId
@@ -1037,7 +1148,7 @@ export function AiGeneratorPage({
           }
           return;
         }
-        const result = await api.adminAi<{ jobs: readonly AiJobRecord[]; publicationBatches?: readonly AiPublicationBatch[] }>('list_jobs');
+        const result = await retry(() => api.adminAi<{ jobs: readonly AiJobRecord[]; publicationBatches?: readonly AiPublicationBatch[] }>('list_jobs'));
         if (!active) return;
         setRoomJobs(result.jobs);
         const inventoryId = roomId ? readAiResumeKey('onboarding:ai:inventory:' + roomId) : null;
@@ -1054,9 +1165,13 @@ export function AiGeneratorPage({
           templateJobId: legacyTemplateId,
           userId,
         });
+        // Prefetching the batches' reviews is optional: without it every listed batch stays open.
+        const publications = await unfinishedPublicationBatches(result.publicationBatches ?? [])
+          .catch(() => ({ batches: result.publicationBatches ?? [], reviews: new Map<string, AdminTemplateDetail>() }));
+        if (!active) return;
         let restoredRuns = selectResumableTemplateRuns({
           jobs: result.jobs,
-          publicationBatches: result.publicationBatches,
+          publicationBatches: publications.batches,
           resumeJobIds,
           userId,
         });
@@ -1067,6 +1182,7 @@ export function AiGeneratorPage({
             || !job.outline || autopilotEnabledRef.current.has(job.jobId)) continue;
           autopilotEnabledRef.current.add(job.jobId);
           try {
+            // Optional: without it the banner offers the upgrade, so it never holds up the restore.
             const upgraded = (await api.adminAi<{ job: AiJobRecord }>('enable_autopilot', { jobId: job.jobId })).job;
             restoredRuns = restoredRuns.map((entry) => entry.job?.jobId === upgraded.jobId ? { ...entry, job: upgraded } : entry);
           } catch (caught) {
@@ -1098,8 +1214,13 @@ export function AiGeneratorPage({
               ? run.job.result as { templateId?: unknown; version?: unknown }
               : undefined);
             if (output && typeof output.templateId === 'string' && typeof output.version === 'number') {
-              const loaded = await loadReview(output.templateId, output.version, false);
-              restoredRuns = restoredRuns.map((entry) => entry.kind === run.kind ? { ...entry, review: loaded } : entry);
+              const prefetched = publications.reviews.get(output.templateId + '@' + String(output.version));
+              if (prefetched) setReview(prefetched);
+              const { templateId, version } = output;
+              // A review that does not load leaves its job on AI tạo nội dung, whose Thử lại loads it again.
+              const loaded = prefetched ?? await retry(() => loadReview(templateId, version, false)).catch(() => null);
+              if (!active) return;
+              if (loaded) restoredRuns = restoredRuns.map((entry) => entry.kind === run.kind ? { ...entry, review: loaded } : entry);
             }
           }
           setTemplateRuns(restoredRuns);
@@ -1121,24 +1242,77 @@ export function AiGeneratorPage({
         const restoredSelection = (inventory ?? restoredInventory)?.sourceIds
           ?.filter((sourceId) => loadedSources.some((source) => source.sourceId === sourceId));
         if (restoredSelection?.length) setSelectedIds(new Set(restoredSelection));
-        // Provider cleanup runs after the job is on screen; it must never delay opening the modal.
-        if (active) void reconcileCleanups(result.jobs);
+        // Provider cleanup runs after the job is on screen; it must never delay opening the modal,
+        // and a failed check is retried by the next one (open modal, Kiểm tra lại, or reopen).
+        if (active) void reconcileCleanups(result.jobs).catch(() => undefined);
       } catch (caught) {
-        if (active) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
+        // Not a toast that fades on Nguồn & loại: the error stays with a Thử lại that restores again.
+        if (active && !isAbortError(caught)) setRestoreError(RESTORE_FAILED_PREFIX + generationErrorMessage(caught));
       } finally {
         if (active) setRestoring(false);
       }
     })();
     return () => {
       active = false;
+      retryController.abort();
     };
-  }, [api, checkpointTargets, initialTemplate, loadReview, loadSources, reconcileCleanups, roomId, userId]);
+  }, [api, checkpointTargets, initialTemplate, loadReview, loadSources, reconcileCleanups, restoreAttempt, roomId, setReview, unfinishedPublicationBatches, userId]);
 
   useEffect(() => () => {
     abortRef.current?.abort();
     inventoryRecoveryAbortRef.current?.abort();
     cleanupAbortRef.current?.abort();
+    // Closing supersedes every run: nothing is retried after the modal is gone.
+    generationRunRef.current += 1;
+    retryAbortRef.current.abort();
   }, []);
+
+  function cancelTransientRetries() {
+    retryAbortRef.current.abort();
+    retryAbortRef.current = new AbortController();
+    setRetryStatus(null);
+  }
+
+  /** Retries a code-less failure after 2 s, 5 s and 10 s while `active`; the footer says so meanwhile. */
+  function retryTransient<T>(
+    run: () => Promise<T>,
+    options: { readonly reconcile?: () => Promise<T | undefined>; readonly active?: () => boolean } = {},
+  ): Promise<T> {
+    return withTransientRetry({
+      run,
+      ...options,
+      signal: retryAbortRef.current.signal,
+      onRetry: (attempt, total) => setRetryStatus(transientRetryText(attempt, total)),
+    }).finally(() => setRetryStatus(null));
+  }
+
+  async function readJob(jobId: string): Promise<AiJobRecord> {
+    return (await api.adminAi<{ job: AiJobRecord }>('get_job', { jobId })).job;
+  }
+
+  /**
+   * Sends a change to a job. After a code-less failure get_job decides first: a change that
+   * already took effect counts as done and is never sent twice.
+   */
+  function sendJobChange(
+    before: AiJobRecord,
+    action: string,
+    args: Record<string, unknown>,
+    active?: () => boolean,
+    module?: Omit<Extract<JobChange, { kind: 'module' }>, 'kind'>,
+  ): Promise<AiJobRecord> {
+    const change: JobChange = module ? { kind: 'module', ...module } : { kind: 'outline', action, args };
+    return retryTransient(
+      async () => (await api.adminAi<{ job: AiJobRecord }>(action, { jobId: before.jobId, ...args })).job,
+      {
+        active,
+        reconcile: async () => {
+          const job = await readJob(before.jobId);
+          return jobChangeApplied(before, job, change) ? job : undefined;
+        },
+      },
+    );
+  }
 
   async function refreshCleanups() {
     const result = await api.adminAi<{ jobs: readonly AiJobRecord[] }>('list_jobs');
@@ -1179,6 +1353,8 @@ export function AiGeneratorPage({
     setResponsibilities('');
     setPublishTargets([]);
     setPublishProgress(null);
+    setDraftSaveFailed(false);
+    draftSaveResourcesRef.current = null;
     setActiveReviewIndex(0);
     setOperation(null);
     setEditingOutline(false);
@@ -1187,9 +1363,13 @@ export function AiGeneratorPage({
     setSelectedTemplateKind(null);
     setNotice(null);
     generationRunRef.current += 1;
+    cancelTransientRetries();
     autoPumpedJobRef.current = null;
     setGenerationError(null);
     setStalled(false);
+    setWaitStatus(null);
+    cleanupCheckAtRef.current = null;
+    setRestoreError(null);
     setPausing(false);
     setRoomJobs((current) => current.filter((job) => !sessionJobIds.has(job.jobId)));
     setCheckingCleanup(false);
@@ -1254,28 +1434,65 @@ export function AiGeneratorPage({
       : [next, ...current]);
   }
 
-  async function pump(job: AiJobRecord, preferNative = false): Promise<AiJobRecord> {
+  /** The room jobs as they are now, with `job` in its latest state. */
+  function currentRoomJobs(job: AiJobRecord): readonly AiJobRecord[] {
+    return [job, ...roomJobsRef.current.filter((candidate) => candidate.jobId !== job.jobId)];
+  }
+
+  /**
+   * The server answered `wait`. When an earlier attempt's cleanup is unproven the room AI stays
+   * fenced until it is observed stopped, so observe it again (as a reopen would) every
+   * CLEANUP_RECHECK_MS; never cancel it. Best effort: a failed check is simply retried later.
+   */
+  async function observeWhileWaiting(job: AiJobRecord, signal: AbortSignal): Promise<void> {
+    const jobs = currentRoomJobs(job);
+    const unproven = attemptsNeedingCleanup(jobs, userId);
+    setWaitStatus(unproven.length > 0 ? WAITING_FOR_CLEANUP_TEXT : WAITING_FOR_AI_TEXT);
+    if (unproven.length === 0) return;
+    const now = Date.now();
+    if (cleanupCheckAtRef.current !== null && now - cleanupCheckAtRef.current < CLEANUP_RECHECK_MS) return;
+    cleanupCheckAtRef.current = now;
+    try {
+      const updated = await reconcileAttemptCleanups(api, jobs, userId, (call) => confirmAttempt(call, signal), signal);
+      // A pause, reset or close took over meanwhile: a late result must not overwrite its state.
+      if (signal.aborted) return;
+      mergeJobs(updated);
+      const own = updated.find((candidate) => candidate.jobId === job.jobId);
+      if (own) recordJob(own);
+    } catch (caught) {
+      if (isAbortError(caught)) throw caught;
+    }
+  }
+
+  /**
+   * Pumps a job until the server needs the Admin or is done. `bounded` (AI tạo nội dung and the
+   * coverage reads) gives up with AI_PUMP_STALLED after GENERATION_STALL_MS of unchanged waits.
+   */
+  async function pump(job: AiJobRecord, preferNative = false, bounded = false): Promise<AiJobRecord> {
     if (!roomId) throw new Error('Không xác định được room để chạy AI.');
+    // Read now, not from the render that started this run: a pump outlives many renders.
+    const nativeBlocked = () => Boolean(selectBlockingNativeCleanup(roomJobsRef.current, userId));
     return pumpWithQuestionRecovery({
       initialJob: job,
       initialPreferNative: preferNative,
-      nativeAvailable: nativeFallbackAvailable && !nativeCleanupBlock,
-      pumpOnce: async (current, usePreferredNative) => {
+      nativeAvailable: nativeFallbackAvailable && !nativeBlocked(),
+      pumpOnce: async (current, usePreferredNative, recoveringModuleLocalId) => {
         abortRef.current?.abort();
         const controller = new AbortController();
         abortRef.current = controller;
-        const useNative = nativeFallbackAvailable && shouldUseNativeForPump(
-          current,
-          usePreferredNative,
-          aiJobPrefersNative(current),
-        );
+        const provider: AiProvider = choosePumpProvider({
+          job: current,
+          explicitlyPreferred: usePreferredNative,
+          persistedPreference: aiJobPrefersNative(current),
+          nativeAvailable: nativeFallbackAvailable,
+          nativeBlocked: nativeBlocked(),
+        });
+        const useNative = provider === 'native_chat';
         const boundedQuestionRecovery = shouldBoundNativeQuestionPoll(
           current,
           useNative,
           usePreferredNative,
         );
-        if (useNative && nativeCleanupBlock) throw new Error(NATIVE_CLEANUP_BLOCKED);
-        const provider: AiProvider = useNative ? 'native_chat' : 'sandbox';
         return pumpAiJob({
           api,
           gateway: gatewayFor(provider),
@@ -1284,8 +1501,16 @@ export function AiGeneratorPage({
           jobId: current.jobId,
           workerId: 'onboarding-ai-' + crypto.randomUUID(),
           signal: controller.signal,
-          onProgress: recordJob,
-          ...(boundedQuestionRecovery ? { maxPollMs: QUESTION_RECOVERY_NATIVE_TIMEOUT_MS } : {}),
+          onProgress: (next) => { setWaitStatus(null); recordJob(next); },
+          onWait: (waiting) => observeWhileWaiting(waiting, controller.signal),
+          ...(bounded ? { maxIdleWaitMs: GENERATION_STALL_MS } : {}),
+          // Only a Native questions call gets the 90 s bound, never a lesson pumped by the same loop.
+          ...(boundedQuestionRecovery ? { questionPollMs: QUESTION_RECOVERY_NATIVE_TIMEOUT_MS } : {}),
+          // The Native retry covers that module's questions (busy/transient successors included);
+          // the next lesson goes back to the normal provider and deadline.
+          ...(useNative && usePreferredNative && recoveringModuleLocalId
+            && current.kind === 'template' && current.pipelineVersion === 'module_v2'
+            ? { questionRecoveryOf: { moduleLocalId: recoveringModuleLocalId } } : {}),
         });
       },
       runAction: async (action, args) => {
@@ -1297,6 +1522,35 @@ export function AiGeneratorPage({
         return result;
       },
     });
+  }
+
+  /**
+   * One pump pass. A code-less failure (e.g. the host's 30 s tool-call timeout) says nothing about
+   * the job: it is read back first, and pumped again later while `active` if that fails too.
+   */
+  function pumpReconciled(job: AiJobRecord, active: () => boolean): Promise<{ readonly job: AiJobRecord; readonly reconciled: boolean }> {
+    return retryTransient(async () => {
+      try {
+        return { job: await pump(job, false, true), reconciled: false };
+      } catch (caught) {
+        if (!isTransportFailure(caught) || !active()) throw caught;
+        let seen: AiJobRecord | undefined;
+        const reconciled = await reconcileJobAfterTransportFailure({
+          getJob: async () => (seen = await readJob(job.jobId)),
+          signal: retryAbortRef.current.signal,
+        });
+        if (!reconciled) {
+          // The server ended the job: that is its answer, not a slow server, so it is not retried.
+          if (seen && (seen.status === 'failed' || seen.status === 'cancelled')) {
+            recordJob(seen);
+            throw failedJobError(seen);
+          }
+          throw caught;
+        }
+        recordJob(reconciled);
+        return { job: reconciled, reconciled: true };
+      }
+    }, { active });
   }
 
   /** Checks a file before upload; returns the system name to ingest it under, or null after showing why not. */
@@ -1511,7 +1765,8 @@ export function AiGeneratorPage({
   async function openCompletedModuleReview(job: AiJobRecord) {
     const output = job.result as { templateId?: unknown; version?: unknown } | undefined;
     if (job.status !== 'completed' || !output || typeof output.templateId !== 'string' || typeof output.version !== 'number') return;
-    await loadReview(output.templateId, output.version, false);
+    const { templateId, version } = output;
+    await retryTransient(() => loadReview(templateId, version, false));
     setActiveReviewIndex(Math.max(0, templateRuns.findIndex((run) => run.kind === job.templateKind)));
     setStep(3);
   }
@@ -1527,6 +1782,8 @@ export function AiGeneratorPage({
   ) {
     const current = templateJob;
     if (!current) return;
+    const run = generationRunRef.current;
+    const active = () => generationRunRef.current === run;
     setModuleUpdating(true);
     setOperation('save');
     setNotice(null);
@@ -1536,11 +1793,19 @@ export function AiGeneratorPage({
     try {
       // An older job approves nothing by itself; the change would wait forever without autopilot.
       if (current.autoApprove !== true) {
-        recordJob((await api.adminAi<{ job: AiJobRecord }>('enable_autopilot', { jobId: current.jobId })).job);
+        recordJob(await retryTransient(
+          async () => (await api.adminAi<{ job: AiJobRecord }>('enable_autopilot', { jobId: current.jobId })).job,
+          { active, reconcile: async () => { const job = await readJob(current.jobId); return job.autoApprove === true ? job : undefined; } },
+        ));
       }
-      changed = (await api.adminAi<{ job: AiJobRecord }>(action, { jobId: current.jobId, ...args })).job;
+      const target = action === 'update_module_questions' || (action === 'retry_module' && args.target === 'questions')
+        ? 'questions' : 'lesson';
+      changed = await sendJobChange(current, action, args, active, {
+        moduleLocalId: String(args.moduleLocalId), target, expectedVersion: Number(args.expectedVersion),
+      });
     } catch (caught) {
-      setNotice({ message: moduleChangeErrorMessage(action, caught), tone: 'error' });
+      // A pause or close that superseded the retries owns the screen; it shows nothing here.
+      if (!isAbortError(caught) && active()) setNotice({ message: moduleChangeErrorMessage(action, caught), tone: 'error' });
       setOperation(null);
       setModuleUpdating(false);
       return;
@@ -1576,13 +1841,15 @@ export function AiGeneratorPage({
 
   async function moduleAction(action: string, args: Record<string, unknown>): Promise<boolean> {
     if (!templateJob) return false;
+    const run = generationRunRef.current;
+    const active = () => generationRunRef.current === run;
     setOperation('save'); setNotice(null);
     try {
-      const job = (await api.adminAi<{ job: AiJobRecord }>(action, { jobId: templateJob.jobId, ...args })).job;
+      const job = await sendJobChange(templateJob, action, args, active);
       setTemplateJob(job);
       return true;
     } catch (caught) {
-      if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
+      if (!isAbortError(caught) && active()) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
       return false;
     }
     finally { setOperation(null); }
@@ -1596,10 +1863,14 @@ export function AiGeneratorPage({
   async function runGeneration(prepare?: () => Promise<AiJobRecord>): Promise<void> {
     let latest = templateJob;
     if (!latest) return;
+    cancelTransientRetries();
     const run = generationRunRef.current + 1;
     generationRunRef.current = run;
+    const active = () => generationRunRef.current === run;
     // This job is being pumped now; reopening the step must not start a second chain for it.
     autoPumpedJobRef.current = latest.jobId;
+    // A new run observes unproven attempts at once rather than after the previous run's interval.
+    cleanupCheckAtRef.current = null;
     setOperation('analyze');
     setNotice(null);
     setGenerationError(null);
@@ -1614,23 +1885,11 @@ export function AiGeneratorPage({
       // Progressing jobs keep going however many recoveries they need; only idle passes end the run.
       let seen = generationFingerprint(latest);
       let idlePasses = 0;
-      while (generationRunRef.current === run) {
-        let reconciled = false;
-        try {
-          latest = await pump(latest);
-        } catch (caught) {
-          // A code-less rejection (e.g. the host's 30 s tool-call timeout) says nothing about the
-          // job: the server may have finished it. Read it back before showing any banner.
-          if (!isTransportFailure(caught) || generationRunRef.current !== run) throw caught;
-          const jobId = latest.jobId;
-          const job = await reconcileJobAfterTransportFailure({
-            getJob: async () => (await api.adminAi<{ job: AiJobRecord }>('get_job', { jobId })).job,
-          });
-          if (!job) throw caught;
-          latest = job;
-          recordJob(job);
-          reconciled = true;
-        }
+      while (active()) {
+        // The banner shows only once the job could not be read back and three retries failed.
+        const pass = await pumpReconciled(latest, active);
+        latest = pass.job;
+        const { reconciled } = pass;
         if (latest.status !== 'running' || !outlineApprovedFor(latest)) break;
         const next = generationFingerprint(latest);
         if (reconciled) {
@@ -1657,10 +1916,16 @@ export function AiGeneratorPage({
         setStalled(true);
       }
     } catch (caught) {
-      if (generationRunRef.current === run && !isAbortError(caught)) {
+      if (generationRunRef.current === run && errorCode(caught) === AI_PUMP_STALLED) {
+        // The server kept waiting without progress: say so with Thử lại instead of polling forever.
+        const waited = (caught as { job?: AiJobRecord }).job;
+        if (waited) recordJob(waited);
+        setStalled(true);
+      } else if (generationRunRef.current === run && !isAbortError(caught)) {
         setGenerationError({ message: generationErrorMessage(caught), fromPrepare: preparing });
       }
     } finally {
+      if (generationRunRef.current === run) setWaitStatus(null);
       setOperation((current) => current === 'analyze' ? null : current);
     }
   }
@@ -1690,7 +1955,8 @@ export function AiGeneratorPage({
 
   /** Asks the provider to stop each call the pause left possibly live, and records the outcome. */
   async function confirmPausedAttempts(job: AiJobRecord) {
-    for (const call of job.calls.filter((item) => item.attemptRef && item.cleanupState === 'pending')) {
+    // Observing while waiting turns an unproven attempt into 'unknown'; both still need the cancel.
+    for (const call of job.calls.filter((item) => item.attemptRef && (item.cleanupState === 'pending' || item.cleanupState === 'unknown'))) {
       try {
         const outcome = await confirmAttempt(call, undefined, 'cancel');
         recordJob(await reportCleanup(api, job.jobId, call, outcome));
@@ -1706,6 +1972,8 @@ export function AiGeneratorPage({
     if (!current) return;
     generationRunRef.current += 1;
     abortRef.current?.abort();
+    cancelTransientRetries();
+    setWaitStatus(null);
     setPausing(true);
     setNotice(null);
     setGenerationError(null);
@@ -1730,20 +1998,33 @@ export function AiGeneratorPage({
   async function coverageAction(action: string, args: Record<string, unknown>, before?: () => Promise<Record<string, unknown>>) {
     const current = templateJob;
     if (!current?.outline) return;
+    const run = generationRunRef.current;
+    const active = () => generationRunRef.current === run;
     setNotice(null);
     try {
       const extra = before ? await before() : {};
       setOperation('analyze');
-      let job = (await api.adminAi<{ job: AiJobRecord }>(action, {
-        jobId: current.jobId, expectedRevision: current.outline.revision, ...args, ...extra,
-      })).job;
+      let job = await sendJobChange(current, action, { expectedRevision: current.outline.revision, ...args, ...extra }, active);
       setTemplateJob(job);
-      if (job.planPending) {
-        job = await pump(job);
+      // AI reads the new material right away; a pass that changed nothing (or only re-read the job
+      // after a timeout) counts as idle, and two idle passes end the loop.
+      const fingerprint = (value: AiJobRecord) => JSON.stringify([value.status, value.planPending, value.outline?.revision,
+        value.calls.map((call) => [call.callId, call.status])]);
+      let seen = fingerprint(job);
+      let idlePasses = 0;
+      while (job.planPending && job.status === 'running' && active()) {
+        const pass = await pumpReconciled(job, active);
+        job = pass.job;
         setTemplateJob(job);
+        const next = fingerprint(job);
+        if (pass.reconciled || next === seen) {
+          if (++idlePasses >= MAX_IDLE_GENERATION_PASSES) break;
+        } else idlePasses = 0;
+        seen = next;
       }
     } catch (caught) {
-      if (!isAbortError(caught)) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
+      // A reset or close that superseded the retries owns the screen; it shows nothing here.
+      if (!isAbortError(caught) && active()) setNotice({ message: generationErrorMessage(caught), tone: 'error' });
     } finally {
       setOperation(null);
     }
@@ -1989,7 +2270,7 @@ export function AiGeneratorPage({
       if (!finishSuccessfulAiPublish(completed, {
         clearResume: () => clearAiResumeKeys(aiGeneratorResumeKeys(roomId, userId)),
         resetSession: () => resetLocalSession(sources),
-        onComplete,
+        onComplete: () => onComplete('published'),
         onClose,
       })) {
         throw new Error('Chưa thể đóng vì còn template chưa xuất bản xong.');
@@ -2005,6 +2286,59 @@ export function AiGeneratorPage({
       setOperation(null);
     }
   }
+  /**
+   * Lưu template (a new session): the publish pipeline's file preparation only — folder, lesson
+   * PDFs in Roomfiles, attached resources and settings — without publishing or exporting JSON.
+   * Open blocking flags do not stop it; they only block publishing the draft later.
+   */
+  async function saveDraft() {
+    const run = activeReviewRun;
+    const runReview = run?.review;
+    if (!run || !runReview) return;
+    if (!roomId) {
+      setNotice({ message: 'Không xác định được room để lưu template.', tone: 'error' });
+      return;
+    }
+    setOperation('saveDraft');
+    setNotice(null);
+    setDraftSaveFailed(false);
+    try {
+      const settings: AiTemplateSettings = run.settings ?? {
+        passingScore: runReview.passingScore ?? 70,
+        maxAttemptsPerModule: runReview.content?.maxAttemptsPerModule === undefined ? 2 : runReview.content.maxAttemptsPerModule,
+        learningMode: runReview.content?.learningMode ?? 'sequential',
+      };
+      const dependencies = createAiPublishDependencies({
+        app,
+        api,
+        roomId,
+        settingsByKind: { [run.kind]: settings } as Partial<Record<EmployeeType, AiTemplateSettings>>,
+        onProgress: setPublishProgress,
+      });
+      // Each attempt starts from the server's draft: an earlier attempt may already have saved the settings.
+      const current = (await api.adminAi<{ review: AdminTemplateDetail }>('get_review', {
+        templateId: runReview.id, version: runReview.version,
+      })).review;
+      // PDFs a failed attempt uploaded for this very lesson content are reused, never uploaded twice.
+      const key = lessonPdfKey(current);
+      const uploaded = draftSaveResourcesRef.current?.key === key ? draftSaveResourcesRef.current.resources : undefined;
+      await dependencies.prepareResources(
+        { kind: run.kind, review: current, jsonExported: false, phase: 'idle', ...(uploaded ? { uploadedResources: uploaded } : {}) },
+        (resources) => { draftSaveResourcesRef.current = { key, resources }; },
+      );
+      setPublishProgress(null);
+      setNotice({ message: AI_DRAFT_SAVED_NOTICE, tone: 'success' });
+      clearAiResumeKeys(aiGeneratorResumeKeys(roomId, userId));
+      resetLocalSession(sources);
+      onComplete('draft');
+      onClose();
+    } catch (caught) {
+      setDraftSaveFailed(true);
+      setNotice({ message: generationErrorMessage(caught) + ' Bấm Thử lại lưu để tiếp tục.', tone: 'error' });
+    } finally {
+      setOperation(null);
+    }
+  }
   const publishReadiness = aiReviewReadiness(activeReviewRun?.review);
   const requestErrors = useMemo(() => validateTemplateRequest({
     selection: templateSelection,
@@ -2014,7 +2348,7 @@ export function AiGeneratorPage({
   const outlineApproved = outlineApprovedFor(templateJob);
   const publishing = publishTargets.some((target) => PUBLISHING_PHASES.has(target.phase));
   /** True while closing the modal would interrupt AI work; closing then asks first. */
-  const aiWorking = operation === 'analyze' || operation === 'approve' || operation === 'publish' || operation === 'upload'
+  const aiWorking = operation === 'analyze' || operation === 'approve' || operation === 'publish' || operation === 'saveDraft' || operation === 'upload'
     || (inventoryJob?.status === 'running' && inventoryRecoveryAbortRef.current !== null)
     || Boolean(templateJob?.planPending)
     || (templateJob?.autoApprove === true && templateJob.status === 'running' && outlineApproved)
@@ -2131,9 +2465,14 @@ export function AiGeneratorPage({
     : null;
   const reviewUpdating = moduleUpdating || (step === 3 && operation === 'analyze');
   const publishTarget = activeReviewRun ? publishTargets.find((target) => target.kind === activeReviewRun.kind) : undefined;
+  /**
+   * A new session ends with Lưu template (a draft in the library); a draft opened from the library
+   * is published. A publication an earlier session already started keeps publishing.
+   */
+  const saveAsDraft = !initialTemplate && !activeReviewRun?.publicationBatchId && review?.status !== 'published';
 
   let hint: string | null = null;
-  let primary: { readonly label: string; readonly working?: boolean; readonly disabled: boolean; readonly onClick: () => void } | null = null;
+  let primary: { readonly label: string; readonly icon?: ReactNode; readonly working?: boolean; readonly disabled: boolean; readonly onClick: () => void } | null = null;
   const analyzing = operation === 'analyze';
   if (step === 0) {
     hint = sourcesHint;
@@ -2170,6 +2509,17 @@ export function AiGeneratorPage({
       disabled: busy || pausing || templateJob?.status !== 'completed' || !generationReviewLoaded,
       onClick: () => { setActiveReviewIndex(0); setStep(3); },
     };
+  } else if (templateRuns.length > 0 && saveAsDraft) {
+    // Saving a draft is allowed with open blocking flags: they only block publishing it.
+    if (publishReadiness.blockingCount > 0) hint = `Còn ${publishReadiness.blockingCount} cờ bắt buộc — cần xử lý trước khi xuất bản`;
+    else if (!activeReviewRun?.review && !reviewUpdating) hint = 'Template chưa cập nhật xong';
+    primary = {
+      working: operation === 'saveDraft',
+      icon: <SaveOutlined aria-hidden="true" />,
+      label: operation === 'saveDraft' ? 'Đang lưu…' : draftSaveFailed ? 'Thử lại lưu' : 'Lưu template',
+      disabled: busy || reviewUpdating || pausing || !activeReviewRun?.review,
+      onClick: () => void saveDraft(),
+    };
   } else if (templateRuns.length > 0) {
     if (publishReadiness.blockingCount > 0) hint = `Còn ${publishReadiness.blockingCount} cờ bắt buộc`;
     else if (!activeReviewRun?.review && !reviewUpdating) hint = 'Template chưa cập nhật xong';
@@ -2182,6 +2532,8 @@ export function AiGeneratorPage({
       onClick: () => void publish(),
     };
   }
+  // An automatic retry keeps the step in its working state and only says so in the footer.
+  if (retryStatus) hint = retryStatus;
   // The whole job can be cancelled while it reads or plans; a supplement read is not worth losing the outline for.
   const progressCancellable = step === 1 && progressJob?.status === 'running'
     && (!showOutline || (Boolean(coverageJob?.planPending) && !readingSupplement));
@@ -2211,6 +2563,14 @@ export function AiGeneratorPage({
         </header>
         <InlineNotice notice={notice} className="ai-generator-notice" onDismiss={() => setNotice(null)} />
         <div className="ai-generator-body">
+          {restoreError && (
+            <div className="ai-generating-banner error ai-restore-error" role="alert">
+              <span>{restoreError}</span>
+              <button className="button button-secondary button-sm" type="button" disabled={restoring} onClick={() => { setRestoreError(null); setRestoreAttempt((current) => current + 1); }}>
+                <RedoOutlined aria-hidden="true" /> Thử lại
+              </button>
+            </div>
+          )}
           {!canGenerateWithAi && (
             <div className="ai-permission-blocked"><RobotOutlined /><h3>Chưa có quyền tạo nội dung AI</h3><p>Admin cần cấp quyền “Run sandbox agent” cho app trong Customize access. Các template hiện có vẫn dùng được.</p></div>
           )}
@@ -2260,7 +2620,7 @@ export function AiGeneratorPage({
                         <div className="ai-coverage-load-error" role="alert">
                           <span>{CATALOG_LOAD_FAILED}</span>
                           <button className="button button-secondary button-sm" type="button"
-                            onClick={() => { setModuleSourceCatalog(null); setCatalogReload((count) => count + 1); }}>Thử lại</button>
+                            onClick={() => { setModuleSourceCatalog(null); setCatalogReload((count) => count + 1); }}><RedoOutlined aria-hidden="true" /> Thử lại</button>
                         </div>
                       )}
                       <AiCoverageSkeleton label="Đang kiểm tra độ phủ…" />
@@ -2305,6 +2665,7 @@ export function AiGeneratorPage({
           {canGenerateWithAi && step === 2 && templateJob?.pipelineVersion === 'module_v2' && (
             <AiStepGenerating
               job={templateJob}
+              waitStatus={generationStalled || generationBanner ? null : waitStatus}
               stalled={generationStalled}
               error={generationBanner}
               busy={busy || pausing || restoring || resetting}
@@ -2318,7 +2679,7 @@ export function AiGeneratorPage({
                 <div className={'ai-publish-live-progress' + (publishProgress.error ? ' failed' : '')} role={publishProgress.error ? 'alert' : 'status'}>
                   {busy && !publishProgress.error ? <LoadingOutlined spin /> : publishProgress.error ? <CloseOutlined /> : <CheckOutlined />}
                   <div>
-                    <strong>{publishProgress.error ? 'Bước hiện tại chưa hoàn tất' : 'Đang chuẩn bị và xuất bản'}</strong>
+                    <strong>{publishProgress.error ? 'Bước hiện tại chưa hoàn tất' : saveAsDraft ? 'Đang chuẩn bị và lưu bản nháp' : 'Đang chuẩn bị và xuất bản'}</strong>
                     <span>{aiPublishProgressText(publishProgress)}</span>
                     {publishProgress.error && <small>{publishProgress.error}</small>}
                   </div>
@@ -2333,7 +2694,14 @@ export function AiGeneratorPage({
                   </div>
                 </div>
               ) : null}
-              {reviewJob ? (
+              {initialTemplate && restoring ? (
+                // A draft opened from the library is still looking up its job: neither the module
+                // review nor the legacy one is known to be right yet.
+                <div className="ai-review-opening" role="status" aria-busy="true">
+                  <LoadingOutlined spin aria-hidden="true" />
+                  <span>Đang mở bản nháp…</span>
+                </div>
+              ) : reviewJob ? (
                 <AiStepReview
                   job={reviewJob}
                   review={review}
@@ -2376,8 +2744,8 @@ export function AiGeneratorPage({
             <div className="ai-generator-footer-start">
               {/* Reset lives on step 0 only; later steps go back first. */}
               {!initialTemplate && step === 0 && (
-                <button className="button button-ghost" type="button" disabled={busy || resetting || restoring} onClick={() => setResetConfirmOpen(true)}>
-                  Xóa phiên
+                <button className="button button-danger-ghost" type="button" disabled={busy || resetting || restoring} onClick={() => setResetConfirmOpen(true)}>
+                  <DeleteOutlined aria-hidden="true" /> Xóa phiên
                 </button>
               )}
               {!initialTemplate && step === 2 && generationRunning && (
@@ -2387,7 +2755,7 @@ export function AiGeneratorPage({
                   type="button"
                   disabled={pausing || resetting || restoring}
                   onClick={() => void pauseAndEditOutline()}
-                >Tạm dừng & sửa lộ trình</button>
+                ><PauseCircleOutlined aria-hidden="true" /> Tạm dừng & sửa lộ trình</button>
               )}
               {!initialTemplate && (step === 1 || (step === 2 && !generationRunning)) && (
                 <button
@@ -2402,7 +2770,7 @@ export function AiGeneratorPage({
                 <button
                   className="button button-ghost"
                   type="button"
-                  disabled={pausing || resetting || restoring || operation === 'publish' || operation === 'save' || publishing}
+                  disabled={pausing || resetting || restoring || operation === 'publish' || operation === 'saveDraft' || operation === 'save' || publishing}
                   onClick={backToCoverage}
                 >← Về độ phủ</button>
               )}
@@ -2416,10 +2784,10 @@ export function AiGeneratorPage({
               )}
             </div>
             <div className="ai-generator-footer-end">
-              {hint && <span className="ai-generator-hint">{hint}</span>}
+              {hint && <span className="ai-generator-hint" role={retryStatus ? 'status' : undefined}>{hint}</span>}
               {primary && (
                 <button className="button button-primary" type="button" disabled={primary.disabled} onClick={primary.onClick}>
-                  {primary.working && <LoadingOutlined spin />}{primary.label}
+                  {primary.working ? <LoadingOutlined spin aria-hidden="true" /> : primary.icon}{primary.label}
                 </button>
               )}
             </div>

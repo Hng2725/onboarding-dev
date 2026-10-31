@@ -580,9 +580,9 @@ describe('Admin AI template UI model', () => {
 
     await expect(dependencies.prepareResources({
       kind: 'normal', review: publishReview, jsonExported: false, phase: 'idle',
-    })).rejects.toThrow('Template 1 nhân sự thường · Module B: Roboto failed');
+    })).rejects.toThrow('Template 1 nhân sự thường · Module B: Không tạo được PDF bài học.');
     expect(errorProgress).toEqual([
-      'creating_pdf:Module B:Template 1 nhân sự thường · Module B: Roboto failed',
+      'creating_pdf:Module B:Template 1 nhân sự thường · Module B: Không tạo được PDF bài học.',
     ]);
   });
   it('refreshes and closes the modal only after every publish target completes', () => {

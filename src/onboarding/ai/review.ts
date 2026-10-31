@@ -117,7 +117,7 @@ interface PublicationDbRecord extends StoreRecord, AiPublicationBatch {
   readonly updatedAt: string;
   readonly requestFingerprint?: string;
   readonly retiredAt?: string;
-  readonly retirementReason?: 'superseded' | 'missing_target';
+  readonly retirementReason?: 'superseded' | 'missing_target' | 'finished';
   readonly supersededBy?: string;
   readonly supersedesBatchIds?: readonly string[];
 }
@@ -856,6 +856,17 @@ export function createAiReviewService(
       }));
   }
 
+  /**
+   * A target nothing is left to do for: completed as requested, published with its JSON (a
+   * published version is immutable), or archived (it is never published again).
+   */
+  async function publicationTargetFinished(actor: OnboardingActor, target: AiPublicationTarget): Promise<'archived' | 'done' | false> {
+    const detail = await templates.getAdminDetail(actor, target.templateId, target.version);
+    if (detail.status === 'archived') return 'archived';
+    if (detail.status === 'published' && detail.content?.publication?.jsonFileId) return 'done';
+    return await publicationTargetCompleted(actor, target) ? 'done' : false;
+  }
+
   function targetOverlaps(left: AiPublicationTarget, right: AiPublicationTarget): boolean {
     return left.kind === right.kind && left.templateId === right.templateId;
   }
@@ -1010,8 +1021,14 @@ export function createAiReviewService(
       for (const row of await effectivePublications(actor, await ownedPublications(actor))) {
         if (row.retiredAt) continue;
         try {
-          const completed = await Promise.all(row.targets.map((target) => publicationTargetCompleted(actor, target)));
-          if (!completed.every(Boolean)) batches.push(publicationBatch(row));
+          const states = await Promise.all(row.targets.map((target) => publicationTargetFinished(actor, target)));
+          if (!states.every(Boolean)) batches.push(publicationBatch(row));
+          else if (states.includes('archived')) {
+            // An archived template is never published again: retire the batch so no later session
+            // reopens it. Best effort; a lost race only means the next listing retires it again.
+            // A completed batch stays as it is, so retrying it keeps its batch ID.
+            await retirePublication(actor, row, 'finished').catch(() => undefined);
+          }
         } catch (error) {
           if (!(error instanceof TemplateServiceError) || error.code !== 'TEMPLATE_NOT_FOUND') throw error;
           // A deleted target ends only its own batch; other selections remain recoverable.

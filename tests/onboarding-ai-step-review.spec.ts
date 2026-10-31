@@ -1,6 +1,7 @@
 import { createElement } from 'react';
 import TestRenderer, { act, type ReactTestInstance } from 'react-test-renderer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { EditOutlined, RedoOutlined, RobotOutlined, SaveOutlined } from '@ant-design/icons';
 
 import type { AiJobRecord, AiModuleDraftRun, TemplateOutlineModule, VerificationFlag } from '../src/onboarding/contracts';
 import type { GeneratedModule, GeneratedQuestion } from '../src/onboarding/ai/validate';
@@ -32,7 +33,13 @@ vi.mock('../src/ui/onboarding/roomfiles', async (importOriginal) => ({
   ensureTemplateRoomfilesFolder: async () => ({ rootId: 'root', documentsId: 'documents', templatesId: 'templates', templateFolderId: 'folder' }),
 }));
 
-import { AiGeneratorPage } from '../src/ui/onboarding/ai/ai-generator';
+vi.mock('../src/ui/onboarding/ai/lesson-pdf', () => ({
+  createLessonPdfArtifact: async (_review: AdminTemplateDetail, _id: string, index: number) => ({
+    fileName: 'lesson-' + String(index) + '.pdf', mimeType: 'application/pdf', blob: new Blob(['pdf'], { type: 'application/pdf' }),
+  }),
+}));
+
+import { AI_DRAFT_SAVED_NOTICE, AiGeneratorPage } from '../src/ui/onboarding/ai/ai-generator';
 import { AiStepReview, type AiStepReviewProps } from '../src/ui/onboarding/ai/ai-step-review';
 import { FlagPanel } from '../src/ui/onboarding/ai/flag-panel';
 
@@ -121,6 +128,7 @@ const views: TestRenderer.ReactTestRenderer[] = [];
 afterEach(() => {
   for (const view of views.splice(0)) act(() => view.unmount());
   vi.unstubAllGlobals();
+  host.app.uploadFile.mockReset();
 });
 
 describe('AiStepReview', () => {
@@ -357,6 +365,26 @@ describe('AiStepReview', () => {
     expect(buttonsByText(view.root, 'Chỉnh sửa')).toHaveLength(0);
   });
 
+  it('tells Chỉnh sửa and AI viết lại apart by style and icon', () => {
+    const { view } = renderReview();
+    const edit = button(view.root, 'Chỉnh sửa');
+    expect(edit.props.className).toContain('button-secondary');
+    expect(edit.findAllByType(EditOutlined)).toHaveLength(1);
+    const rewrite = button(view.root, 'AI viết lại');
+    expect(rewrite.props.className).toContain('button-accent');
+    expect(rewrite.props.className).not.toContain('button-secondary');
+    expect(rewrite.findAllByType(RobotOutlined)).toHaveLength(1);
+    expect([...edit.findAllByType(EditOutlined), ...rewrite.findAllByType(RobotOutlined)].every((icon) => icon.props['aria-hidden'] === 'true')).toBe(true);
+  });
+
+  it('marks every Thử lại with a redo icon', () => {
+    const stuck = doneRun(0, 5, { questionState: 'failed', questionVersion: 6, approvedQuestionVersion: undefined });
+    const { view } = renderReview({ job: moduleJob([stuck, doneRun(1, 4)], { status: 'running', result: null }), review: null, stalled: true, onRetryModule: vi.fn(), onRetry: vi.fn() });
+    expect(button(view.root, 'Thử lại').findAllByType(RedoOutlined)).toHaveLength(1);
+    const failed = renderReview({ error: 'Máy chủ phản hồi chậm. Hãy bấm Thử lại.', onRetry: vi.fn() });
+    expect(button(failed.view.root.findByProps({ className: 'ai-generating-banner error' }), 'Thử lại').findAllByType(RedoOutlined)).toHaveLength(1);
+  });
+
   it('shows a stuck module with its error and Thử lại once updating stalled', () => {
     const stuck = doneRun(0, 5, { questionState: 'failed', questionVersion: 6, approvedQuestionVersion: undefined });
     const onRetryModule = vi.fn();
@@ -380,8 +408,10 @@ describe('Xem lại & xuất bản in the generator', () => {
   } as unknown as AiJobRecord;
   const catalog = { sources: [{ sourceId: 'handbook', fileName: 'Sổ tay.pdf', sections: [1, 2].map((n) => ({ id: 'handbook#s' + String(n), headingPath: ['Mục ' + String(n)], usable: true })) }] };
 
+  let session = new Map<string, string>();
   function stubStorage() {
     const storage = new Map<string, string>([['onboarding:ai:template:room-1', 'template-1']]);
+    session = storage;
     vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
   }
 
@@ -399,11 +429,11 @@ describe('Xem lại & xuất bản in the generator', () => {
     };
   }
 
-  async function renderPage(api: unknown, onClose = vi.fn(), onComplete = vi.fn()) {
+  async function renderPage(api: unknown, onClose = vi.fn(), onComplete = vi.fn(), initialTemplate?: { id: string; version: number }) {
     stubStorage();
     let view!: TestRenderer.ReactTestRenderer;
     await act(async () => {
-      view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose, onComplete }));
+      view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose, onComplete, initialTemplate }));
     });
     views.push(view);
     return view;
@@ -430,7 +460,9 @@ describe('Xem lại & xuất bản in the generator', () => {
     const view = await renderPage(apiFor(moduleJob([doneRun(0, 5), doneRun(1, 4)]), reviewFor()));
     expect(activeStep(view)).toBe('Xem lại & xuất bản');
     expect(view.root.findAllByProps({ 'aria-label': 'Xem lại & xuất bản' })).toHaveLength(1);
-    expect(text(footerPrimary(view))).toBe('Xuất bản template');
+    // A new session saves its template as a draft; publishing happens when it is opened from the library.
+    expect(text(footerPrimary(view))).toBe('Lưu template');
+    expect(footerPrimary(view).findAllByType(SaveOutlined)).toHaveLength(1);
     expect(footerPrimary(view).props.disabled).toBe(false);
     expect(buttonsByText(footer(view), '← Về độ phủ')).toHaveLength(1);
     expect(buttonsByText(view.root, 'Xóa phiên')).toHaveLength(0);
@@ -438,10 +470,44 @@ describe('Xem lại & xuất bản in the generator', () => {
     expect(text(view.root)).not.toMatch(/Template 1\/|Kiểm tra xuất bản|Tiếp: Template 2/);
   });
 
-  it('blocks publishing while a blocking flag is open, with Còn N cờ bắt buộc', async () => {
+  it('lets a new session save its draft with a blocking flag open, saying it must be fixed before publishing', async () => {
     const view = await renderPage(apiFor(moduleJob([doneRun(0, 5), doneRun(1, 4)]), reviewFor([blockingFlag('ai-mod-1')])));
+    expect(text(footerPrimary(view))).toBe('Lưu template');
+    expect(footerPrimary(view).props.disabled).toBe(false);
+    expect(text(footer(view))).toContain('Còn 1 cờ bắt buộc — cần xử lý trước khi xuất bản');
+  });
+
+  it('shows Đang mở bản nháp… while an opened AI draft looks up its job, never the legacy review', async () => {
+    const job = moduleJob([doneRun(0, 5), doneRun(1, 4)]);
+    let resolveJob!: (value: { job: AiJobRecord }) => void;
+    const lookup = new Promise<{ job: AiJobRecord }>((resolve) => { resolveJob = resolve; });
+    const view = await renderPage(apiFor(job, openedDraft(), { get_job: () => lookup }), vi.fn(), vi.fn(), { id: 'draft-1', version: 1 });
+    const opening = view.root.findAll((node) => node.props.className === 'ai-review-opening');
+    expect(opening).toHaveLength(1);
+    expect(opening[0].props.role).toBe('status');
+    expect(text(opening[0])).toContain('Đang mở bản nháp…');
+    expect(view.root.findAll((node) => node.props.className === 'ai-review-settings-bar')).toHaveLength(0);
+    expect(text(view.root)).not.toMatch(/CONCEPT|STEPS|Loại bỏ nội dung/);
+    await act(async () => { resolveJob({ job }); });
+    expect(view.root.findAll((node) => node.props.className === 'ai-review-opening')).toHaveLength(0);
+    expect(view.root.findAllByProps({ 'aria-label': 'Xem lại & xuất bản' })).toHaveLength(1);
+    expect(view.root.findAll((node) => node.props.className === 'ai-review-settings-bar')).toHaveLength(0);
+  });
+
+  it('keeps the legacy review for a job-less draft once it has loaded', async () => {
+    const view = await renderPage(apiFor(moduleJob([doneRun(0, 5), doneRun(1, 4)]), reviewFor()), vi.fn(), vi.fn(), { id: 'draft-1', version: 1 });
+    expect(view.root.findAll((node) => node.props.className === 'ai-review-opening')).toHaveLength(0);
+    expect(view.root.findAll((node) => node.props.className === 'ai-review-settings-bar')).toHaveLength(1);
+  });
+
+  it('blocks publishing an opened draft while a blocking flag is open, with Còn N cờ bắt buộc', async () => {
+    const draft = openedDraft([blockingFlag('ai-mod-1')]);
+    const view = await renderPage(apiFor(moduleJob([doneRun(0, 5), doneRun(1, 4)]), draft, { get_job: () => ({ job: moduleJob([doneRun(0, 5), doneRun(1, 4)]) }) }), vi.fn(), vi.fn(), { id: 'draft-1', version: 1 });
+    expect(activeStep(view)).toBe('Xem lại & xuất bản');
+    expect(text(footerPrimary(view))).toBe('Xuất bản template');
     expect(footerPrimary(view).props.disabled).toBe(true);
     expect(text(footer(view))).toContain('Còn 1 cờ bắt buộc');
+    expect(text(footer(view))).not.toContain('trước khi xuất bản');
   });
 
   it('returns a completed job to Kiểm tra độ phủ without pausing it', async () => {
@@ -485,6 +551,71 @@ describe('Xem lại & xuất bản in the generator', () => {
     expect(footerPrimary(view).props.disabled).toBe(false);
   });
 
+  describe('when the server answers slowly', () => {
+    const SLOW = 'Máy chủ phản hồi chậm. Hãy bấm Thử lại.';
+    const count = (api: { adminAi: { mock: { calls: unknown[][] } } }, action: string) => api.adminAi.mock.calls.filter(([name]) => name === action).length;
+    const edited = { ...lessonFor(0), title: 'Tổng quan mới' };
+    const updated = () => moduleJob([doneRun(0, 5, { lessonState: 'review_ready', lessonVersion: 3, lessonDraft: edited, questionState: 'stale', questionVersion: 5 }), doneRun(1, 4)], { status: 'running', result: null });
+    const done = () => moduleJob([doneRun(0, 4, { lessonVersion: 3, approvedLessonVersion: 3, lessonDraft: edited, questionVersion: 5, approvedQuestionVersion: 5, questionLessonVersion: 3 }), doneRun(1, 4)], { result: { templateId: 'draft-1', version: 2 } });
+
+    async function saveLesson(view: TestRenderer.ReactTestRenderer) {
+      act(() => button(view.root, 'Chỉnh sửa').props.onClick());
+      act(() => view.root.findByProps({ 'aria-label': 'Tiêu đề bài học' }).props.onChange({ target: { value: 'Tổng quan mới' } }));
+      act(() => button(view.root, 'Lưu bài học').props.onClick());
+      await act(async () => { button(view.root, 'Lưu và tạo lại câu hỏi').props.onClick(); await vi.advanceTimersByTimeAsync(0); });
+    }
+
+    it('saves a lesson whose first save timed out once, without a banner, applying it once', async () => {
+      const job = moduleJob([doneRun(0, 5), doneRun(1, 4)]);
+      let sent = 0;
+      let applied = 0;
+      const api = apiFor(job, reviewFor(), {
+        update_module_lesson: () => { if (sent++ === 0) throw new Error('tools/call timeout'); applied += 1; return { job: updated() }; },
+        get_job: () => ({ job }),
+        next_step: () => ({ kind: 'done', job: done() }),
+        get_review: (args) => ({ review: { ...reviewFor(), version: Number(args.version) } }),
+      });
+      const view = await renderPage(api);
+      vi.useFakeTimers();
+      try {
+        await saveLesson(view);
+        expect(text(view.root)).not.toContain(SLOW);
+        expect(text(view.root)).toContain('Đang cập nhật…');
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      } finally {
+        vi.useRealTimers();
+      }
+      await act(async () => { await Promise.resolve(); });
+      expect(count(api, 'update_module_lesson')).toBe(2);
+      expect(applied).toBe(1);
+      expect(text(view.root)).not.toContain(SLOW);
+      expect(view.root.findAll((node) => String(node.props.className ?? '').startsWith('ai-generating-banner'))).toHaveLength(0);
+      expect(api.adminAi).toHaveBeenCalledWith('get_review', { templateId: 'draft-1', version: 2 });
+    });
+
+    it('does not save a lesson again when get_job shows the timed-out save took effect', async () => {
+      const job = moduleJob([doneRun(0, 5), doneRun(1, 4)]);
+      const api = apiFor(job, reviewFor(), {
+        update_module_lesson: () => { throw new Error('tools/call timeout'); },
+        get_job: () => ({ job: updated() }),
+        next_step: () => ({ kind: 'done', job: done() }),
+        get_review: (args) => ({ review: { ...reviewFor(), version: Number(args.version) } }),
+      });
+      const view = await renderPage(api);
+      vi.useFakeTimers();
+      try {
+        await saveLesson(view);
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      } finally {
+        vi.useRealTimers();
+      }
+      await act(async () => { await Promise.resolve(); });
+      expect(count(api, 'update_module_lesson')).toBe(1);
+      expect(count(api, 'next_step')).toBeGreaterThan(0);
+      expect(text(view.root)).not.toContain(SLOW);
+    });
+  });
+
   it('rewrites a lesson with retry_module, and shows a stalled module with Thử lại', async () => {
     const job = moduleJob([doneRun(0, 5), doneRun(1, 4)]);
     const queued = moduleJob([doneRun(0, 5, { lessonState: 'queued', lessonVersion: 3, questionState: 'blocked', questionVersion: 5 }), doneRun(1, 4)], { status: 'running', result: null });
@@ -520,6 +651,139 @@ describe('Xem lại & xuất bản in the generator', () => {
     expect(activeStep(view)).toBe('Kiểm tra độ phủ');
   });
 
+  /** An AI draft saved earlier, as the library opens it: module-approved, its lesson PDFs already checkpointed. */
+  function openedDraft(flags: readonly VerificationFlag[] = []): AdminTemplateDetail {
+    const base = reviewFor(flags);
+    const pdf = (index: number) => ({ id: 'ai-lesson-pdf-ai-mod-' + String(index), title: 'Tài liệu', description: 'Tài liệu bài học PDF.', kind: 'file', required: true, fileId: 'pdf-' + String(index) });
+    return { ...base, jobId: 'template-1', content: { ...base.content!, moduleApproval: { pipelineVersion: 'module_v2', outlineRevision: 3, fingerprint: 'f', materializedFingerprint: 'm', taskCoverage: [] },
+      publication: { pdfs: { 'ai-mod-0': pdf(0), 'ai-mod-1': pdf(1) } } } } as unknown as AdminTemplateDetail;
+  }
+
+  function stubFileReader() {
+    vi.stubGlobal('FileReader', class {
+      result = 'data:application/octet-stream;base64,e30=';
+      onload: (() => void) | null = null;
+      readAsDataURL() { this.onload?.(); }
+    });
+  }
+
+  it('saves a new template as a draft: uploads its lesson PDFs, never publishes or exports JSON, then closes', async () => {
+    const job = moduleJob([doneRun(0, 5), doneRun(1, 4)]);
+    const draft = reviewFor([blockingFlag('ai-mod-1')]);
+    stubFileReader();
+    host.app.uploadFile.mockImplementation(async (file: { fileName: string }) => ({ fileId: 'file-' + file.fileName }));
+    const api = apiFor(job, draft, { update_review: () => ({ review: draft }) });
+    const onClose = vi.fn();
+    const onComplete = vi.fn();
+    const view = await renderPage(api, onClose, onComplete);
+    await act(async () => { footerPrimary(view).props.onClick(); });
+    expect(api.adminTemplates).not.toHaveBeenCalled();
+    expect(actions(api)).not.toContain('begin_publication');
+    const uploads = host.app.uploadFile.mock.calls.map(([file]) => file as { fileName: string; mimeType: string; folderId: string });
+    expect(uploads.map((file) => file.fileName)).toEqual(['lesson-0.pdf', 'lesson-1.pdf']);
+    expect(uploads.every((file) => file.mimeType === 'application/pdf' && file.folderId === 'folder')).toBe(true);
+    const ops = api.adminAi.mock.calls.filter(([action]) => action === 'update_review').flatMap(([, args]) => (args as { ops: { kind: string; moduleId?: string; jsonFileId?: string }[] }).ops);
+    expect(ops.filter((op) => op.kind === 'checkpoint_publication').map((op) => op.moduleId)).toEqual(['ai-mod-0', 'ai-mod-1']);
+    expect(ops.some((op) => op.jsonFileId)).toBe(false);
+    expect(onComplete).toHaveBeenCalledWith('draft');
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(session.has('onboarding:ai:template:room-1')).toBe(false);
+    expect(AI_DRAFT_SAVED_NOTICE).toBe('Đã lưu template vào thư viện ở trạng thái Bản nháp. Mở template để xuất bản khi sẵn sàng.');
+    host.app.uploadFile.mockReset();
+  });
+
+  it('keeps the modal open with Thử lại lưu when saving fails, and finishes on retry', async () => {
+    const job = moduleJob([doneRun(0, 5), doneRun(1, 4)]);
+    const draft = reviewFor();
+    stubFileReader();
+    host.app.uploadFile.mockRejectedValueOnce(new Error('Upload interrupted'))
+      .mockImplementation(async (file: { fileName: string }) => ({ fileId: 'file-' + file.fileName }));
+    const api = apiFor(job, draft, { update_review: () => ({ review: draft }) });
+    const onClose = vi.fn();
+    const onComplete = vi.fn();
+    const view = await renderPage(api, onClose, onComplete);
+    await act(async () => { footerPrimary(view).props.onClick(); });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(text(footerPrimary(view))).toBe('Thử lại lưu');
+    expect(text(view.root)).toContain('Hội nhập nhân viên mới – Công ty ABC');
+    await act(async () => { footerPrimary(view).props.onClick(); });
+    expect(onComplete).toHaveBeenCalledWith('draft');
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(api.adminTemplates).not.toHaveBeenCalled();
+    host.app.uploadFile.mockReset();
+  });
+
+  it('retries Lưu template after a settings change and a failed second PDF upload', async () => {
+    const job = moduleJob([doneRun(0, 5), doneRun(1, 4)]);
+    // The server keeps the draft: settings and PDF checkpoints change it, like the real review service.
+    let server = reviewFor();
+    let revision = 0;
+    const touch = (next: AdminTemplateDetail) => { server = { ...next, updatedAt: 'rev-' + String(++revision) }; return { review: server }; };
+    stubFileReader();
+    let uploads = 0;
+    host.app.uploadFile.mockImplementation(async (file: { fileName: string }) => {
+      if (++uploads === 2) throw new Error('Upload interrupted');
+      return { fileId: 'file-' + file.fileName };
+    });
+    const api = apiFor(job, server, {
+      get_review: () => ({ review: server }),
+      update_review: (args) => {
+        const [op] = args.ops as { kind: string; passingScore?: number; moduleId?: string; resource?: unknown }[];
+        if (args.expectedUpdatedAt !== server.updatedAt) throw Object.assign(new Error('Template changed after this review loaded it.'), { code: 'REVIEW_CONFLICT' });
+        if (op.kind === 'set_settings') return touch({ ...server, passingScore: op.passingScore });
+        if (op.kind === 'checkpoint_publication') {
+          const publication = server.content?.publication ?? { pdfs: {} };
+          return touch({ ...server, content: { ...server.content!, publication: { ...publication, pdfs: { ...publication.pdfs, [op.moduleId!]: op.resource } } } } as AdminTemplateDetail);
+        }
+        return touch(server);
+      },
+    });
+    const onClose = vi.fn();
+    const onComplete = vi.fn();
+    const view = await renderPage(api, onClose, onComplete);
+    act(() => { button(view.root, 'Đạt 70%').props.onClick(); });
+    const popover = view.root.findByProps({ 'aria-label': 'Thiết lập template' });
+    act(() => { popover.findAll((node) => node.type === 'input' && node.props.max === 100)[0].props.onChange({ target: { value: '80' } }); });
+    await act(async () => { footerPrimary(view).props.onClick(); });
+    expect(text(footerPrimary(view))).toBe('Thử lại lưu');
+    expect(server.passingScore).toBe(80);
+    await act(async () => { footerPrimary(view).props.onClick(); });
+    expect(text(view.root)).not.toContain('Template đã thay đổi');
+    expect(onComplete).toHaveBeenCalledWith('draft');
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(uploads).toBe(3);
+    expect(Object.keys(server.content?.publication?.pdfs ?? {})).toEqual(['ai-mod-0', 'ai-mod-1']);
+  });
+
+  it('publishes a draft opened from the library with Xuất bản template, reusing its PDFs and exporting JSON', async () => {
+    const job = moduleJob([doneRun(0, 5), doneRun(1, 4)]);
+    const draft = openedDraft();
+    stubFileReader();
+    host.app.uploadFile.mockResolvedValue({ fileId: 'json-file' });
+    const api = apiFor(job, draft, {
+      get_job: () => ({ job }),
+      begin_publication: (args) => ({ batch: { batchId: 'batch-1', createdBy: 'admin-1', createdAt: 'now',
+        targets: (args.targets as { kind: string; templateId: string; version: number }[]).map((target) => ({ ...target, jobId: 'template-1' })) } }),
+      update_review: () => ({ review: draft }),
+    });
+    api.adminTemplates.mockImplementation(async () => ({ template: { ...draft, status: 'published' } }) as never);
+    const onClose = vi.fn();
+    const onComplete = vi.fn();
+    const view = await renderPage(api, onClose, onComplete, { id: 'draft-1', version: 1 });
+    expect(activeStep(view)).toBe('Xem lại & xuất bản');
+    expect(view.root.findAllByProps({ 'aria-label': 'Xem lại & xuất bản' })).toHaveLength(1);
+    expect(text(footerPrimary(view))).toBe('Xuất bản template');
+    await act(async () => { footerPrimary(view).props.onClick(); });
+    expect(api.adminTemplates).toHaveBeenCalledWith('publish', expect.objectContaining({ templateId: 'draft-1', version: 1 }));
+    // The checkpointed lesson PDFs are reused: the only upload is the JSON export.
+    const uploads = host.app.uploadFile.mock.calls.map(([file]) => file as { mimeType: string });
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0].mimeType).toBe('application/json');
+    expect(onComplete).toHaveBeenCalledWith('published');
+    expect(onClose).toHaveBeenCalledTimes(1);
+    host.app.uploadFile.mockReset();
+  });
+
   it('publishes exactly one target', async () => {
     const job = moduleJob([doneRun(0, 5), doneRun(1, 4)]);
     const draft = { ...reviewFor(), modules: [], content: { ...reviewFor().content!, modules: [] } } as AdminTemplateDetail;
@@ -537,7 +801,7 @@ describe('Xem lại & xuất bản in the generator', () => {
     api.adminTemplates.mockImplementation(async () => ({ template: { ...draft, status: 'published' } }) as never);
     const onClose = vi.fn();
     const onComplete = vi.fn();
-    const view = await renderPage(api, onClose, onComplete);
+    const view = await renderPage(api, onClose, onComplete, { id: 'draft-1', version: 1 });
     await act(async () => { footerPrimary(view).props.onClick(); });
     const begins = api.adminAi.mock.calls.filter(([action]) => action === 'begin_publication');
     expect(begins).toHaveLength(1);

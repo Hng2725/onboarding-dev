@@ -80,6 +80,7 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   PROJECT_BUSY: 'AI của room đang bận. Hãy thử lại sau ít phút.',
   JOB_CALL_MISMATCH: 'Lượt gọi AI không còn khớp. Hãy thử lại.',
   COVERAGE_INCOMPLETE: 'Còn module chưa đủ tài liệu.',
+  AI_PUMP_STALLED: 'AI đã chờ quá lâu mà chưa làm tiếp được. Hãy bấm Thử lại.',
 };
 
 export const TOOL_CALL_TIMEOUT_MESSAGE = 'Máy chủ phản hồi chậm. Hãy bấm Thử lại.';
@@ -92,11 +93,20 @@ export function isToolCallTimeout(error: unknown): boolean {
 /** Codes whose server message, when written in Vietnamese, says more than the generic text. */
 const SPECIFIC_MESSAGE_CODES: ReadonlySet<string> = new Set(['OPERATION_CONFLICT', 'COVERAGE_INCOMPLETE']);
 
+export const TEMPLATE_NOT_DRAFT_MESSAGE = 'Template này không còn ở trạng thái bản nháp nên không thể xuất bản. Hãy tạo hoặc mở bản nháp khác.';
+
+/** The template service refuses to edit or publish a template that is no longer a draft (e.g. archived). */
+function isTemplateNotDraft(code: string | undefined, error: unknown): boolean {
+  return (code === 'TEMPLATE_INVALID' || code === 'TEMPLATE_CONFLICT') && error instanceof Error
+    && /only (?:a )?draft(?: or published)?(?: ai)?(?: templates?)? can be (?:edited|published)/i.test(error.message);
+}
+
 export function vietnameseErrorMessage(error: unknown): string {
   const providerMessage = error instanceof Error ? actionableProviderFailure(error.message) : null;
   if (providerMessage) return providerMessage;
   if (isToolCallTimeout(error)) return TOOL_CALL_TIMEOUT_MESSAGE;
   const code = errorCode(error);
+  if (isTemplateNotDraft(code, error)) return TEMPLATE_NOT_DRAFT_MESSAGE;
   if (code && SPECIFIC_MESSAGE_CODES.has(code) && error instanceof Error && hasVietnameseText(error.message)) {
     return error.message.trim();
   }

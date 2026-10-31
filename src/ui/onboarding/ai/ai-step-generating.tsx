@@ -1,3 +1,4 @@
+import { LoadingOutlined, RedoOutlined } from '@ant-design/icons';
 import type { CSSProperties } from 'react';
 
 import type { AiCallRecord, AiJobRecord, AiModuleDraftRun } from '../../../onboarding/contracts';
@@ -102,13 +103,15 @@ export interface AiStepGeneratingProps {
   readonly stalled: boolean;
   /** A failure the app could not recover from, already in Vietnamese. */
   readonly error: string | null;
+  /** Why nothing is being written right now while the server waits, e.g. for an earlier AI call to stop. */
+  readonly waitStatus?: string | null;
   readonly busy: boolean;
   onRetryModule(moduleLocalId: string, target: 'lesson' | 'questions', expectedVersion: number): void;
   onRetry(): void;
 }
 
 /** Bước 3 — AI tạo nội dung: progress per module, no approvals. */
-export function AiStepGenerating({ job, stalled, error, busy, onRetryModule, onRetry }: AiStepGeneratingProps) {
+export function AiStepGenerating({ job, stalled, error, waitStatus, busy, onRetryModule, onRetry }: AiStepGeneratingProps) {
   const runs = [...activeRuns(job.moduleRuns ?? [])].sort((left, right) => left.outline.order - right.outline.order);
   const percent = generationPercent(runs);
   // A per-module retry only helps when autopilot approves the rewrite; other jobs retry from the banner.
@@ -120,13 +123,15 @@ export function AiStepGenerating({ job, stalled, error, busy, onRetryModule, onR
       {error ? (
         <div className="ai-generating-banner error" role="alert">
           <span>{error}</span>
-          <button className="button button-secondary button-sm" type="button" disabled={busy} onClick={onRetry}>Thử lại</button>
+          <button className="button button-secondary button-sm" type="button" disabled={busy} onClick={onRetry}><RedoOutlined aria-hidden="true" /> Thử lại</button>
         </div>
       ) : stalled && !anyAttention ? (
         <div className="ai-generating-banner warn" role="status">
           <span>AI đang chờ để làm tiếp.</span>
-          <button className="button button-secondary button-sm" type="button" disabled={busy} onClick={onRetry}>Thử lại</button>
+          <button className="button button-secondary button-sm" type="button" disabled={busy} onClick={onRetry}><RedoOutlined aria-hidden="true" /> Thử lại</button>
         </div>
+      ) : waitStatus ? (
+        <p className="ai-generating-wait" role="status"><LoadingOutlined spin aria-hidden="true" /> {waitStatus}</p>
       ) : null}
       <header className="ai-generating-hero">
         <div
@@ -169,7 +174,7 @@ export function AiStepGenerating({ job, stalled, error, busy, onRetryModule, onR
                     type="button"
                     disabled={busy}
                     onClick={() => onRetryModule(run.outline.moduleLocalId, issue.target, issue.expectedVersion)}
-                  >Thử lại</button>
+                  ><RedoOutlined aria-hidden="true" /> Thử lại</button>
                 </div>
               )}
             </li>

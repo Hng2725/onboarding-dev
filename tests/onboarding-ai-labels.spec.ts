@@ -18,6 +18,11 @@ describe('ai labels', () => {
     expect(message).toBe('Không thể áp dụng thao tác này cho bản nháp. Hãy chỉnh sửa trực tiếp module.');
     expect(message).not.toContain('REVIEW_INVALID');
   });
+  it('explains a template that is no longer a draft in Vietnamese', () => {
+    const message = 'Template này không còn ở trạng thái bản nháp nên không thể xuất bản. Hãy tạo hoặc mở bản nháp khác.';
+    expect(vietnameseErrorMessage(Object.assign(new Error('Only draft or published AI templates can be edited.'), { code: 'TEMPLATE_INVALID' }))).toBe(message);
+    expect(vietnameseErrorMessage(Object.assign(new Error('Only a draft can be published.'), { code: 'TEMPLATE_CONFLICT' }))).toBe(message);
+  });
   it('explains an SDK tool-call timeout as a slow server', () => {
     expect(vietnameseErrorMessage(new Error('tools/call timeout'))).toBe('Máy chủ phản hồi chậm. Hãy bấm Thử lại.');
   });

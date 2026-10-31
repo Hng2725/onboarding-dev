@@ -29,6 +29,12 @@
 .ai-generator-panel .button:disabled { cursor: not-allowed; opacity: .45; transform: none; box-shadow: none; }
 .ai-generator-panel .button-ghost { border-color: transparent; color: var(--on-text-soft); background: transparent; box-shadow: none; }
 .ai-generator-panel .button-ghost:hover:not(:disabled) { color: var(--on-text); background: color-mix(in srgb, var(--on-text) 7%, transparent); transform: none; }
+/* Destructive actions (Xóa phiên, Bỏ module): red text on a ghost, a red tint on hover. */
+.ai-generator-panel .button-danger-ghost { border-color: color-mix(in srgb, var(--on-danger) 40%, transparent); color: var(--on-danger); background: transparent; box-shadow: none; }
+.ai-generator-panel .button-danger-ghost:hover:not(:disabled) { border-color: var(--on-danger); background: color-mix(in srgb, var(--on-danger) 10%, transparent); transform: none; }
+/* AI actions (AI viết lại): primary-tinted outline, distinct from the neutral secondary. */
+.ai-generator-panel .button-accent { border-color: color-mix(in srgb, var(--on-primary) 45%, transparent); color: var(--on-primary); background: var(--on-primary-soft); box-shadow: none; }
+.ai-generator-panel .button-accent:hover:not(:disabled) { border-color: var(--on-primary); background: color-mix(in srgb, var(--on-primary) 18%, transparent); transform: none; }
 .ai-generator-panel .button-sm { min-height: 30px; padding: 0 10px; border-radius: 8px; font-size: 13px; }
 
 .ai-generator-panel .ai-workspace-card { border-radius: var(--on-radius-md); box-shadow: none; }
@@ -157,6 +163,8 @@
 .ai-generating-banner span { flex: 1 1 240px; }
 .ai-generating-banner.error { color: var(--on-danger); background: color-mix(in srgb, var(--on-danger) 10%, transparent); }
 .ai-generating-banner.warn { color: var(--on-warning); background: color-mix(in srgb, var(--on-warning) 10%, transparent); }
+.ai-review-opening { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 240px; border-radius: 12px; font-size: 14px; color: var(--on-text-soft); background: color-mix(in srgb, var(--on-text-soft) 6%, transparent); }
+.ai-generating-wait { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--on-text-soft); }
 
 /* Step 4: Xem lại & xuất bản */
 .ai-step-review { display: grid; gap: 16px; min-width: 0; }

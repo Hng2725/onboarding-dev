@@ -1,4 +1,4 @@
-import { LoadingOutlined } from '@ant-design/icons';
+import { EditOutlined, LoadingOutlined, RedoOutlined, RobotOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 
 import type { AiJobRecord, AiModuleDraftRun, VerificationFlag } from '../../../onboarding/contracts';
@@ -178,12 +178,12 @@ export function AiStepReview({
       {error ? (
         <div className="ai-generating-banner error" role="alert">
           <span>{error}</span>
-          {onRetry && <button className="button button-secondary button-sm" type="button" disabled={busy} onClick={onRetry}>Thử lại</button>}
+          {onRetry && <button className="button button-secondary button-sm" type="button" disabled={busy} onClick={onRetry}><RedoOutlined aria-hidden="true" /> Thử lại</button>}
         </div>
       ) : stalled && !anyAttention ? (
         <div className="ai-generating-banner warn" role="status">
           <span>AI đang chờ để làm tiếp.</span>
-          {onRetry && <button className="button button-secondary button-sm" type="button" disabled={busy} onClick={onRetry}>Thử lại</button>}
+          {onRetry && <button className="button button-secondary button-sm" type="button" disabled={busy} onClick={onRetry}><RedoOutlined aria-hidden="true" /> Thử lại</button>}
         </div>
       ) : null}
       <div className="ai-final-review-layout">
@@ -248,7 +248,7 @@ export function AiStepReview({
                   type="button"
                   disabled={busy}
                   onClick={() => onRetryModule(moduleLocalId, issue.target, issue.expectedVersion)}
-                >Thử lại</button>
+                ><RedoOutlined aria-hidden="true" /> Thử lại</button>
               )}
             </div>
           )}
@@ -308,14 +308,14 @@ export function AiStepReview({
                 type="button"
                 disabled={locked || drafting || (tab === 'questions' && (!lessonApproved || questionDraft.length === 0))}
                 onClick={() => startEditing()}
-              >Chỉnh sửa</button>
+              ><EditOutlined aria-hidden="true" /> Chỉnh sửa</button>
               {tab === 'lesson' && (
                 <button
-                  className="button button-ghost button-sm"
+                  className="button button-accent button-sm"
                   type="button"
                   disabled={locked || drafting}
                   onClick={() => setConfirmingRewrite(true)}
-                >AI viết lại</button>
+                ><RobotOutlined aria-hidden="true" /> AI viết lại</button>
               )}
             </div>
           ) : tab === 'lesson' && lesson ? (

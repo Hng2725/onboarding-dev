@@ -1,4 +1,4 @@
-import type { AiJobRecord, AiModuleDraftRun } from '../../../onboarding/contracts';
+import type { AiJobRecord, AiModuleDraftRun, AiProvider } from '../../../onboarding/contracts';
 
 export type QuestionRecoveryDecision =
   | { readonly kind: 'retry_native'; readonly moduleLocalId: string; readonly expectedVersion: number }
@@ -11,7 +11,8 @@ interface QuestionRecoveryOptions {
   readonly initialJob: AiJobRecord;
   readonly nativeAvailable: boolean;
   readonly initialPreferNative: boolean;
-  readonly pumpOnce: (job: AiJobRecord, preferNative: boolean) => Promise<AiJobRecord>;
+  /** `recoveringModuleLocalId`: the module whose questions this Native pass retries, if any. */
+  readonly pumpOnce: (job: AiJobRecord, preferNative: boolean, recoveringModuleLocalId?: string) => Promise<AiJobRecord>;
   readonly runAction: (
     action: RecoveryAction,
     args: Record<string, unknown>,
@@ -26,6 +27,21 @@ export function shouldUseNativeForPump(
   if (explicitlyPreferred) return true;
   return !(job.kind === 'template' && job.pipelineVersion === 'module_v2')
     && persistedPreference;
+}
+
+/**
+ * The provider of the next pump pass. Native only when the host grants it, it is chosen, and no
+ * Native attempt still awaits cleanup proof; a blocked Native pass runs on Sandbox instead of failing.
+ */
+export function choosePumpProvider(input: {
+  readonly job: AiJobRecord;
+  readonly explicitlyPreferred: boolean;
+  readonly persistedPreference: boolean;
+  readonly nativeAvailable: boolean;
+  readonly nativeBlocked: boolean;
+}): AiProvider {
+  if (!input.nativeAvailable || input.nativeBlocked) return 'sandbox';
+  return shouldUseNativeForPump(input.job, input.explicitlyPreferred, input.persistedPreference) ? 'native_chat' : 'sandbox';
 }
 
 export function shouldBoundNativeQuestionPoll(
@@ -123,6 +139,7 @@ export async function pumpWithQuestionRecovery(
 ): Promise<AiJobRecord> {
   let current = options.initialJob;
   let preferNative = options.initialPreferNative;
+  let recovering: string | undefined;
 
   // A refreshed modal can already contain the completed Native failure. Recover it
   // before selecting a gateway so a stale cleanup fence cannot block the safe fallback.
@@ -133,12 +150,13 @@ export async function pumpWithQuestionRecovery(
 
   // At most two provider passes are allowed: the current Sandbox pass and one Native pass.
   for (let pass = 0; pass < 2; pass += 1) {
-    current = await options.pumpOnce(current, preferNative);
+    current = await options.pumpOnce(current, preferNative, recovering);
     const decision = planQuestionRecovery(current, options.nativeAvailable);
     if (!decision) return current;
     current = await applyRecovery(options, decision);
     if (decision.kind === 'use_fallback') return current;
     preferNative = true;
+    recovering = decision.moduleLocalId;
   }
   return current;
 }

@@ -203,6 +203,28 @@ describe('module publication gate', () => {
       ops: [{ kind: 'checkpoint_publication', jsonFileId: 'complete-json' }] });
     expect(await recreated.listIncompletePublications(admin)).toEqual([]);
   });
+  it.each([true, false])('retires a batch once its template is archived (JSON exported: %s), so it is never listed again', async (exported) => {
+    const { templates, review, draft, store } = await setup();
+    const batch = await review.beginPublication(admin, { targets: [{ kind: 'normal' as const, templateId: draft.id, version: draft.version }] });
+    expect(await review.listIncompletePublications(admin)).toEqual([batch]);
+    const published = await templates.publish(admin, draft.id, draft.version);
+    if (exported) await review.updateReview(admin, { templateId: draft.id, version: draft.version, expectedUpdatedAt: published.updatedAt, ops: [{ kind: 'checkpoint_publication', jsonFileId: 'json-1' }] });
+    await templates.archive(admin, draft.id, draft.version);
+    expect(await review.listIncompletePublications(admin)).toEqual([]);
+    const row = (await store.query(admin.roomId, 'onboarding_ai_publications', { filter: { batchId: batch.batchId } })).records[0];
+    expect(row).toMatchObject({ retirementReason: 'finished' });
+    expect(await createAiReviewService(store, createTemplateService(store)).listIncompletePublications(admin)).toEqual([]);
+  });
+
+  it('treats a published template with its JSON as finished even when its settings differ from the batch', async () => {
+    const { templates, review, draft } = await setup();
+    await review.beginPublication(admin, { targets: [{ kind: 'normal' as const, templateId: draft.id, version: draft.version,
+      settings: { passingScore: 95, maxAttemptsPerModule: 4, learningMode: 'free' as const } }] });
+    const published = await templates.publish(admin, draft.id, draft.version);
+    await review.updateReview(admin, { templateId: draft.id, version: draft.version, expectedUpdatedAt: published.updatedAt, ops: [{ kind: 'checkpoint_publication', jsonFileId: 'json-1' }] });
+    expect(await review.listIncompletePublications(admin)).toEqual([]);
+  });
+
   it('reuses settings revisions with refreshed approval fingerprints and leaves published v1 immutable', async () => {
     const store = new MemoryOnboardingStore();
     await seedAiSource(store);
@@ -289,6 +311,40 @@ describe('module publication gate', () => {
     });
     await expect(templates.publish(admin, draft.id, draft.version)).rejects.toMatchObject({ code: 'TEMPLATE_INVALID' });
     expect((await templates.getAdminDetail(admin, draft.id, draft.version)).status).toBe('draft');
+  });
+
+  it('never reuses a saved lesson PDF once a module edit re-materializes the draft', async () => {
+    const store = new MemoryOnboardingStore();
+    await seedAiSource(store);
+    const job = approvedModuleJob();
+    const row = await store.create(admin.roomId, 'onboarding_ai_jobs', { ...job });
+    const templates = createTemplateService(store);
+    const review = createAiReviewService(store, templates);
+    // Lưu template: the draft gets its lesson PDFs checkpointed and attached, but stays a draft.
+    let saved = await materializeModuleTemplate(store, templates, admin, job.jobId);
+    for (const module of saved.modules) {
+      const resource: TemplateResource = { id: 'ai-lesson-pdf-' + module.id, title: module.title, kind: 'file', required: true, fileId: 'pdf-' + module.id };
+      saved = await review.updateReview(admin, { templateId: saved.id, version: saved.version, expectedUpdatedAt: saved.updatedAt,
+        ops: [{ kind: 'checkpoint_publication', moduleId: module.id, resource }] });
+      saved = await review.updateReview(admin, { templateId: saved.id, version: saved.version, expectedUpdatedAt: saved.updatedAt,
+        ops: [{ kind: 'upsert_generated_resource', moduleId: module.id, resource }] });
+    }
+    expect(Object.keys(saved.content?.publication?.pdfs ?? {})).toHaveLength(saved.modules.length);
+    // Reopened from the library, the Admin edits the first lesson; autopilot approves it again.
+    await store.update(admin.roomId, 'onboarding_ai_jobs', String(row.id), {
+      moduleRuns: job.moduleRuns!.map((run, index) => index === 0 ? {
+        ...run, lessonVersion: 3, approvedLessonVersion: 3, questionLessonVersion: 3,
+        lessonDraft: { ...run.lessonDraft!, title: run.lessonDraft!.title + ' (đã sửa)' },
+      } : run),
+    });
+    const rebuilt = await materializeModuleTemplate(store, templates, admin, job.jobId);
+    expect(rebuilt).toMatchObject({ id: saved.id, version: saved.version, status: 'draft' });
+    expect(rebuilt.modules[0].title).toContain('(đã sửa)');
+    const fileIds = [
+      ...Object.values(rebuilt.content?.publication?.pdfs ?? {}),
+      ...rebuilt.modules.flatMap((module) => module.resources),
+    ].map((resource) => resource.fileId);
+    expect(fileIds).not.toContain('pdf-' + saved.modules[0].id);
   });
 
   it('requires module edits to be approved again and permits artifact/settings updates', async () => {

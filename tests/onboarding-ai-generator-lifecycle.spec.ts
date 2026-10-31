@@ -1,5 +1,6 @@
 import { createElement } from 'react';
-import TestRenderer, { act } from 'react-test-renderer';
+import TestRenderer, { act, type ReactTestInstance } from 'react-test-renderer';
+import { DeleteOutlined } from '@ant-design/icons';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AiJobRecord } from '../src/onboarding/contracts';
@@ -47,6 +48,12 @@ vi.mock('../src/ui/onboarding/roomfiles', async (importOriginal) => ({
 
 import { AiGeneratorPage, createAiPublishDependencies } from '../src/ui/onboarding/ai/ai-generator';
 
+/** A button's visible text; icons render no text of their own. */
+function label(node: ReactTestInstance): string {
+  const walk = (current: ReactTestInstance): string => current.children.map((child) => typeof child === 'string' ? child : walk(child)).join('');
+  return walk(node).trim();
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -59,8 +66,8 @@ function activeStepLabel(view: TestRenderer.ReactTestRenderer): string {
     .findByProps({ className: 'ai-stepper-label' }).children.join('');
 }
 
-const buttonLabelled = (view: TestRenderer.ReactTestRenderer, label: string) =>
-  view.root.findAllByType('button').filter((button) => button.children.join('') === label);
+const buttonLabelled = (view: TestRenderer.ReactTestRenderer, name: string) =>
+  view.root.findAllByType('button').filter((button) => label(button) === name);
 
 /** Xóa phiên lives on step 0 only: from Xem lại & xuất bản go back to coverage, then to the sources. */
 async function backToSources(view: TestRenderer.ReactTestRenderer): Promise<void> {
@@ -184,7 +191,7 @@ describe('AI generator lifecycle', () => {
     expect(closed).not.toHaveBeenCalled();
     expect(uploads).toHaveLength(1);
     failUpload = false;
-    const publish = view.root.findAllByType('button').find((button) => button.children.join('').includes('Xuất bản template'))!;
+    const publish = view.root.findAllByType('button').find((button) => label(button).includes('Xuất bản template'))!;
     expect(publish.props.disabled).toBe(false);
     await act(async () => { publish.props.onClick(); });
     expect(closed).toHaveBeenCalledTimes(1);
@@ -235,11 +242,73 @@ describe('AI generator lifecycle', () => {
     }) };
     let view!: TestRenderer.ReactTestRenderer;
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: closed, onComplete: () => undefined })); });
-    expect(view.root.findAllByType('button').some((button) => button.children.join('').includes('Xuất bản template'))).toBe(true);
+    expect(view.root.findAllByType('button').some((button) => label(button).includes('Xuất bản template'))).toBe(true);
     expect(closed).not.toHaveBeenCalled();
     expect(JSON.stringify(view.toJSON())).toContain('Đã hoàn tất');
     view.unmount(); vi.unstubAllGlobals();
   });
+  describe('a publication batch left from an earlier session', () => {
+    const batchFor = (templateId: string) => ({ batchId: 'old-batch', createdBy: 'admin-1', createdAt: '2026-10-28T09:00:00.000Z',
+      targets: [{ kind: 'normal', jobId: 'template-1', templateId, version: 1 }] });
+    function apiWith(review: AdminTemplateDetail) {
+      const job = { ...approvedModuleJob(), jobId: 'template-1', roomId: 'room-1', status: 'completed' as const, result: { templateId: review.id, version: 1 } };
+      return { adminAi: vi.fn(async (action: string) => {
+        if (action === 'list_sources') return { sources: [] };
+        if (action === 'list_jobs') return { jobs: [inventoryJob, job], publicationBatches: [batchFor(review.id)] };
+        if (action === 'get_review') return { review };
+        throw new Error('Unexpected action: ' + action);
+      }) };
+    }
+    async function open(review: AdminTemplateDetail) {
+      vi.stubGlobal('sessionStorage', { getItem: () => null, setItem: () => undefined, removeItem: () => undefined });
+      let view!: TestRenderer.ReactTestRenderer;
+      await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: apiWith(review) as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
+      return view;
+    }
+    const primary = (view: TestRenderer.ReactTestRenderer) => label(view.root.findByType('footer').findAllByProps({ className: 'button button-primary' })[0]);
+
+    it('opens a fresh session when the batch template is already published with its JSON', async () => {
+      const base = materializedModuleReview();
+      const view = await open({ ...base, status: 'published', content: { ...base.content!, publication: { pdfs: {}, jsonFileId: 'json-1' } } });
+      expect(activeStepLabel(view)).toBe('Nguồn & loại');
+      expect(primary(view)).toBe('Phân tích tài liệu');
+      view.unmount(); vi.unstubAllGlobals();
+    });
+
+    it('opens a fresh session when the batch template was archived', async () => {
+      const base = materializedModuleReview();
+      const view = await open({ ...base, status: 'archived', content: { ...base.content!, publication: { pdfs: {}, jsonFileId: 'json-1' } } });
+      expect(activeStepLabel(view)).toBe('Nguồn & loại');
+      expect(primary(view)).toBe('Phân tích tài liệu');
+      view.unmount(); vi.unstubAllGlobals();
+    });
+
+    it('still restores a batch whose draft is genuinely being published', async () => {
+      const view = await open(materializedModuleReview());
+      expect(activeStepLabel(view)).toBe('Xem lại & xuất bản');
+      expect(primary(view)).toBe('Xuất bản template');
+      view.unmount(); vi.unstubAllGlobals();
+    });
+  });
+
+  it('explains a publish step rejected because the template is no longer a draft in Vietnamese, keeping the template prefix', async () => {
+    const review = materializedModuleReview();
+    const notDraft = () => Object.assign(new Error('Only draft or published AI templates can be edited.'), { code: 'TEMPLATE_INVALID' });
+    const api = { adminAi: vi.fn(async (action: string) => {
+      if (action === 'get_review') return { review };
+      throw notDraft();
+    }), adminTemplates: vi.fn(async () => { throw notDraft(); }) };
+    const progress: string[] = [];
+    const dependencies = createAiPublishDependencies({ roomId: 'room-1', app: host.apps[0] as never, api: api as never,
+      settingsByKind: { normal: { passingScore: 90, maxAttemptsPerModule: 2, learningMode: 'sequential' } },
+      onProgress: (item) => { if (item.error) progress.push(item.error); } });
+    const message = 'Approved first: Template này không còn ở trạng thái bản nháp nên không thể xuất bản. Hãy tạo hoặc mở bản nháp khác.';
+    await expect(dependencies.prepareResources({ kind: 'normal', review, phase: 'idle', jsonExported: false })).rejects.toThrow(message);
+    await expect(dependencies.publish(review)).rejects.toThrow(message);
+    expect(progress).toEqual([message, message]);
+    expect(progress.join(' ')).not.toMatch(/Only draft/);
+  });
+
   it('opens a final materialized review with its publish action in the same step', async () => {
     const storage = new Map([['onboarding:ai:template:room-1:normal', 'template-1'], ['onboarding:ai:selection:room-1', 'both']]);
     vi.stubGlobal('sessionStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
@@ -256,13 +325,14 @@ describe('AI generator lifecycle', () => {
     expect(activeStepLabel(view)).toBe('Xem lại & xuất bản');
     const publish = view.root.findByType('footer').findAllByProps({ className: 'button button-primary' });
     expect(publish).toHaveLength(1);
-    expect(publish[0].children.join('')).toBe('Xuất bản template');
-    expect(view.root.findAllByType('button').some((button) => button.children.join('').includes('Template 2'))).toBe(false);
+    // A new session saves its template as a draft; it is published once opened from the library.
+    expect(label(publish[0])).toBe('Lưu template');
+    expect(view.root.findAllByType('button').some((button) => label(button).includes('Template 2'))).toBe(false);
     // The module job drives the review: content is edited through it, never through the old block editor.
     expect(view.root.findAllByProps({ 'aria-label': 'Sửa khối nội dung' })).toHaveLength(0);
     expect(view.root.findAllByProps({ 'aria-label': 'Xem lại & xuất bản' })).toHaveLength(1);
-    expect(view.root.findAllByType('button').some((button) => button.children.join('') === 'Chỉnh sửa')).toBe(true);
-    expect(view.root.findAllByType('button').some((button) => button.children.join('') === 'Chỉnh sửa module')).toBe(false);
+    expect(view.root.findAllByType('button').some((button) => label(button) === 'Chỉnh sửa')).toBe(true);
+    expect(view.root.findAllByType('button').some((button) => label(button) === 'Chỉnh sửa module')).toBe(false);
     expect(api.adminAi.mock.calls.some(([action]) => action === 'start_job')).toBe(false);
     // The legacy per-kind and selection keys migrate to the single template key.
     expect(storage.get('onboarding:ai:template:room-1')).toBe('template-1');
@@ -300,7 +370,7 @@ describe('AI generator lifecycle', () => {
 
     // An opened AI draft is edited in place, through its own job: no detour to step 3 or the outline.
     expect(api.adminAi).toHaveBeenCalledWith('get_job', { jobId: 'template-1' });
-    await act(async () => { view.root.findAllByType('button').find((button) => button.children.join('') === 'Chỉnh sửa')!.props.onClick(); });
+    await act(async () => { view.root.findAllByType('button').find((button) => label(button) === 'Chỉnh sửa')!.props.onClick(); });
     expect(activeStepLabel(view)).toBe('Xem lại & xuất bản');
     expect(view.root.findByProps({ 'aria-label': 'Tiêu đề bài học' }).props.value).toBe(job.moduleRuns![0].lessonDraft!.title);
     expect(JSON.stringify(view.toJSON())).not.toContain('Kiểm tra lộ trình đề xuất');
@@ -395,9 +465,9 @@ describe('AI generator lifecycle', () => {
 
     // The failed plan opens on the coverage step with a retry; the restored role profile lives on step 1.
     const [retryButton] = renderer.root.findByType('footer').findAllByProps({ className: 'button button-primary' });
-    expect(retryButton.children.join('')).toBe('Thử lại');
+    expect(label(retryButton)).toBe('Thử lại');
     expect(retryButton.props.disabled).toBe(false);
-    act(() => renderer.root.findAllByType('button').find((button) => button.children.join('') === '← Quay lại')!.props.onClick());
+    act(() => renderer.root.findAllByType('button').find((button) => label(button) === '← Quay lại')!.props.onClick());
     const textarea = renderer.root.findByType('textarea');
     expect(textarea.props.value).toBe(failedTemplateJob.roleProfile?.responsibilities.join('\n'));
     expect(renderer.root.findAllByType('select')).toHaveLength(0);
@@ -480,7 +550,7 @@ it('reopens a completed module job without routing to legacy review', async () =
   const api = { adminAi: vi.fn(async (action: string) => { if (action === 'list_sources') return { sources: [] }; if (action === 'list_jobs') return { jobs: [inventoryJob, job] }; throw new Error('Unexpected action: ' + action); }) };
   let view!: TestRenderer.ReactTestRenderer;
   await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-  expect(view.root.findAllByType('button').some((button) => button.children.join('') === 'Xem lại template')).toBe(true);
+  expect(view.root.findAllByType('button').some((button) => label(button) === 'Xem lại template')).toBe(true);
   expect(api.adminAi).not.toHaveBeenCalledWith('get_review', expect.anything());
   view.unmount(); vi.unstubAllGlobals();
 });
@@ -503,13 +573,13 @@ it('restores an approved running module job directly in AI tạo nội dung, one
   expect(activeStepLabel(view)).toBe('AI tạo nội dung');
   const titles = view.root.findAll((node) => node.props.className === 'ai-generating-title').map((node) => node.children.join(''));
   expect(titles).toEqual(['First', 'Second']);
-  expect(view.root.findAllByType('button').filter((button) => button.children.join('').includes('Duyệt'))).toHaveLength(0);
+  expect(view.root.findAllByType('button').filter((button) => label(button).includes('Duyệt'))).toHaveLength(0);
   view.unmount(); vi.unstubAllGlobals();
 });
 
 const usableCatalog = { sources: [{ sourceId: 'source-1', fileName: 'Guide.pdf', sections: [{ id: 's', headingPath: ['Hướng dẫn'], usable: true }] }] };
-const footerButton = (view: TestRenderer.ReactTestRenderer, label: string) => view.root.findByType('footer').findAllByType('button')
-  .find((item) => item.children.join('').endsWith(label))!;
+const footerButton = (view: TestRenderer.ReactTestRenderer, name: string) => view.root.findByType('footer').findAllByType('button')
+  .find((item) => label(item).endsWith(name))!;
 
 it('moves to AI tạo nội dung after the server confirms outline approval and starts the module pump', async () => {
   const storage = new Map<string, string>([['onboarding:ai:template:room-1:normal', 'template-1']]);
@@ -590,7 +660,7 @@ it('resumes an interrupted autopilot module job by itself on reopen, exactly onc
   // The pump stalled without progress: two idle passes, then it is not restarted in a loop.
   expect(api.adminAi.mock.calls.filter(([action]) => action === 'next_step')).toHaveLength(2);
   expect(api.adminAi.mock.calls.some(([action]) => action === 'start_job' || action === 'cancel_job' || action === 'retry_module' || action === 'enable_autopilot')).toBe(false);
-  expect(view.root.findAllByType('button').some((item) => item.children.join('').includes('Tiếp tục xử lý'))).toBe(false);
+  expect(view.root.findAllByType('button').some((item) => label(item).includes('Tiếp tục xử lý'))).toBe(false);
   view.unmount(); vi.unstubAllGlobals();
 });
 
@@ -708,11 +778,16 @@ describe('AI generator reset UI', () => {
     let view!: TestRenderer.ReactTestRenderer;
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
 
-    const reset = view.root.findAllByType('button').find((button) => button.children.join('') === 'Xóa phiên')!;
+    const reset = view.root.findAllByType('button').find((button) => label(button) === 'Xóa phiên')!;
     expect(reset).toBeDefined();
+    // A destructive action reads as one: red ghost with a delete icon, its name still the visible text.
+    expect(reset.props.className).toContain('button-danger-ghost');
+    const resetIcons = reset.findAllByType(DeleteOutlined);
+    expect(resetIcons).toHaveLength(1);
+    expect(resetIcons[0].props['aria-hidden']).toBe('true');
     act(() => reset.props.onClick());
     expect(view.root.findByProps({ 'aria-labelledby': 'confirm-title' })).toBeDefined();
-    act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Hủy')!.props.onClick());
+    act(() => view.root.findAllByType('button').find((button) => label(button) === 'Hủy')!.props.onClick());
     expect(activeStepLabel(view)).toBe('Nguồn & loại');
     expect(api.adminAi.mock.calls.map(([action]) => action)).toEqual(['list_sources', 'list_jobs']);
     view.unmount();
@@ -724,7 +799,7 @@ describe('AI generator reset UI', () => {
       throw new Error('Unexpected action: ' + action);
     }) };
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: reviewApi as never, initialTemplate: { id: existing.id, version: existing.version }, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-    expect(view.root.findAllByType('button').some((button) => button.children.join('') === 'Xóa phiên')).toBe(false);
+    expect(view.root.findAllByType('button').some((button) => label(button) === 'Xóa phiên')).toBe(false);
     view.unmount();
   });
 
@@ -769,9 +844,9 @@ describe('AI generator reset UI', () => {
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
     expect(activeStepLabel(view)).toBe('Xem lại & xuất bản');
     await backToSources(view);
-    act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Xóa phiên')!.props.onClick());
-    act(() => view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => button.children.join('') === 'Xóa dữ liệu')!.props.onClick());
-    const deleting = view.root.findAllByType('button').find((button) => button.children.join('').includes('Đang xóa…'))!;
+    act(() => view.root.findAllByType('button').find((button) => label(button) === 'Xóa phiên')!.props.onClick());
+    act(() => view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => label(button) === 'Xóa dữ liệu')!.props.onClick());
+    const deleting = view.root.findAllByType('button').find((button) => label(button).includes('Đang xóa…'))!;
     expect(deleting.props.disabled).toBe(true);
 
     await act(async () => { deletion.resolve(); await Promise.resolve(); await Promise.resolve(); });
@@ -802,10 +877,10 @@ describe('AI generator reset UI', () => {
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
     expect(activeStepLabel(view)).toBe('Kiểm tra độ phủ');
     // Xóa phiên lives on step 0 only; the coverage step goes back first.
-    expect(view.root.findAllByType('button').some((button) => button.children.join('') === 'Xóa phiên')).toBe(false);
-    act(() => view.root.findAllByType('button').find((button) => button.children.join('') === '← Quay lại')!.props.onClick());
-    act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Xóa phiên')!.props.onClick());
-    await act(async () => { view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => button.children.join('') === 'Xóa dữ liệu')!.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
+    expect(view.root.findAllByType('button').some((button) => label(button) === 'Xóa phiên')).toBe(false);
+    act(() => view.root.findAllByType('button').find((button) => label(button) === '← Quay lại')!.props.onClick());
+    act(() => view.root.findAllByType('button').find((button) => label(button) === 'Xóa phiên')!.props.onClick());
+    await act(async () => { view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => label(button) === 'Xóa dữ liệu')!.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
 
     expect(activeStepLabel(view)).toBe('Nguồn & loại');
     expect(JSON.stringify(view.toJSON())).toContain('Không thể hoàn tất yêu cầu AI.');
@@ -822,10 +897,10 @@ describe('AI generator reset UI', () => {
     }), adminTemplates: vi.fn() };
     let view!: TestRenderer.ReactTestRenderer;
     await act(async () => { view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined })); });
-    act(() => view.root.findAllByType('button').find((button) => button.children.join('').includes('Thêm ghi chú văn bản'))!.props.onClick());
+    act(() => view.root.findAllByType('button').find((button) => label(button).includes('Thêm ghi chú văn bản'))!.props.onClick());
     expect(view.root.findAllByType('textarea')).toHaveLength(1);
-    act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Xóa phiên')!.props.onClick());
-    await act(async () => { view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => button.children.join('') === 'Xóa dữ liệu')!.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
+    act(() => view.root.findAllByType('button').find((button) => label(button) === 'Xóa phiên')!.props.onClick());
+    await act(async () => { view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => label(button) === 'Xóa dữ liệu')!.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
 
     expect(view.root.findAllByType('textarea')).toHaveLength(0);
     expect(JSON.stringify(view.toJSON())).toContain('guide.pdf');
@@ -857,8 +932,8 @@ describe('AI generator reset UI', () => {
     expect(activeStepLabel(view)).toBe('Xem lại & xuất bản');
 
     await backToSources(view);
-    act(() => view.root.findAllByType('button').find((button) => button.children.join('') === 'Xóa phiên')!.props.onClick());
-    await act(async () => { view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => button.children.join('') === 'Xóa dữ liệu')!.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
+    act(() => view.root.findAllByType('button').find((button) => label(button) === 'Xóa phiên')!.props.onClick());
+    await act(async () => { view.root.findByProps({ 'aria-labelledby': 'confirm-title' }).findAllByType('button').find((button) => label(button) === 'Xóa dữ liệu')!.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
 
     expect(reviewLoads).toBe(2);
     expect(api.adminTemplates).not.toHaveBeenCalled();
@@ -878,7 +953,7 @@ describe('AI generator reset UI', () => {
       view = TestRenderer.create(createElement(AiGeneratorPage, { api: api as never, canGenerateWithAi: true, onClose: () => undefined, onComplete: () => undefined }));
       await Promise.resolve();
     });
-    const resetButton = () => view.root.findAllByType('button').find((button) => button.children.join('') === 'Xóa phiên')!;
+    const resetButton = () => view.root.findAllByType('button').find((button) => label(button) === 'Xóa phiên')!;
     expect(resetButton().props.disabled).toBe(true);
 
     await act(async () => { jobs.resolve({ jobs: [] }); await Promise.resolve(); await Promise.resolve(); });
